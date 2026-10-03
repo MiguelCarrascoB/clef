@@ -6,43 +6,15 @@ import asyncio
 import base64
 import io
 import json
-import sys
-import types
 from typing import Any
 
 import pytest
-
-try:  # engine.py is written by another module owner; fall back to a stub of the contract
-    import engine as _engine  # noqa: F401
-except Exception:  # pragma: no cover
-    stub = types.ModuleType("engine")
-
-    class EngineNotReady(RuntimeError): ...
-
-    class InputTooLarge(ValueError): ...
-
-    class GpuOutOfMemory(RuntimeError): ...
-
-    class Engine:  # noqa: D101
-        def __init__(self, cfg: Any, stats: Any, loader: Any = None) -> None:
-            self.status, self.error, self.load_seconds = "loading", None, None
-
-        def start(self) -> None: ...
-        def shutdown(self) -> None: ...
-
-    stub.EngineNotReady, stub.InputTooLarge, stub.GpuOutOfMemory, stub.Engine = (
-        EngineNotReady,
-        InputTooLarge,
-        GpuOutOfMemory,
-        Engine,
-    )
-    sys.modules["engine"] = stub
-
-from config import Config
-from engine import EngineNotReady, GpuOutOfMemory, InputTooLarge
 from fastapi.testclient import TestClient
-from main import create_app, sse_events
 from PIL import Image
+
+from clef_server.config import Config
+from clef_server.engine import EngineNotReady, GpuOutOfMemory, InputTooLarge
+from clef_server.main import create_app, sse_events
 
 GOOD = {
     "state": "Checkout errors",

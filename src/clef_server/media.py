@@ -20,8 +20,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import numpy as np
-from config import Config
 from PIL import Image, ImageOps
+
+from .config import Config
 
 log = logging.getLogger("clef.media")
 

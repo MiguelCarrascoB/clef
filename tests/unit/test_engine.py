@@ -14,8 +14,16 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from config import Config
-from engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge, bucket_for, pad_batch_right
+
+from clef_server.config import Config
+from clef_server.engine import (
+    Engine,
+    EngineNotReady,
+    GpuOutOfMemory,
+    InputTooLarge,
+    bucket_for,
+    pad_batch_right,
+)
 
 REAL_MODEL = (
     Path(os.environ.get("CLEF_MODEL_PATH", Path.home() / "models" / "clef-flash")) / "joint_schema_model.py"

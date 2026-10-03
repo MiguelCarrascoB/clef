@@ -6,9 +6,10 @@ import copy
 from typing import Any
 
 import pytest
-from config import Config
 from pydantic import ValidationError
-from schemas import BatchRequest, SystemOneRequest, check_batch_size, check_limits, format_errors
+
+from clef_server.config import Config
+from clef_server.schemas import BatchRequest, SystemOneRequest, check_batch_size, check_limits, format_errors
 
 GOOD: dict[str, Any] = {
     "state": "hello",

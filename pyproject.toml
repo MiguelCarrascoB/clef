@@ -18,7 +18,7 @@ dev = ["pytest", "pytest-asyncio", "ruff", "httpx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 asyncio_mode = "strict"
 markers = ["gpu: needs a live server / GPU (tests/integration)"]
 addopts = "-ra"
@@ -38,4 +38,4 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 "tests/conftest.py" = ["E402"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["clef_client"]
+known-first-party = ["clef_client", "clef_server"]

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from config import Config
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .config import Config
 
 DEFAULT_MODEL = "clef-flash"
 

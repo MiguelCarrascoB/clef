@@ -1,6 +1,6 @@
-"""Clef-flash server v2 - SystemOne decision API served locally (AMD ROCm / WSL2).
+"""Clef-flash server v3 - SystemOne decision + classification API served locally (CUDA, ROCm, MPS or CPU).
 
-See docs/ARCHITECTURE.md for the API contract. Run:  python server/main.py   (single worker, one GPU thread).
+See docs/ARCHITECTURE.md for the API contract. Run: clef serve (one uvicorn worker, one GPU thread).
 
   POST /v1/systemone  {model?, state, questions, images?, videos?} -> {model, answers, usage, timing}
   POST /v1/batch      {"batch": [<systemone request>, ...]}        -> {batch_ms, results}
@@ -21,16 +21,19 @@ from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
-import config as config_mod
 import uvicorn
-from config import VERSION, Config
-from engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from media import MediaError, load_media
-from schemas import (
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from . import config as config_mod
+from .config import VERSION, Config
+from .engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge
+from .media import MediaError, load_media
+from .schemas import (
     BatchRequest,
     BatchResponse,
     ErrorBody,
@@ -40,9 +43,7 @@ from schemas import (
     check_limits,
     format_errors,
 )
-from starlette.concurrency import run_in_threadpool
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from stats import Stats
+from .stats import Stats
 
 log = logging.getLogger("clef")
 TRACKED = {"/v1/systemone", "/v1/batch"}
@@ -434,8 +435,11 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+def run(cfg: Config | None = None) -> None:
+    """Serve in the foreground: ONE uvicorn worker (one model per process)."""
+    cfg = cfg or config_mod.load()
+    uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port, workers=1)
+
 
 if __name__ == "__main__":
-    _cfg: Config = app.state.cfg
-    uvicorn.run(app, host=_cfg.host, port=_cfg.port, workers=1)
+    run()

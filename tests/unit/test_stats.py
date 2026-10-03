@@ -6,7 +6,7 @@ import asyncio
 import threading
 import time
 
-from stats import HIST_EDGES, Stats
+from clef_server.stats import HIST_EDGES, Stats
 
 
 def req(ms: float, status: int = 200, **kw):

@@ -1,6 +1,1 @@
-"""Make the flat `server/` modules importable as top-level modules (config, schemas, engine, ...)."""
-
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
+"""Shared pytest setup. The package is imported from src/ (pyproject sets pythonpath)."""

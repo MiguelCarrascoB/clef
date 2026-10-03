@@ -8,12 +8,13 @@ import os
 import tempfile
 
 import imageio.v3 as iio
-import media
 import numpy as np
 import pytest
-from config import Config
-from media import MediaError, decode_data_url, detect_container, load_bytes, load_media
 from PIL import Image
+
+from clef_server import media
+from clef_server.config import Config
+from clef_server.media import MediaError, decode_data_url, detect_container, load_bytes, load_media
 
 
 def png_bytes(w: int = 32, h: int = 16, mode: str = "RGB") -> bytes:
