@@ -5,12 +5,14 @@ import { HealthPill, Settings, useHealthPolling } from './components/topbar.js';
 import { Playground } from './screens/playground.js';
 import { History } from './screens/history.js';
 import { Batch } from './screens/batch.js';
+import { Evaluate } from './screens/evaluate.js';
 import { Ops } from './screens/ops.js';
 
 const TABS = [
   { id: 'playground', label: 'Playground', view: Playground },
   { id: 'history', label: 'History', view: History },
   { id: 'batch', label: 'Batch', view: Batch },
+  { id: 'evaluate', label: 'Evaluate', view: Evaluate },
   { id: 'ops', label: 'Ops', view: Ops },
 ];
 

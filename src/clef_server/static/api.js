@@ -79,4 +79,7 @@ export const classify = (body, signal) => request('/v1/classify', { method: 'POS
 export const listClassifiers = () => request('/v1/classifiers');
 export const putClassifier = (name, body) => request(`/v1/classifiers/${encodeURIComponent(name)}`, { method: 'PUT', body });
 export const deleteClassifier = (name) => request(`/v1/classifiers/${encodeURIComponent(name)}`, { method: 'DELETE' });
-export const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+export const classifyBatch = (body, signal) => request('/v1/classify/batch', { method: 'POST', body, signal });
+export const classifierBatch = (name, body, signal) => request(`/v1/classifiers/${encodeURIComponent(name)}/batch`, { method: 'POST', body, signal });
+export const evaluateMetrics = (body, signal) => request('/v1/evaluate/metrics', { method: 'POST', body, signal });
+export const NAME_RE =/^[a-z0-9][a-z0-9_-]{0,63}$/;
