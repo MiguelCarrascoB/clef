@@ -522,3 +522,32 @@ def test_public_job_hides_secrets_and_payload():
     assert "s3cret" not in text and "private" not in text and "alice" not in text
     assert json.loads(text)["webhook"]["has_secret"] is True
     store.close()
+
+
+# ------------------------------------------------------------------ cross-feature: evaluation as a job kind
+
+
+def test_evaluate_job_kind_runs_through_the_jobs_runner():
+    """evaluation.py registers 'evaluate' in ctx.extra['job_kinds']; the runner must pick it up end to end."""
+    client, _eng, _ = make()
+    rows = [{"input": f"t{i}", "gold": "technical"} for i in range(3)] + [{"input": "inv", "gold": "billing"}]
+    with client:
+        bad_rows = [{"input": "x", "gold": "nope"}]
+        bad = submit(client, kind="evaluate", payload={"labels": LABELS, "rows": bad_rows})
+        assert bad.status_code == 400 and "rows[0].gold" in bad.json()["detail"]
+        r = submit(client, kind="evaluate", payload={"labels": LABELS, "rows": rows})
+        assert r.status_code == 202, r.text
+        done = wait(client, r.json()["id"])
+        assert done["status"] == "succeeded", done
+        assert done["progress"]["done"] == 4 and done["progress"]["total"] == 4
+        assert done["result"]["n"] == 4 and done["result"]["accuracy"] == pytest.approx(0.75)
+        items = all_rows(client, done["id"])
+        assert [x["index"] for x in items] == [0, 1, 2, 3]
+        assert [x["correct"] for x in items] == [True, True, True, False]
+
+
+def test_csv_export_neutralises_formulas():
+    from clef_server.jobs import _csv_safe
+
+    row = _csv_safe({"input": "=HYPERLINK(1)", "a": "+1", "b": "-x", "c": "@SUM", "ok": "bill", "n": -1.5})
+    assert row == {"input": "'=HYPERLINK(1)", "a": "'+1", "b": "'-x", "c": "'@SUM", "ok": "bill", "n": -1.5}

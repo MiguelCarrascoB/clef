@@ -1187,6 +1187,14 @@ async def _ndjson(store: JobStore, job_id: str, offset: int, limit: int | None) 
         yield "".join(d + "\n" for _, d in page)
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(row: dict[str, Any]) -> dict[str, Any]:
+    """Neutralise spreadsheet formulas (CSV injection): text starting with = + - @ gets a leading quote."""
+    return {k: f"'{v}" if isinstance(v, str) and v.startswith(_FORMULA_START) else v for k, v in row.items()}
+
+
 async def _csv(store: JobStore, job_id: str, offset: int, limit: int | None) -> AsyncIterator[str]:
     header: dict[str, None] = {}
     async for page in _batches(store, job_id, offset, limit):  # pass 1: the union of columns
@@ -1200,7 +1208,7 @@ async def _csv(store: JobStore, job_id: str, offset: int, limit: int | None) -> 
     async for page in _batches(store, job_id, offset, limit):  # pass 2: the rows
         buf.seek(0), buf.truncate()
         for _, d in page:
-            writer.writerow(flatten(json.loads(d)))
+            writer.writerow(_csv_safe(flatten(json.loads(d))))
         yield buf.getvalue()
 
 

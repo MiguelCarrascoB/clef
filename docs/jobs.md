@@ -122,13 +122,13 @@ CSV columns are the flattened row (`index`, `label`, `confidence`, `scores.billi
 from clef_client import ClefClient
 
 with ClefClient() as clef:
-    job = clef.classify_job(texts, ["billing", "technical", "account"])   # returns at once
+    job = clef.classify_job(texts, ["billing", "technical", "account"])  # returns at once
     job = clef.wait_job(job.id, poll=2, on_progress=lambda j: print(j.status, j.done, j.total))
     if not job.ok:
         raise SystemExit(job.error)
-    for item in clef.job_results(job.id):          # pages of 500, in input order
+    for item in clef.job_results(job.id):  # pages of 500, in input order
         print(item.index, item.error or item.result.label)
-    clef.save_job_results(job.id, "results.csv", format="csv")   # or stream straight to disk
+    clef.save_job_results(job.id, "results.csv", format="csv")  # or stream straight to disk
 ```
 
 `AsyncClefClient` has the same methods (`await`, and `async for` over `job_results`). Other methods:
@@ -179,12 +179,15 @@ pending delivery survives a server restart and is retried on the next start. Sta
 ```python
 import hashlib, hmac, time
 
+
 def verify(secret: str, headers, raw_body: bytes, tolerance_s: int = 300) -> bool:
     """headers: any case-insensitive mapping (Flask / FastAPI / requests headers). raw_body: bytes as received."""
     ts = headers["X-Clef-Timestamp"]
-    if abs(time.time() - int(ts)) > tolerance_s:      # replay protection
+    if abs(time.time() - int(ts)) > tolerance_s:  # replay protection
         return False
-    expected = "sha256=" + hmac.new(secret.encode(), ts.encode() + b"." + raw_body, hashlib.sha256).hexdigest()
+    expected = (
+        "sha256=" + hmac.new(secret.encode(), ts.encode() + b"." + raw_body, hashlib.sha256).hexdigest()
+    )
     return hmac.compare_digest(expected, headers["X-Clef-Signature"])
 ```
 
