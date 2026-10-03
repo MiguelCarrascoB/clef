@@ -29,17 +29,21 @@ from pydantic import BaseModel
 
 client = OpenAI(base_url="http://127.0.0.1:8910/v1", api_key="not-needed")
 
+
 class Triage(BaseModel):
     team: Literal["billing", "technical", "account"]
     outage: bool
 
+
 r = client.beta.chat.completions.parse(
     model="clef-flash",
-    messages=[{"role": "system", "content": "You triage support tickets."},
-              {"role": "user", "content": "Checkout is down, orders blocked"}],
+    messages=[
+        {"role": "system", "content": "You triage support tickets."},
+        {"role": "user", "content": "Checkout is down, orders blocked"},
+    ],
     response_format=Triage,
 )
-print(r.choices[0].message.parsed)       # Triage(team='technical', outage=True)
+print(r.choices[0].message.parsed)  # Triage(team='technical', outage=True)
 ```
 
 Plain JSON schema works the same way, and `curl` needs nothing but JSON:
@@ -76,7 +80,7 @@ format the OpenAI SDK sends; it was verified with the SDK, not with LangChain it
 from langchain_openai import ChatOpenAI
 
 llm = ChatOpenAI(base_url="http://127.0.0.1:8910/v1", api_key="not-needed", model="clef-flash")
-triage = llm.with_structured_output(Triage)       # json_schema or function calling, both work
+triage = llm.with_structured_output(Triage)
 print(triage.invoke("Checkout is down, orders blocked"))
 ```
 
@@ -249,7 +253,9 @@ Labels and scores are sorted by score, best first. Errors are `{"error": "messag
 ```python
 from huggingface_hub import InferenceClient
 
-client = InferenceClient(model="http://127.0.0.1:8910/hf/models/clef-flash", token="your CLEF_API_KEY or None")
+client = InferenceClient(
+    model="http://127.0.0.1:8910/hf/models/clef-flash", token="your CLEF_API_KEY or None"
+)
 for item in client.zero_shot_classification("Checkout is down", ["billing", "technical", "account"]):
     print(item.label, item.score)
 ```
