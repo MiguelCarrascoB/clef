@@ -11,6 +11,7 @@ See docs/ARCHITECTURE.md for the API contract. Run: clef serve (one uvicorn work
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import re
@@ -30,6 +31,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config as config_mod
+from .appctx import AppContext
 from .classifiers import ClassifierStore, InvalidName, TooManyClassifiers, validate_name
 from .classify import (
     ClassifierBatchRequest,
@@ -86,6 +88,8 @@ ERRORS: dict[int | str, dict[str, Any]] = {
         500: "Internal error",
     }.items()
 }
+# Feature modules: each exposes router(ctx: AppContext) -> APIRouter (see appctx.py). One line each.
+FEATURES: list[str] = []
 
 
 def setup_logging() -> None:
@@ -282,9 +286,16 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         log.info("starting clef server %s (model load runs in background)", VERSION)
         eng.start()
         task = asyncio.create_task(sampler())
+        for hook in ctx.on_startup:
+            await hook()
         try:
             yield
         finally:
+            for hook in reversed(ctx.on_shutdown):
+                try:
+                    await hook()
+                except Exception:
+                    log.exception("shutdown hook failed")
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             eng.shutdown()
@@ -361,6 +372,14 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         }
         if cfg.log_state:
             rec["state_preview"] = json.dumps(reqs[0].state, default=str, ensure_ascii=False)[:200]
+        results = await decide(reqs, batch=batch, label=label)
+        rec["input_tokens"] = sum(int(r.get("usage", {}).get("input_tokens", 0)) for r in results)
+        return results
+
+    async def decide(
+        reqs: list[SystemOneRequest], batch: bool = True, label: str = "batch"
+    ) -> list[dict[str, Any]]:
+        """Limits, media load (threadpool), ONE engine.decide(). No request needed (background work)."""
         for i, r in enumerate(reqs):
             check_limits(r, cfg, f"{label}[{i}]." if batch else "")
         gpu_ready()
@@ -376,9 +395,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             return records
 
         records = await run_in_threadpool(build)
-        results = await eng.decide(records)
-        rec["input_tokens"] = sum(int(r.get("usage", {}).get("input_tokens", 0)) for r in results)
-        return results
+        return await eng.decide(records)
 
     def with_total(res: dict[str, Any], total_ms: float) -> dict[str, Any]:
         return {**res, "timing": {**res.get("timing", {}), "total_ms": round(total_ms, 1)}}
@@ -715,6 +732,28 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         )
 
     app.include_router(v1)
+
+    ctx = AppContext(
+        cfg=cfg,
+        stats=stats,
+        engine=eng,
+        store=store,
+        auth=[Depends(require_key)],
+        limited=limited,
+        errors=ERRORS,
+        infer=infer,
+        decide=decide,
+        map_exception=map_exception,
+        api_error=ApiError,
+        request_id=_rid,
+        run_classify=run_classify,
+        run_classify_batch=run_classify_batch,
+        run_score=run_score,
+    )
+    app.state.ctx = ctx
+    for name in FEATURES:
+        module = importlib.import_module(f".{name}", __package__)
+        app.include_router(module.router(ctx))
 
     @app.get("/health", summary="Model + GPU status (503 until ready/warming)")
     async def health() -> JSONResponse:
