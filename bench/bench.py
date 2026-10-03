@@ -21,6 +21,39 @@ import urllib.request
 from pathlib import Path
 
 PARAMS = 9e9  # clef-flash parameter count, for the FLOPs estimate
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:  # run from a checkout without `pip install -e .`
+    sys.path.insert(0, str(_SRC))
+
+
+def add_backend_args(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument(
+        "--device", default=os.environ.get("CLEF_DEVICE", "auto"), help="auto, cuda, rocm, mps, cpu"
+    )
+    ap.add_argument(
+        "--dtype", default=os.environ.get("CLEF_DTYPE", "auto"), help="auto, bfloat16, float16, float32"
+    )
+    ap.add_argument(
+        "--quant", default=os.environ.get("CLEF_QUANT", "none"), help="none, int8, nf4 (CUDA only)"
+    )
+
+
+def load_model(model_path: str, device: str, dtype: str, quant: str = "none"):
+    """Detect the backend, resolve the dtype and load the model. Returns (backend, torch dtype, model, processor)."""
+    from clef_server import backend as backend_mod
+
+    backend = backend_mod.detect(device)
+    torch_dtype, warning = backend.resolve_dtype(dtype)
+    if warning:
+        print("warning:", warning)
+    kwargs = {}
+    qc = backend_mod.quantization_config(backend, quant, torch_dtype)
+    if qc is not None:
+        kwargs["quantization_config"] = qc
+    from joint_schema_model import load_release_model
+
+    model, processor = load_release_model(model_path, device=backend.device, dtype=torch_dtype, **kwargs)
+    return backend, torch_dtype, model, processor
 
 
 def pct(values: list[float], q: int) -> float:
@@ -96,6 +129,7 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=int(os.environ.get("CLEF_PORT", "8910")))
     ap.add_argument("--force", action="store_true", help="run even if a server answers on --port")
     ap.add_argument("--json", metavar="PATH", help="also write results as JSON (e.g. bench/out/bench.json)")
+    add_backend_args(ap)
     args = ap.parse_args()
 
     if not args.force and server_running(args.port):
@@ -110,14 +144,19 @@ def main() -> int:
     import torch
 
     sys.path.insert(0, args.model_path)
-    from joint_schema_model import collate_records, encode_record, load_release_model
+    from joint_schema_model import collate_records, encode_record
 
-    dev = torch.device("cuda")
     t0 = time.perf_counter()
-    model, processor = load_release_model(args.model_path, device="cuda")
-    print(f"model loaded in {time.perf_counter() - t0:.1f}s")
-    torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()  # measure inference peak, not load transients
+    backend, torch_dtype, model, processor = load_model(args.model_path, args.device, args.dtype, args.quant)
+    dev = backend.device
+    sync = backend.synchronize
+    print(
+        f"model loaded in {time.perf_counter() - t0:.1f}s on {backend.name} "
+        f"({backend.device_name()}), {str(torch_dtype).replace('torch.', '')}"
+    )
+    sync()
+    if backend.name in ("cuda", "rocm"):
+        torch.cuda.reset_peak_memory_stats()  # measure inference peak, not load transients
     tok, pad = processor.tokenizer, processor.tokenizer.pad_token_id
 
     sizes = sorted({int(x) for x in args.batch_sizes.split(",")})
@@ -148,18 +187,18 @@ def main() -> int:
             for g in shapes.values():
                 for _ in range(args.warmup):
                     run_forward(g)
-            torch.cuda.synchronize()
+            sync()
 
             fwd, col, toks, padded = [], [], [], []
             for g in groups:
-                torch.cuda.synchronize()
+                sync()
                 t = time.perf_counter()
                 batch = collate_records(g, pad, dev)
-                torch.cuda.synchronize()
+                sync()
                 col.append((time.perf_counter() - t) * 1000)
                 t = time.perf_counter()
                 model(batch)
-                torch.cuda.synchronize()
+                sync()
                 fwd.append((time.perf_counter() - t) * 1000)
                 n = sum(len(e.input_ids) for e in g)
                 toks.append(n)
@@ -183,7 +222,12 @@ def main() -> int:
                 }
             )
 
-    peak = torch.cuda.max_memory_allocated() / 1e9
+    mem = backend.memory()
+    peak = (
+        torch.cuda.max_memory_allocated() / 1e9
+        if backend.name in ("cuda", "rocm")
+        else (mem["allocated_gb"] or 0.0)
+    )
     print(
         f"\n{'bs':>3} {'runs':>5} {'tok/rec':>8} {'pad%':>5} | {'fwd p50':>8} {'p90':>8} {'p99':>8} | "
         f"{'e2e p50':>8} {'p99':>8} | {'rec/s':>7} {'TFLOPS*':>8}"
@@ -198,14 +242,25 @@ def main() -> int:
         )
     print("latencies in ms. fwd = forward only (collate excluded); e2e = encode + collate + forward.")
     print("* TFLOPS = 2 * 9e9 * real_tokens / fwd_p50 (padding not counted; a lower bound of hardware work).")
-    print(
-        f"peak VRAM (after load): {peak:.2f} GB of {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
-    )
+    print(f"peak {mem['kind']} memory: {peak:.2f} GB of {mem['total_gb']} GB")
 
     if args.json:
         out = Path(args.json)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({"mixed": args.mixed, "peak_vram_gb": peak, "results": results}, indent=2))
+        out.write_text(
+            json.dumps(
+                {
+                    "backend": backend.name,
+                    "device": backend.device_name(),
+                    "dtype": str(torch_dtype).replace("torch.", ""),
+                    "quant": args.quant,
+                    "mixed": args.mixed,
+                    "peak_vram_gb": peak,
+                    "results": results,
+                },
+                indent=2,
+            )
+        )
         print("wrote", out)
     return 0
 

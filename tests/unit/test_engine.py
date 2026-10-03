@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from clef_server.backend import BackendError
 from clef_server.config import Config
 from clef_server.engine import (
     Engine,
@@ -144,6 +145,7 @@ def make_cfg(**kw):
         pad_to_bucket=True,
         model_path="/nowhere",
         max_tokens=1000,
+        preflight=False,
     )
     base.update(kw)
     return dataclasses.replace(Config(), **base)
@@ -256,11 +258,180 @@ async def test_load_error_status():
     eng.shutdown()
 
 
-def test_unknown_dtype_is_error():
-    eng = Engine(make_cfg(dtype="bfloat17"), FakeStats(), loader=make_loader(FakeModel()))
+def test_unknown_dtype_is_rejected_by_config():
+    with pytest.raises(ValueError, match="CLEF_DTYPE"):
+        make_cfg(dtype="bfloat17")
+
+
+class FakeBackend:
+    """Backend stand-in recording the calls the engine makes."""
+
+    name = "rocm"
+    device = torch.device("cpu")
+
+    def __init__(self, free_gb=100.0, name="rocm"):
+        self.name = name
+        self.syncs = 0
+        self.cache_clears = 0
+        self.telemetry_enabled = True
+        self.free_gb = free_gb
+        self.telemetry_calls = 0
+
+    def synchronize(self):
+        self.syncs += 1
+
+    def empty_cache(self):
+        self.cache_clears += 1
+
+    def is_oom(self, exc):
+        return isinstance(exc, torch.cuda.OutOfMemoryError)
+
+    def device_name(self):
+        return "Fake GPU 9000"
+
+    def memory(self):
+        return {
+            "kind": "vram",
+            "total_gb": 24.0,
+            "allocated_gb": 10.0,
+            "reserved_gb": 11.0,
+            "free_gb": self.free_gb,
+        }
+
+    def telemetry(self):
+        self.telemetry_calls += 1
+        return {
+            "available": True,
+            "source": "amdsmi",
+            "util_pct": 55.0,
+            "temp_c": 61.0,
+            "power_w": 200.0,
+            "mem_used_gb": 10.0,
+            "mem_total_gb": 24.0,
+        }
+
+    def resolve_dtype(self, requested):
+        return torch.float32, "fake fallback"
+
+    def versions(self):
+        return {"torch": "9.9", "cuda": None, "hip": "7.2", "driver": None, "macos": None}
+
+    def fast_path(self):
+        return {"causal_conv1d": False, "fla": True, "expected": True}
+
+
+def test_info_before_backend_detected():
+    eng = Engine(make_cfg(), FakeStats(), loader=make_loader(FakeModel()))
+    info = eng.info()
+    assert info["backend"] is None and info["gpu"]["available"] is False
+    assert info["telemetry"]["available"] is False and info["warnings"] == []
+    assert eng.sample()["mem_used_gb"] is None
+
+
+def test_info_and_sample_shapes_with_fake_backend(started):
+    fake = FakeBackend()
+    eng = Engine(make_cfg(), FakeStats(), loader=make_loader(FakeModel()), backend=fake)
+    eng.start()
+    assert wait_for(lambda: eng.status == "ready")
+    try:
+        assert eng.info()["telemetry"]["available"] is False  # nothing sampled yet
+        gauges = eng.sample()
+        assert gauges == {
+            "mem_used_gb": 10.0,
+            "mem_total_gb": 24.0,
+            "gpu_util_pct": 55.0,
+            "gpu_temp_c": 61.0,
+            "gpu_power_w": 200.0,
+        }
+        info = eng.info()
+        assert info["backend"] == "rocm" and info["device"] == "cpu" and info["dtype"] == "float32"
+        assert info["quant"] == "none" and info["model_path"] == "/nowhere"
+        assert info["gpu"] == {
+            "available": True,
+            "name": "Fake GPU 9000",
+            "memory_kind": "vram",
+            "vram_total_gb": 24.0,
+            "vram_allocated_gb": 10.0,
+            "vram_reserved_gb": 11.0,
+            "vram_free_gb": 100.0,
+        }
+        assert info["telemetry"]["source"] == "amdsmi" and info["telemetry"]["util_pct"] == 55.0
+        assert info["fast_path"] == {"causal_conv1d": False, "fla": True, "expected": True}
+        assert info["versions"]["hip"] == "7.2"
+        assert info["warnings"] == ["fake fallback"]
+        calls = fake.telemetry_calls
+        eng.info()
+        assert fake.telemetry_calls == calls  # info() never polls telemetry
+    finally:
+        eng.shutdown()
+
+
+def test_telemetry_off_is_not_polled():
+    fake = FakeBackend()
+    eng = Engine(make_cfg(telemetry=False), FakeStats(), loader=make_loader(FakeModel()), backend=fake)
+    eng.start()
+    assert wait_for(lambda: eng.status == "ready")
+    assert eng.sample()["gpu_util_pct"] is None and fake.telemetry_calls == 0
+    eng.shutdown()
+
+
+def test_forward_uses_backend_sync_and_oom_clears_cache():
+    fake = FakeBackend()
+    eng = Engine(make_cfg(), FakeStats(), loader=make_loader(FakeModel()), backend=fake)
+    eng.start()
+    assert wait_for(lambda: eng.status == "ready")
+
+    async def go():
+        await eng.decide([rec("a b")])
+        assert fake.syncs == 1
+        with pytest.raises(GpuOutOfMemory):
+            await eng.decide([rec("OOM")])
+        assert fake.cache_clears == 1 and eng.status == "ready"
+
+    asyncio.run(go())
+    eng.shutdown()
+
+
+def test_backend_error_is_status_error(monkeypatch):
+    def boom(requested):
+        raise BackendError("CLEF_DEVICE=cuda is not available: no NVIDIA GPU visible")
+
+    monkeypatch.setattr("clef_server.engine.backend_mod.detect", boom)
+    eng = Engine(make_cfg(), FakeStats(), loader=make_loader(FakeModel()))
     eng.start()
     assert wait_for(lambda: eng.status == "error")
-    assert "bfloat17" in eng.error
+    assert eng.error == "CLEF_DEVICE=cuda is not available: no NVIDIA GPU visible"
+    eng.shutdown()
+
+
+def test_quant_on_non_cuda_is_status_error():
+    eng = Engine(make_cfg(quant="nf4"), FakeStats(), loader=make_loader(FakeModel()), backend=FakeBackend())
+    eng.start()
+    assert wait_for(lambda: eng.status == "error")
+    assert "requires an NVIDIA GPU" in eng.error and "rocm" in eng.error
+    eng.shutdown()
+
+
+def test_preflight_failure_is_status_error():
+    eng = Engine(
+        make_cfg(preflight=True),
+        FakeStats(),
+        loader=make_loader(FakeModel()),
+        backend=FakeBackend(free_gb=2.0),
+    )
+    eng.start()
+    assert wait_for(lambda: eng.status == "error")
+    assert "not enough" in eng.error and "\n" not in eng.error
+    eng.shutdown()
+
+
+def test_missing_model_is_status_error_with_hint(tmp_path, monkeypatch):
+    monkeypatch.setattr("clef_server.paths.legacy_model_dir", lambda: tmp_path / "none")
+    cfg = make_cfg(model_path=str(tmp_path / "missing"))
+    eng = Engine(cfg, FakeStats(), backend=FakeBackend())  # default loader resolves the path
+    eng.start()
+    assert wait_for(lambda: eng.status == "error")
+    assert "CLEF_MODEL_PATH" in eng.error
     eng.shutdown()
 
 
@@ -274,7 +445,7 @@ def test_shutdown_joins(started):
 def test_info_on_cpu(started):
     eng, _ = started()
     info = eng.info()
-    assert info["device"] == "cpu" and info["gpu"]["available"] is False
+    assert info["backend"] == "cpu" and info["device"] == "cpu" and info["gpu"]["available"] is False
     assert info["torch"] == torch.__version__
     assert eng.load_seconds is not None
 

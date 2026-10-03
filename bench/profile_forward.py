@@ -17,6 +17,15 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 
+_spec = importlib.util.spec_from_file_location("clef_bench", _HERE / "bench.py")
+clef_bench = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(clef_bench)
+add_backend_args, load_model, make_records = (
+    clef_bench.add_backend_args,
+    clef_bench.load_model,
+    clef_bench.make_records,
+)
+
 # heuristic kernel-name groups, first match wins
 GROUPS = [
     ("attention", ("attn", "attention", "flash", "sdpa", "softmax", "aotriton")),
@@ -57,6 +66,7 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=int(os.environ.get("CLEF_PORT", "8910")))
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--force", action="store_true")
+    add_backend_args(ap)
     args = ap.parse_args()
     if not args.force and server_running(args.port):
         print(
@@ -70,15 +80,15 @@ def main() -> int:
     from torch.profiler import ProfilerActivity, profile
 
     sys.path.insert(0, args.model_path)
-    from joint_schema_model import collate_records, encode_record, load_release_model
+    from joint_schema_model import collate_records, encode_record
 
-    spec = importlib.util.spec_from_file_location("clef_bench", _HERE / "bench.py")
-    clef_bench = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(clef_bench)
-    make_records = clef_bench.make_records
-
-    model, processor = load_release_model(args.model_path, device="cuda")
-    tok, pad, dev = processor.tokenizer, processor.tokenizer.pad_token_id, torch.device("cuda")
+    backend, _dtype, model, processor = load_model(args.model_path, args.device, args.dtype, args.quant)
+    tok, pad, dev = processor.tokenizer, processor.tokenizer.pad_token_id, backend.device
+    activities = [ProfilerActivity.CPU]
+    if backend.name in ("cuda", "rocm"):
+        activities.append(ProfilerActivity.CUDA)
+    elif backend.name == "mps":
+        print("note: torch.profiler has no device kernel timings on MPS; only CPU-side ops are listed")
     enc = [encode_record(tok, r, processor=processor) for r in make_records(args.batch, False)]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -88,11 +98,11 @@ def main() -> int:
         with torch.inference_mode():
             for _ in range(3):
                 model(batch)
-            torch.cuda.synchronize()
+            backend.synchronize()
             t = time.perf_counter()
-            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            with profile(activities=activities) as prof:
                 model(batch)
-                torch.cuda.synchronize()
+                backend.synchronize()
             wall = (time.perf_counter() - t) * 1000
         events = [e for e in prof.key_averages()]
 

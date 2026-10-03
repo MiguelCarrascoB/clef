@@ -38,9 +38,14 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import torch
+
+from . import backend as backend_mod
+from .backend import Backend, BackendError, PreflightError
+from .paths import WEIGHTS_GB, ModelNotFound, resolve_model_path
 
 log = logging.getLogger("clef.engine")
 
@@ -48,6 +53,15 @@ Record = dict
 Result = dict
 
 _SENTINEL = object()
+_EMPTY_TELEMETRY = {
+    "available": False,
+    "source": None,
+    "util_pct": None,
+    "temp_c": None,
+    "power_w": None,
+    "mem_used_gb": None,
+    "mem_total_gb": None,
+}
 _WARMUP_SENTENCE = "The customer reported that the service was slow yesterday afternoon. "
 
 
@@ -60,7 +74,11 @@ class InputTooLarge(ValueError):
 
 
 class GpuOutOfMemory(RuntimeError):
-    """CUDA/HIP out of memory during a forward (-> HTTP 503)."""
+    """Device out of memory during a forward (-> HTTP 503)."""
+
+
+def _dtype_name(dtype: Any) -> str:
+    return str(dtype).replace("torch.", "")
 
 
 def bucket_for(length: int, buckets: tuple[int, ...] | list[int]) -> int:
@@ -86,10 +104,24 @@ def pad_batch_right(batch: dict[str, Any], target: int, pad_token_id: int) -> di
     return {**batch, "input_ids": new_ids, "attention_mask": new_mask}
 
 
-def _default_loader(cfg: Any) -> Any:
-    if cfg.model_path not in sys.path:
-        sys.path.insert(0, cfg.model_path)
+def _import_model_module(path: Any) -> Any:
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
     return importlib.import_module("joint_schema_model")
+
+
+def _default_loader(cfg: Any) -> Any:
+    return _import_model_module(resolve_model_path(cfg))
+
+
+def _weights_gb(path: Any) -> float:
+    """On-disk size of the release weights (falls back to the measured 19 GB)."""
+    try:
+        total = sum(f.stat().st_size for f in Path(path).glob("*.safetensors"))
+        return total / 1024**3 if total > 1024**3 else WEIGHTS_GB
+    except Exception:
+        return WEIGHTS_GB
 
 
 @dataclass
@@ -119,10 +151,18 @@ def _resolve(item: _Item, result: Any = None, exc: BaseException | None = None) 
 
 
 class Engine:
-    def __init__(self, cfg: Any, stats: Any, loader: Callable | None = None):
+    def __init__(self, cfg: Any, stats: Any, loader: Callable | None = None, backend: Backend | None = None):
         self.cfg = cfg
         self.stats = stats
+        self._custom_loader = loader is not None
         self._loader = loader or _default_loader
+        self._backend: Backend | None = backend
+        self._injected_backend = backend is not None
+        self._dtype: Any = None
+        self._model_path: str | None = cfg.model_path
+        self._warnings: list[str] = []
+        self._telemetry: dict = {}
+        self._versions: dict | None = None
         self.status = "loading"
         self.error: str | None = None
         self.load_seconds: float | None = None
@@ -186,26 +226,43 @@ class Engine:
         return list(results)
 
     def info(self) -> dict:
+        """Static facts + live memory. Fast (< 5 ms): telemetry is whatever the last sample() cached."""
+        b = self._backend
         gpu: dict[str, Any] = {
             "available": False,
             "name": None,
+            "memory_kind": None,
             "vram_total_gb": None,
             "vram_allocated_gb": None,
             "vram_reserved_gb": None,
+            "vram_free_gb": None,
         }
-        try:
-            if str(self.cfg.device).startswith("cuda") and torch.cuda.is_available():
-                dev = torch.device(self.cfg.device)
-                gb = 1024**3
+        versions: dict[str, Any] = {
+            "torch": torch.__version__,
+            "cuda": None,
+            "hip": None,
+            "driver": None,
+            "macos": None,
+        }
+        fast_path: dict[str, Any] = {"causal_conv1d": False, "fla": False, "expected": False}
+        if b is not None:
+            try:
+                mem = b.memory()
                 gpu = {
-                    "available": True,
-                    "name": torch.cuda.get_device_name(dev),
-                    "vram_total_gb": round(torch.cuda.get_device_properties(dev).total_memory / gb, 2),
-                    "vram_allocated_gb": round(torch.cuda.memory_allocated(dev) / gb, 2),
-                    "vram_reserved_gb": round(torch.cuda.memory_reserved(dev) / gb, 2),
+                    "available": b.name != "cpu",
+                    "name": b.device_name(),
+                    "memory_kind": mem.get("kind"),
+                    "vram_total_gb": mem.get("total_gb"),
+                    "vram_allocated_gb": mem.get("allocated_gb"),
+                    "vram_reserved_gb": mem.get("reserved_gb"),
+                    "vram_free_gb": mem.get("free_gb"),
                 }
-        except Exception as exc:  # never let /health crash
-            log.warning("gpu info failed: %s", exc)
+                if self._versions is None:
+                    self._versions = b.versions()
+                versions = self._versions
+                fast_path = b.fast_path()
+            except Exception as exc:  # never let /health crash
+                log.warning("backend info failed: %s", exc)
         # Read the version from package metadata: importing transformers here (from /health) while the loader
         # thread is mid-import races transformers' lazy module and breaks the load with an ImportError.
         try:
@@ -213,13 +270,45 @@ class Engine:
         except Exception:
             tf_version = None
         return {
-            "device": self.cfg.device,
-            "dtype": self.cfg.dtype,
-            "model_path": self.cfg.model_path,
+            "backend": b.name if b is not None else None,
+            "device": str(b.device) if b is not None else self.cfg.device,
+            "dtype": _dtype_name(self._dtype) if self._dtype is not None else self.cfg.dtype,
+            "quant": self.cfg.quant,
+            "model_path": self._model_path,
             "torch": torch.__version__,
             "transformers": tf_version,
             "gpu": gpu,
+            "telemetry": {**_EMPTY_TELEMETRY, **self._telemetry},
+            "fast_path": fast_path,
+            "versions": versions,
+            "warnings": list(self._warnings),
         }
+
+    def sample(self) -> dict:
+        """Cheap gauges for the time series. Never raises; any thread except the worker's hot path."""
+        out: dict[str, Any] = {
+            "mem_used_gb": None,
+            "mem_total_gb": None,
+            "gpu_util_pct": None,
+            "gpu_temp_c": None,
+            "gpu_power_w": None,
+        }
+        b = self._backend
+        if b is None:
+            return out
+        try:
+            mem = b.memory()
+            out["mem_used_gb"] = mem.get("allocated_gb")
+            out["mem_total_gb"] = mem.get("total_gb")
+            if self.cfg.telemetry:
+                tel = b.telemetry()
+                self._telemetry = tel
+                out["gpu_util_pct"] = tel.get("util_pct")
+                out["gpu_temp_c"] = tel.get("temp_c")
+                out["gpu_power_w"] = tel.get("power_w")
+        except Exception as exc:
+            log.debug("sample failed: %s", exc)
+        return out
 
     # ------------------------------------------------------------------ caller side
     def _encode(self, record: Record) -> Any:
@@ -279,27 +368,69 @@ class Engine:
         self._drain_fail()
 
     def _load(self) -> bool:
-        dtype = getattr(torch, str(self.cfg.dtype), None)
-        if not isinstance(dtype, torch.dtype):
-            self._fail(f"unknown dtype {self.cfg.dtype!r} (use e.g. bfloat16, float16, float32)")
-            return False
+        """Detect backend -> dtype -> model path -> preflight -> quant config -> load. One-line errors."""
+        cfg = self.cfg
         t0 = time.perf_counter()
         try:
-            self._mod = self._loader(self.cfg)
+            b = self._backend or backend_mod.detect(cfg.device)
+            self._backend = b
+            with contextlib.suppress(Exception):
+                b.telemetry_enabled = bool(cfg.telemetry)
+            dtype, warn = b.resolve_dtype(cfg.dtype)
+            self._dtype = dtype
+            if warn:
+                self._warnings.append(warn)
+                log.warning("%s", warn)
+            self._device = b.device
+            if self._custom_loader:
+                self._mod = self._loader(cfg)
+                path = cfg.model_path
+            else:
+                path = resolve_model_path(cfg)
+                self._mod = _import_model_module(path)
+            self._model_path = None if path is None else str(path)
+            fp = b.fast_path()
+            if b.name == "cuda" and not (fp["fla"] and fp["causal_conv1d"]):
+                self._warnings.append(
+                    "fast path kernels missing (pip install flash-linear-attention causal-conv1d); "
+                    "the slow torch fallback is used"
+                )
+            elif b.name == "rocm" and not fp["fla"]:
+                self._warnings.append(
+                    "flash-linear-attention is not installed; the slow torch fallback is used"
+                )
+            # Preflight needs real memory numbers; with an injected loader (tests) only run it if the backend
+            # is injected too, so unit tests never depend on the host's RAM.
+            if cfg.preflight and (not self._custom_loader or self._injected_backend):
+                self._warnings.extend(
+                    backend_mod.preflight(b, dtype, cfg.quant, _weights_gb(path) if path else WEIGHTS_GB)
+                )
+            kwargs: dict[str, Any] = {}
+            qc = backend_mod.quantization_config(b, cfg.quant, dtype)
+            if qc is not None:
+                kwargs["quantization_config"] = qc
             model, processor = self._mod.load_release_model(
-                self.cfg.model_path, device=self.cfg.device, dtype=dtype
+                None if path is None else str(path), device=b.device, dtype=dtype, **kwargs
             )
             model.eval()
             self._model, self._processor = model, processor
             pad = getattr(processor.tokenizer, "pad_token_id", None)
             self._pad_id = 0 if pad is None else int(pad)
-            self._device = torch.device(self.cfg.device)
+        except (BackendError, PreflightError, ModelNotFound) as exc:
+            self._fail(" ".join(str(exc).split()))
+            return False
         except Exception as exc:
             log.exception("model load failed")
             self._fail(f"{type(exc).__name__}: {exc}")
             return False
         self.load_seconds = round(time.perf_counter() - t0, 2)
-        log.info("model loaded in %.1fs on %s (%s)", self.load_seconds, self.cfg.device, self.cfg.dtype)
+        log.info(
+            "model loaded in %.1fs on %s/%s (%s)",
+            self.load_seconds,
+            b.name,
+            b.device,
+            _dtype_name(self._dtype),
+        )
         return True
 
     def _drain_fail(self) -> None:
@@ -385,16 +516,16 @@ class Engine:
                 self.stats.record_forward(len(group), n_tokens, padded, ms)
             except Exception:
                 log.exception("stats.record_forward failed")
-        except torch.cuda.OutOfMemoryError as exc:
-            log.error("GPU OOM on group of %d (tokens=%d)", len(group), sum(i.length for i in group))
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            for it in group:
-                _resolve(it, exc=GpuOutOfMemory(f"GPU out of memory: {exc}"))
         except Exception as exc:
-            log.exception("forward failed")
-            for it in group:
-                _resolve(it, exc=exc)
+            if self._backend.is_oom(exc):
+                log.error("device OOM on group of %d (tokens=%d)", len(group), sum(i.length for i in group))
+                self._backend.empty_cache()
+                for it in group:
+                    _resolve(it, exc=GpuOutOfMemory(f"GPU out of memory: {exc}"))
+            else:
+                log.exception("forward failed")
+                for it in group:
+                    _resolve(it, exc=exc)
 
     def padded_length(self, length: int) -> int:
         """Text-batch sequence length after padding: the bucket (opt-in) or the next pad_multiple."""
@@ -411,12 +542,10 @@ class Engine:
             batch = pad_batch_right(batch, self.padded_length(length), self._pad_id)
         padded_len = batch["input_ids"].shape[1]
         batch = self._to_device(batch)
-        is_cuda = self._device.type == "cuda"
         t0 = time.perf_counter()
         with torch.inference_mode():
             logits = self._model(batch)
-            if is_cuda:
-                torch.cuda.synchronize()
+            self._backend.synchronize()
         ms = (time.perf_counter() - t0) * 1000
         return logits, ms, sum(len(e.input_ids) for e in encs), padded_len * len(encs)
 
@@ -483,7 +612,7 @@ class Engine:
                     _, ms, _, _ = self._forward([enc] * n, media=False)
                     log.info("warmup %d/%d bucket=%d batch=%d %.0f ms", done, total, real, n, ms)
                 except Exception as exc:
-                    if isinstance(exc, torch.cuda.OutOfMemoryError) and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    if self._backend.is_oom(exc):
+                        self._backend.empty_cache()
                     log.warning("warmup bucket=%d batch=%d failed: %s", real, n, exc)
                 yield
