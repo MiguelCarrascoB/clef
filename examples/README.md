@@ -11,6 +11,8 @@ The same job in four languages: triage a support ticket ("Checkout is down, orde
 | `classify.mjs` | Node 18+ |
 | `classify.ps1` | PowerShell 5.1+ |
 | `classify_csv.py` | same as `classify.py`; classifies a CSV column in chunks |
+| `openai_sdk.py` | `pip install openai`; the official OpenAI SDK against clef ([guide](../docs/openai-compat.md)) |
+| `hf_zero_shot.py` | `pip install huggingface_hub`; `InferenceClient.zero_shot_classification` against clef |
 
 All read two environment variables:
 
