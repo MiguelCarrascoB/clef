@@ -1,258 +1,441 @@
-"""Clef-flash server - SystemOne decision API served locally on AMD ROCm (RX 7900 XTX).
+"""Clef-flash server v2 - SystemOne decision API served locally (AMD ROCm / WSL2).
 
-Endpoints:
-  POST /v1/systemone    Jev / SystemOne decision API: {model, state, questions, images?, videos?}
-                        -> {model, answers, usage}. Every question returns calibrated probabilities.
-  POST /v1/batch        {"batch": [<systemone request>, ...]} -> batched one-forward-pass decisions
-  GET  /health          Model + GPU status (503 until the model is loaded)
-  GET  /schema-example  Copy-paste ready request bodies
+See docs/ARCHITECTURE.md for the API contract. Run:  python server/main.py   (single worker, one GPU thread).
 
-State can be any text or JSON. Images/videos are data: URLs or http(s) URLs.
-Run:  source ~/venvs/clef/bin/activate && export HSA_ENABLE_DXG_DETECTION=1 && python server.py
+  POST /v1/systemone  {model?, state, questions, images?, videos?} -> {model, answers, usage, timing}
+  POST /v1/batch      {"batch": [<systemone request>, ...]}        -> {batch_ms, results}
+  GET  /health /livez /v1/stats /v1/log /v1/events /schema-example   console at /
 """
+
 from __future__ import annotations
 
-import base64
-import io
-import os
-import sys
+import asyncio
+import hmac
+import json
+import logging
+import re
 import time
-import traceback
-import urllib.request
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import torch
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
-from PIL import Image
+import config as config_mod
+import uvicorn
+from config import VERSION, Config
+from engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from media import MediaError, load_media
+from schemas import (
+    BatchRequest,
+    BatchResponse,
+    ErrorBody,
+    SystemOneRequest,
+    SystemOneResponse,
+    check_batch_size,
+    check_limits,
+    format_errors,
+)
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from stats import Stats
 
-MODEL_PATH = os.environ.get("CLEF_MODEL_PATH", str(Path.home() / "models" / "clef-flash"))
-DEVICE = os.environ.get("CLEF_DEVICE", "cuda")  # "cuda" (ROCm GPU) or "cpu"
-DTYPE = getattr(torch, os.environ.get("CLEF_DTYPE", "bfloat16"), torch.bfloat16)
-PORT = int(os.environ.get("CLEF_PORT", "8910"))
-MAX_SHARD_IMAGES = 4  # images per record in a request (vision tokens grow fast)
-
-app = FastAPI(title="clef-flash local", version="1.0")
-S: dict[str, Any] = {"ready": False, "error": None}
-
-
-def engine() -> None:
-    if "model" in S:
-        return
-    if S["error"]:
-        raise RuntimeError(S["error"])
-    t0 = time.time()
-    sys.path.insert(0, MODEL_PATH)
-    from joint_schema_model import (  # type: ignore
-        collate_records,
-        encode_record,
-        load_release_model,
-        systemone,
-        systemone_answer,
-    )
-
-    model, processor = load_release_model(MODEL_PATH, device=DEVICE, dtype=DTYPE)
-    model.eval()
-    S.update(
-        model=model, processor=processor, encode=encode_record, collate=collate_records,
-        systemone=systemone, answer_of=systemone_answer, load_seconds=round(time.time() - t0, 1),
-    )
-    S["ready"] = True
-
-
-@app.on_event("startup")
-def startup() -> None:
-    try:
-        engine()
-    except Exception as exc:
-        traceback.print_exc()
-        S["error"] = f"{exc}"
+log = logging.getLogger("clef")
+TRACKED = {"/v1/systemone", "/v1/batch"}
+SSE_STATS_INTERVAL_S = 2.0
+_RID_OK = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+ERRORS: dict[int | str, dict[str, Any]] = {
+    c: {"model": ErrorBody, "description": d}
+    for c, d in {
+        400: "Invalid input",
+        401: "Missing/invalid API key",
+        413: "Request too large",
+        503: "Model not ready or GPU out of memory",
+        500: "Internal error",
+    }.items()
+}
 
 
-def _image(data_or_url: str) -> Image.Image:
-    if data_or_url.startswith("http"):
-        with urllib.request.urlopen(data_or_url, timeout=30) as res:  # nosec: user-supplied demo server
-            payload = res.read()
-    else:
-        payload = base64.b64decode(data_or_url.split(",", 1)[-1])
-    return Image.open(io.BytesIO(payload)).convert("RGB")
+def setup_logging() -> None:
+    root = logging.getLogger()
+    if not any(getattr(h, "_clef", False) for h in root.handlers):
+        handler = logging.StreamHandler()
+        handler._clef = True  # type: ignore[attr-defined]
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s %(message)s"))
+        root.addHandler(handler)
+    if root.level in (logging.NOTSET, logging.WARNING):
+        root.setLevel(logging.INFO)
 
 
-def _frames(data_or_url: str, fps: float = 2.0) -> np.ndarray:
-    """Base64/URL video (mp4, webm, mov...) -> sampled frame array (T, H, W, 3) uint8."""
-    import imageio.v3 as iio
-
-    if data_or_url.startswith("http"):
-        with urllib.request.urlopen(data_or_url, timeout=30) as res:
-            payload = res.read()
-    else:
-        payload = base64.b64decode(data_or_url.split(",", 1)[-1])
-    buf = io.BytesIO(payload)
-    frames = iio.imread(buf, extension=".mp4", fps=fps)  # type: ignore[arg-type]
-    if frames.ndim != 4 or frames.shape[-1] != 3:
-        raise ValueError(f"unexpected frame shape {frames.shape}")
-    return np.asarray(frames, dtype=np.uint8)
+class ApiError(Exception):
+    def __init__(self, status: int, detail: str, headers: dict[str, str] | None = None):
+        super().__init__(detail)
+        self.status, self.detail, self.headers = status, detail, headers or {}
 
 
-def _split_record(request: dict[str, Any]) -> list[dict[str, Any]]:
-    """One record per <=MAX_SHARD_IMAGES images + one per video (mixed-media batching is valid,
-    but shard big media sets so each record's vision-token budget stays bounded)."""
-    records: list[dict[str, Any]] = []
-    images = request.get("images") or []
-    videos = request.get("videos") or []
-    chunks = [images[i:i + MAX_SHARD_IMAGES] for i in range(0, len(images), MAX_SHARD_IMAGES)] or [[]]
-    for chunk in chunks:
-        record = {k: v for k, v in request.items() if k not in ("images", "videos")}
-        record["images"] = [_image(x) for x in chunk] or None
-        records.append(record)
-    for video in videos:
-        record = {k: v for k, v in request.items() if k not in ("images", "videos")}
-        record["images"] = None
-        record["videos"] = [_frames(video)]
-        records.append(record)
-    if not records:
-        raise ValueError("request carries no images or videos")
-    return records
+class BodyTooLarge(HTTPException):
+    """Raised from the streamed-body guard; an HTTPException so FastAPI's body parsing does not turn it into 400."""  # noqa: E501
+
+    def __init__(self, limit_mb: int = 0):
+        super().__init__(413, f"request body exceeds {limit_mb} MB limit")
 
 
-def _sanitize(request: dict[str, Any]) -> dict[str, Any]:
-    """Accept both raw PIL-capable records and a SystemOne body; validate fields."""
-    if not isinstance(request, dict):
-        raise ValueError("request must be an object")
-    request = dict(request)
-    if "state" not in request:
-        raise ValueError("model and state are required")
-    questions = request.get("questions")
-    if not isinstance(questions, dict) or not questions:
-        raise ValueError("at least one question is required")
-    for qid, question in questions.items():
-        if not isinstance(question, dict) or question.get("type") not in ("noul", "choice", "score"):
-            raise ValueError(f"{qid}: type must be noul, choice, or score")
-        if question.get("type") != "noul" and not question.get("criteria"):
-            raise ValueError(f"{qid}: criteria must not be empty")
-    return request
+def _rid(request: Request) -> str:
+    return getattr(request.state, "request_id", "-")
 
 
-def _systemone_text(request: dict[str, Any]) -> dict[str, Any]:
-    return S["systemone"](S["model"], S["processor"], request)
+def _error(request: Request, status: int, detail: str, headers: dict[str, str] | None = None) -> JSONResponse:
+    request.state.error = detail
+    return JSONResponse({"detail": detail, "request_id": _rid(request)}, status_code=status, headers=headers)
 
 
-def _systemone_media(request: dict[str, Any]) -> dict[str, Any]:
-    answers: dict[str, Any] = {}
-    usage = {"input_tokens": 0, "output_tokens": 0}
-    for part in _split_record(request):
-        part.setdefault("model", request.get("model", "clef-flash"))
-        response = S["systemone"](S["model"], S["processor"], part)
-        answers.update(response["answers"])
-        usage["input_tokens"] += response["usage"]["input_tokens"]
-    return {"model": request.get("model", "clef-flash"), "answers": answers, "usage": usage}
+def map_exception(exc: Exception) -> ApiError:
+    """Engine/media/validation exceptions -> contract HTTP errors (never leaks a traceback)."""
+    if isinstance(exc, ApiError):
+        return exc
+    if isinstance(exc, GpuOutOfMemory):
+        return ApiError(503, str(exc) or "GPU out of memory, retry shortly")
+    if isinstance(exc, EngineNotReady):
+        return ApiError(503, str(exc) or "model is not ready")
+    if isinstance(exc, InputTooLarge):
+        return ApiError(413, str(exc) or "input too large")
+    if isinstance(exc, (MediaError, ValueError)):
+        return ApiError(400, str(exc))
+    log.error("unhandled error", exc_info=exc)
+    return ApiError(500, "internal server error")
 
 
-def _handle(request: dict[str, Any]) -> dict[str, Any]:
-    request = _sanitize(request)
-    if request.get("images") or request.get("videos"):
-        return _systemone_media(request)
-    return _systemone_text(request)
+# ------------------------------------------------------------------ ASGI middleware
 
 
-@app.post("/v1/systemone")
-def v1_systemone(request: dict[str, Any]) -> JSONResponse:
-    if not S["ready"]:
-        raise HTTPException(503, S["error"] or "model loading")
-    try:
-        return JSONResponse(_handle(request))
-    except (ValueError, KeyError) as exc:
-        raise HTTPException(400, str(exc))
-    except Exception as exc:
-        raise HTTPException(500, f"{exc}\n{traceback.format_exc()}")
+class GuardMiddleware:
+    """Request id, body-size limit (Content-Length + streamed), and request recording for inference routes."""
 
+    def __init__(self, app: Any, cfg: Config, stats: Stats):
+        self.app, self.cfg, self.stats = app, cfg, stats
+        self.limit = cfg.max_body_mb * 1024 * 1024
 
-@app.post("/v1/batch")
-def v1_batch(payload: dict[str, Any]) -> JSONResponse:
-    if not S["ready"]:
-        raise HTTPException(503, S["error"] or "model loading")
-    try:
-        records = payload.get("batch")
-        if not isinstance(records, list) or not records:
-            raise ValueError("payload must be {\"batch\": [<request>, ...]}")
-        requests = [_sanitize(r) for r in records]
-        if any(r.get("images") or r.get("videos") for r in requests):
-            raise ValueError("/v1/batch is text/JSON only; use /v1/systemone per media record")
-        tokenizer = S["processor"].tokenizer
-        encoded = [S["encode"](tokenizer, r, processor=S["processor"]) for r in requests]
-        device = next(S["model"].parameters()).device
-        batch = S["collate"](encoded, tokenizer.pad_token_id, device)
-        t0 = time.perf_counter()
-        with torch.inference_mode():
-            logits_batch = S["model"](batch)
-        torch.cuda.synchronize() if DEVICE == "cuda" else None
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        out = []
-        for request, enc, logits in zip(requests, encoded, logits_batch):
-            answers = {
-                q.question_id: S["answer_of"](
-                    request["questions"][q.question_id],
-                    dict(zip(q.option_ids, ql.float().softmax(-1).tolist())),
-                )
-                for q, ql in zip(enc.questions, logits)
+    async def __call__(self, scope: dict[str, Any], receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope["headers"]}
+        rid = headers.get("x-request-id", "")
+        rid = rid if _RID_OK.match(rid) else uuid.uuid4().hex
+        state = scope.setdefault("state", {})
+        state.update(request_id=rid, t0=time.perf_counter(), rec={}, error=None)
+        tracked = scope["method"] == "POST" and scope["path"] in TRACKED
+        status = 500
+        received = 0
+
+        async def send_wrap(msg: dict[str, Any]) -> None:
+            nonlocal status
+            if msg["type"] == "http.response.start":
+                status = msg["status"]
+                msg = {**msg, "headers": [*msg.get("headers", []), (b"x-request-id", rid.encode())]}
+            await send(msg)
+
+        async def receive_wrap() -> dict[str, Any]:
+            nonlocal received
+            msg = await receive()
+            if msg["type"] == "http.request":
+                received += len(msg.get("body", b""))
+                if received > self.limit:
+                    raise BodyTooLarge(self.cfg.max_body_mb)
+            return msg
+
+        try:
+            with self.stats.in_flight() if tracked else nullcontext():
+                declared = headers.get("content-length", "")
+                if declared.isdigit() and int(declared) > self.limit:
+                    state["error"] = msg_ = f"request body exceeds {self.cfg.max_body_mb} MB limit"
+                    resp = JSONResponse({"detail": msg_, "request_id": rid}, status_code=413)
+                    await resp(scope, receive, send_wrap)
+                else:
+                    await self.app(scope, receive_wrap, send_wrap)
+        finally:
+            if tracked:
+                self._record(scope["path"], status, state)
+
+    def _record(self, path: str, status: int, state: dict[str, Any]) -> None:
+        rec = state["rec"]
+        self.stats.record_request(
+            {
+                "endpoint": path,
+                "status": status,
+                "ms": round((time.perf_counter() - state["t0"]) * 1000, 1),
+                "input_tokens": rec.get("input_tokens", 0),
+                "n_records": rec.get("n_records", 0),
+                "n_questions": rec.get("n_questions", 0),
+                "media": rec.get("media", {"images": 0, "videos": 0}),
+                "error": state.get("error"),
+                "state_preview": rec.get("state_preview"),
             }
-            out.append({
-                "model": request.get("model", "clef-flash"),
-                "answers": answers,
-                "usage": {"input_tokens": len(enc.input_ids), "output_tokens": 0},
-            })
-        return JSONResponse({
-            "batch_ms": round(elapsed_ms, 1),
-            "results": out,
-        })
-    except (ValueError, KeyError) as exc:
-        raise HTTPException(400, str(exc))
-    except Exception as exc:
-        raise HTTPException(500, f"{exc}\n{traceback.format_exc()}")
+        )
 
 
-@app.get("/health")
-def health() -> JSONResponse:
-    gpu = {"available": torch.cuda.is_available(), "device": None, "vram_total_gb": None}
-    if gpu["available"]:
-        prop = torch.cuda.get_device_properties(0)
-        gpu["device"] = prop.name
-        gpu["vram_total_gb"] = round(prop.total_memory / 1e9, 1)
-        gpu["vram_allocated_gb"] = round(torch.cuda.memory_allocated() / 1e9, 1)
-    return JSONResponse({
-        "ready": S["ready"], "device": DEVICE, "gpu": gpu,
-        "load_seconds": S.get("load_seconds"), "error": S["error"],
-    }, status_code=200 if S["ready"] else 503)
+# ------------------------------------------------------------------ SSE
 
 
-@app.get("/schema-example")
-def schema_example() -> dict[str, Any]:
-    return {
-        "text_json": {
-            "model": "clef-flash",
-            "state": {"ticket": {"text": "Checkout errors, orders blocked.", "customers_affected": 1200}},
-            "questions": {
-                "department": {
-                    "type": "choice", "instructions": "Which team should handle the message?",
-                    "criteria": {"billing": "Payments or invoices", "technical": "Bugs or outages"}},
-                "urgency": {"type": "score", "criteria": ["Can wait", "This week", "Today"]},
-                "outage": {"type": "noul", "instructions": "Is a service down?"},
+async def sse_events(
+    stats: Stats,
+    status_fn: Callable[[], dict[str, Any]],
+    is_disconnected: Callable[[], Awaitable[bool]],
+    interval: float = SSE_STATS_INTERVAL_S,
+) -> AsyncIterator[str]:
+    """`event: log` per request + `event: stats` every `interval` s; stops when the client goes away."""
+
+    def frame(event: str, data: Any) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    sub = stats.subscribe()
+    task: asyncio.Task[dict[str, Any]] | None = None
+    try:
+        yield frame("stats", status_fn())
+        next_stats = time.monotonic() + interval
+        while not await is_disconnected():
+            if task is None:
+                task = asyncio.ensure_future(sub.__anext__())
+            wait = max(0.0, min(next_stats - time.monotonic(), 1.0))
+            done, _ = await asyncio.wait({task}, timeout=wait)
+            if done:
+                entry = task.result()
+                task = None
+                yield frame("log", entry)
+            if time.monotonic() >= next_stats:
+                next_stats = time.monotonic() + interval
+                yield frame("stats", status_fn())
+    finally:
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await sub.aclose()
+
+
+# ------------------------------------------------------------------ app factory
+
+
+def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
+    setup_logging()
+    cfg = cfg or config_mod.load()
+    stats = Stats(cfg.log_buffer)
+    eng = engine if engine is not None else Engine(cfg, stats)
+    started = time.time()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        log.info("starting clef server %s (model load runs in background)", VERSION)
+        eng.start()
+        try:
+            yield
+        finally:
+            eng.shutdown()
+
+    app = FastAPI(
+        title="clef-flash local",
+        version=VERSION,
+        lifespan=lifespan,
+        description=(
+            "SystemOne decision API: calibrated probabilities for choice / score / noul questions over any text or "  # noqa: E501
+            "JSON state (+ images and videos), in one forward pass. Errors are `{detail, request_id}`."
+        ),
+    )
+    app.state.cfg, app.state.stats, app.state.engine = cfg, stats, eng
+    app.add_middleware(GuardMiddleware, cfg=cfg, stats=stats)
+
+    # ---- errors
+    @app.exception_handler(ApiError)
+    async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
+        return _error(request, exc.status, exc.detail, exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def _invalid(request: Request, exc: RequestValidationError) -> JSONResponse:
+        return _error(request, 400, format_errors(list(exc.errors())))
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        return _error(request, exc.status_code, str(exc.detail), dict(exc.headers or {}))
+
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+        log.error("unhandled error [%s]", _rid(request), exc_info=exc)
+        resp = _error(request, 500, "internal server error")
+        resp.headers["X-Request-ID"] = _rid(request)  # runs outside GuardMiddleware
+        return resp
+
+    # ---- auth
+    async def require_key(request: Request) -> None:
+        if cfg.api_key is None:
+            return
+        given = request.headers.get("x-api-key")
+        auth = request.headers.get("authorization", "")
+        if not given and auth.lower().startswith("bearer "):
+            given = auth[7:].strip()
+        if not given and request.url.path == "/v1/events":
+            given = request.query_params.get("key")
+        if not given or not hmac.compare_digest(given.encode(), cfg.api_key.encode()):
+            raise ApiError(401, "missing or invalid API key", {"WWW-Authenticate": "Bearer"})
+
+    v1 = APIRouter(prefix="/v1", dependencies=[Depends(require_key)], responses=ERRORS)
+
+    # ---- inference
+    def gpu_ready() -> None:
+        if eng.status in ("loading", "error"):
+            raise EngineNotReady(eng.error or "model is loading")
+
+    async def infer(request: Request, reqs: list[SystemOneRequest], batch: bool) -> list[dict[str, Any]]:
+        rec = request.state.rec
+        rec["n_records"] = len(reqs)
+        rec["n_questions"] = sum(len(r.questions) for r in reqs)
+        rec["media"] = {
+            "images": sum(len(r.images or []) for r in reqs),
+            "videos": sum(len(r.videos or []) for r in reqs),
+        }
+        if cfg.log_state:
+            rec["state_preview"] = json.dumps(reqs[0].state, default=str, ensure_ascii=False)[:200]
+        for i, r in enumerate(reqs):
+            check_limits(r, cfg, f"batch[{i}]." if batch else "")
+        gpu_ready()
+
+        def build() -> list[dict[str, Any]]:
+            records = []
+            for i, r in enumerate(reqs):
+                try:
+                    images, videos = load_media(r.images, r.videos, cfg)
+                except MediaError as exc:
+                    raise MediaError(f"batch[{i}].{exc}" if batch else str(exc)) from exc
+                records.append(r.to_record(images, videos))
+            return records
+
+        records = await run_in_threadpool(build)
+        results = await eng.decide(records)
+        rec["input_tokens"] = sum(int(r.get("usage", {}).get("input_tokens", 0)) for r in results)
+        return results
+
+    def with_total(res: dict[str, Any], total_ms: float) -> dict[str, Any]:
+        return {**res, "timing": {**res.get("timing", {}), "total_ms": round(total_ms, 1)}}
+
+    @v1.post("/systemone", response_model=SystemOneResponse, summary="Decide one request")
+    async def systemone(body: SystemOneRequest, request: Request) -> dict[str, Any]:
+        t0 = time.perf_counter()
+        try:
+            results = await infer(request, [body], batch=False)
+        except Exception as exc:
+            raise map_exception(exc) from exc
+        return with_total(results[0], (time.perf_counter() - t0) * 1000)
+
+    @v1.post("/batch", response_model=BatchResponse, summary="Decide many requests (one micro-batched pass)")
+    async def batch(body: BatchRequest, request: Request) -> dict[str, Any]:
+        t0 = time.perf_counter()
+        try:
+            check_batch_size(body, cfg)
+            results = await infer(request, body.batch, batch=True)
+        except Exception as exc:
+            raise map_exception(exc) from exc
+        ms = (time.perf_counter() - t0) * 1000
+        return {"batch_ms": round(ms, 1), "results": [with_total(r, ms) for r in results]}
+
+    # ---- observability
+    def info() -> dict[str, Any]:
+        try:
+            return dict(eng.info())
+        except Exception:
+            log.exception("engine.info() failed")
+            return {}
+
+    def stats_body(window_s: int = 300) -> dict[str, Any]:
+        body = stats.snapshot(window_s)
+        gpu = info().get("gpu") or {}
+        body["status"] = eng.status
+        body["gpu"] = {k: gpu.get(k) for k in ("vram_allocated_gb", "vram_reserved_gb", "vram_total_gb")}
+        return body
+
+    @v1.get("/stats", summary="Rolling latency / throughput / GPU stats")
+    async def v1_stats(window_s: int = Query(300, ge=5, le=3600)) -> dict[str, Any]:
+        return stats_body(window_s)
+
+    @v1.get("/log", summary="Recent request log (newest last)")
+    async def v1_log(
+        limit: int = Query(100, ge=1, le=1000), since: int | None = Query(None, ge=0)
+    ) -> dict[str, Any]:
+        return {"entries": stats.log(limit, since)}
+
+    @v1.get("/events", summary="Server-sent events: request log + stats every 2 s")
+    async def v1_events(request: Request) -> StreamingResponse:
+        return StreamingResponse(
+            sse_events(stats, stats_body, request.is_disconnected),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    app.include_router(v1)
+
+    @app.get("/health", summary="Model + GPU status (503 until ready/warming)")
+    async def health() -> JSONResponse:
+        status = eng.status
+        ok = status in ("ready", "warming")
+        body = {
+            "ready": ok,
+            "status": status,
+            "version": VERSION,
+            **info(),
+            "load_seconds": eng.load_seconds,
+            "uptime_s": int(time.time() - started),
+            "error": eng.error,
+            "limits": cfg.public_limits(),
+        }
+        return JSONResponse(body, status_code=200 if ok else 503)
+
+    @app.get("/livez", summary="Process liveness")
+    async def livez() -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.get("/schema-example", summary="Copy-paste ready request bodies")
+    async def schema_example() -> dict[str, Any]:
+        return {
+            "text_json": {
+                "model": "clef-flash",
+                "state": {"ticket": {"text": "Checkout errors, orders blocked.", "customers_affected": 1200}},
+                "questions": {
+                    "department": {
+                        "type": "choice",
+                        "instructions": "Which team should handle the message?",
+                        "criteria": {"billing": "Payments or invoices", "technical": "Bugs or outages"},
+                    },
+                    "urgency": {"type": "score", "criteria": ["Can wait", "This week", "Today"]},
+                    "outage": {"type": "noul", "instructions": "Is a service down?"},
+                },
             },
-        },
-        "media": {
-            "model": "clef-flash",
-            "state": "Review the attached receipt.",
-            "images": ["data:image/jpeg;base64,<base64 bytes of the image>"],
-            "videos": ["data:video/mp4;base64,<base64 bytes of the video>"],
-            "questions": {"legible": {"type": "noul", "instructions": "Is the total legible?"}},
-        },
-        "batch": {"batch": ["<2..N systemone request objects>"]},
-        "note": "clef returns CALIBRATED PROBABILITIES for every option in one forward pass - no text generation.",
-    }
+            "media": {
+                "model": "clef-flash",
+                "state": "Review the attached receipt.",
+                "images": ["data:image/jpeg;base64,<base64 bytes of the image>"],
+                "videos": ["data:video/mp4;base64,<base64 bytes of the video>"],
+                "questions": {"legible": {"type": "noul", "instructions": "Is the total legible?"}},
+                "note": (
+                    f"All media of a request goes into ONE record. Limits: {cfg.max_images} images, "
+                    f"{cfg.max_videos} videos; images > {cfg.max_pixels} px are downscaled; videos sampled at "  # noqa: E501
+                    f"{cfg.video_fps} fps, max {cfg.max_frames} frames. http(s) URLs only with CLEF_ALLOW_URL_FETCH=1."  # noqa: E501
+                ),
+            },
+            "batch": {"batch": ["<1..N systemone request objects, media allowed>"]},
+            "auth": "If CLEF_API_KEY is set send X-API-Key: <key> or Authorization: Bearer <key> on /v1/*.",
+            "note": "clef returns CALIBRATED PROBABILITIES for every option in one forward pass - no text generation.",  # noqa: E501
+        }
 
+    # console: must be the LAST route so API routes win
+    static = Path(__file__).parent / "static"
+    if static.is_dir():
+        app.mount("/", StaticFiles(directory=static, html=True), name="console")
+    return app
+
+
+app = create_app()
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    _cfg: Config = app.state.cfg
+    uvicorn.run(app, host=_cfg.host, port=_cfg.port, workers=1)
