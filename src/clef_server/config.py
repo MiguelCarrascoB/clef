@@ -131,6 +131,8 @@ class Config:
     max_labels: int = field(default_factory=lambda: _int("CLEF_MAX_LABELS", 64))
     max_classifiers: int = field(default_factory=lambda: _int("CLEF_MAX_CLASSIFIERS", 1000))
     classify_threshold: float = field(default_factory=lambda: _float("CLEF_CLASSIFY_THRESHOLD", 0.5))
+    max_eval_rows: int = field(default_factory=lambda: _int("CLEF_MAX_EVAL_ROWS", 500))  # POST /v1/evaluate
+    max_job_eval_rows: int = field(default_factory=lambda: _int("CLEF_MAX_JOB_EVAL_ROWS", 100000))  # job
     allow_url_fetch: bool = field(default_factory=lambda: _bool("CLEF_ALLOW_URL_FETCH", False))
     url_fetch_max_mb: int = field(default_factory=lambda: _int("CLEF_URL_FETCH_MAX_MB", 32))
 

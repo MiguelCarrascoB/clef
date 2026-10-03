@@ -89,7 +89,7 @@ ERRORS: dict[int | str, dict[str, Any]] = {
     }.items()
 }
 # Feature modules: each exposes router(ctx: AppContext) -> APIRouter (see appctx.py). One line each.
-FEATURES: list[str] = []
+FEATURES: list[str] = ["evaluation"]
 
 
 def setup_logging() -> None:
