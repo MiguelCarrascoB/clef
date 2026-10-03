@@ -32,6 +32,7 @@ export function HealthPill() {
   return html`<div class="health" title=${tip}>
     <span class=${`dot dot-${health.state}`}></span>
     <span class="health-label">${label}</span>
+    ${d && d.backend ? html`<span class="mono muted small" title=${`backend ${d.backend}`}>${d.backend}</span>` : null}
     ${d && d.gpu && d.gpu.available ? html`<span class="health-gpu muted" title=${d.gpu.name}>${shortGpu(d.gpu.name)}</span><${VramBar} gpu=${d.gpu} compact />` : null}
   </div>`;
 }

@@ -53,6 +53,17 @@ export const S = {
     presetName: (draft && draft.presetName) || first.name,
   },
   run: { running: false, result: null, error: null, request: null, clientMs: null, slow: false },
+  prevResult: null, // the SystemOne result before the current one (overlay in the result charts)
+  showPrev: true,
+  pgMode: lsGet('clef.pgMode', 'systemone'), // 'systemone' | 'classify'
+  cl: lsGet('clef.classify', null) || {
+    input: 'Our checkout started returning errors about 20 minutes ago and orders are blocked.',
+    labels: [{ name: 'billing', desc: 'Payments or invoices' }, { name: 'technical', desc: 'Bugs or outages' }, { name: 'account', desc: 'Login or profile problems' }],
+    multi: false, threshold: 0.5, instructions: '', saveName: '',
+  },
+  clRun: { running: false, result: null, error: null, request: null, clientMs: null },
+  clPrev: null,
+  classifiers: { loaded: false, list: [], error: null },
   compare: [],
   presets: lsGet('clef.presets', []),
   history: lsGet('clef.history', []),
@@ -75,6 +86,15 @@ export function useStore() {
     return () => listeners.delete(f);
   }, []);
   return S;
+}
+
+export function setPgMode(m) { lsSet('clef.pgMode', m); set({ pgMode: m }); }
+let clTimer = null;
+export function setCl(patch) {
+  Object.assign(S.cl, patch);
+  notify();
+  clearTimeout(clTimer);
+  clTimer = setTimeout(() => lsSet('clef.classify', S.cl), 400);
 }
 
 let draftTimer = null;

@@ -58,6 +58,14 @@ export function CodeBlock({ text, json = false, copy = true, label }) {
 
 export function ErrorBox({ error, title = 'Request failed' }) {
   if (!error) return null;
+  if (error.status === 429) {
+    return html`<div class="errorbox ratelimit" role="alert">
+      <strong>Rate limited (HTTP 429)</strong>
+      <div class="err-detail">${error.message}</div>
+      <div class="small">${error.retryAfter != null ? html`Retry in <span class="mono">${error.retryAfter}s</span>.` : 'Retry shortly.'}</div>
+      ${error.requestId ? html`<div class="muted small">request_id <span class="mono">${error.requestId}</span></div>` : null}
+    </div>`;
+  }
   return html`<div class="errorbox" role="alert">
     <strong>${title}${error.status ? ` (HTTP ${error.status})` : ''}</strong>
     <div class="mono err-detail">${error.message || String(error)}</div>
@@ -91,7 +99,7 @@ export function Tile({ label, value, sub, tone, children }) {
   </div>`;
 }
 
-export function Empty({ children }) { return html`<div class="empty">${children}</div>`; }
+export function Empty({ children }) { return html`<div class="empty" role="status">${children}</div>`; }
 
 /** Closes on outside click / Escape. */
 export function usePopover(onClose, ref) {

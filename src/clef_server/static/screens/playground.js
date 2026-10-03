@@ -10,6 +10,7 @@ import {
 import { MediaZone } from '../components/media.js';
 import { SchemaBuilder } from '../components/schema.js';
 import { ResultsView } from '../components/results.js';
+import { Classify, ModeSwitch } from './classify.js';
 
 let abortCtl = null;
 
@@ -34,13 +35,14 @@ export async function runPlayground() {
     return;
   }
   abortCtl = new AbortController();
+  const before = S.run.result;
   set({ run: { running: true, result: null, error: null, request, clientMs: null, slow: false } });
   const slowTimer = setTimeout(() => { if (S.run.running) set({ run: { ...S.run, slow: true } }); }, 5000);
   const t0 = performance.now();
   try {
     const { data } = await api.systemone(request, abortCtl.signal);
     const clientMs = performance.now() - t0;
-    set({ run: { running: false, result: data, error: null, request, clientMs, slow: false } });
+    set({ run: { running: false, result: data, error: null, request, clientMs, slow: false }, prevResult: before || S.prevResult });
     addHistory({
       preset: pg.presetName || '', request: stripMedia(request), response: data, clientMs,
       media: pg.media.map((m) => ({ name: m.name, kind: m.kind, size: m.size, thumb: m.thumb || null })),
@@ -138,6 +140,11 @@ function Presets() {
 }
 
 export function Playground() {
+  const { pgMode } = useStore();
+  return pgMode === 'classify' ? html`<${Classify} />` : html`<${SystemOnePlayground} />`;
+}
+
+function SystemOnePlayground() {
   const { pg, run, limits } = useStore();
   const root = useRef(null);
   useEffect(() => {
@@ -151,7 +158,7 @@ export function Playground() {
   return html`<div class="split" ref=${root}>
     <div class="pane left">
       <div class="pane-head">
-        <h2>Request <span class="muted small">${pg.presetName ? `· ${pg.presetName}` : ''}</span></h2>
+        <div class="row gap"><h2>Request <span class="muted small">${pg.presetName ? `· ${pg.presetName}` : ''}</span></h2><${ModeSwitch} /></div>
         <div class="row gap">
           ${run.running ? html`<button class="btn sm" type="button" onClick=${() => abortCtl && abortCtl.abort()}>Cancel</button>` : null}
           <button class="btn primary" type="button" disabled=${run.running || blocked} onClick=${runPlayground}

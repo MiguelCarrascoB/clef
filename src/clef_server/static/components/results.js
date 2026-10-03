@@ -1,66 +1,50 @@
 // Result cards, metrics strip and the 5-tab results view.
 import { html, useState } from '../vendor/standalone.module.js';
-import { fmtPct, fmtNum, sortedProbs, snippets, truncateMedia } from '../util.js';
+import { fmtPct, fmtNum, sortedProbs, snippets, truncateMedia, answerEntropy } from '../util.js';
+import { S, set, useStore } from '../store.js';
+import { ProbBars, ScoreChart, Gauge, Uncertainty } from './charts.js';
 import { getKey } from '../api.js';
 import { ConfBadge, Tabs, CodeBlock, ErrorBox, Empty } from './common.js';
 
-function ChoiceResult({ a }) {
+function ChoiceResult({ a, prev }) {
   const rows = sortedProbs(a);
-  return html`<div class="bars">
-    ${rows.map(([k, p]) => html`<div key=${k} class=${`bar-row ${k === a.choice ? 'top' : ''}`}>
-      <div class="bar-label" title=${k}>${k}</div>
-      <div class="bar-track" role="img" aria-label=${`${k} ${fmtPct(p)}`}><div class="bar-fill" style=${{ width: `${Math.max(0.5, p * 100)}%` }}></div></div>
-      <div class="bar-val mono">${fmtPct(p)}</div>
-    </div>`)}
+  const pp = prev && prev.type === 'choice' && prev.probabilities ? prev.probabilities : null;
+  return html`<div>
+    <${ProbBars} entries=${rows} topKey=${a.choice} prev=${pp} />
+    <${Uncertainty} ent=${answerEntropy(a)} />
   </div>`;
 }
 
-function ScoreResult({ a }) {
-  const keys = Object.keys(a.probabilities || {}).sort((x, y) => Number(x) - Number(y));
-  const n = keys.length;
-  const W = 100, pad = n > 1 ? 100 / (n * 2) : 50;
-  const xOf = (v) => (n > 1 ? pad + (v / (n - 1)) * (W - 2 * pad) : 50);
-  const maxP = Math.max(...keys.map((k) => a.probabilities[k]), 0.001);
+function ScoreResult({ a, prev }) {
+  const n = Object.keys(a.probabilities || {}).length;
+  const pv = prev && prev.type === 'score' && prev.probabilities ? prev : null;
   return html`<div class="score">
-    <div class="score-value"><span class="mono big">${fmtNum(a.score)}</span><span class="muted small"> expected level, 0 to ${n - 1}</span></div>
-    <div class="score-axis" role="img" aria-label=${`Expected value ${fmtNum(a.score)} on a 0 to ${n - 1} axis`}>
-      <svg viewBox="0 0 100 10" preserveAspectRatio="none" class="axis-svg">
-        <line x1=${xOf(0)} x2=${xOf(n - 1)} y1="5" y2="5" class="axis-line" vector-effect="non-scaling-stroke"/>
-        ${keys.map((k, i) => html`<line key=${k} x1=${xOf(i)} x2=${xOf(i)} y1="2.5" y2="7.5" class="axis-tick" vector-effect="non-scaling-stroke"/>`)}
-      </svg>
-      <div class="axis-marker" style=${{ left: `${xOf(a.score)}%` }}><span class="axis-marker-label mono">${fmtNum(a.score)}</span></div>
-    </div>
-    <div class="dist" style=${{ gridTemplateColumns: `repeat(${n}, 1fr)` }}>
-      ${keys.map((k) => {
-        const p = a.probabilities[k];
-        const isTop = p === Math.max(...keys.map((x) => a.probabilities[x]));
-        return html`<div key=${k} class=${`dist-col ${isTop ? 'top' : ''}`}>
-          <div class="dist-pct mono">${fmtPct(p, 0)}</div>
-          <div class="dist-bar-wrap"><div class="dist-bar" style=${{ height: `${(p / maxP) * 100}%` }}></div></div>
-          <div class="dist-idx mono">${k}</div>
-          <div class="dist-legend" title=${(a.legend || {})[k] || ''}>${(a.legend || {})[k] || ''}</div>
-        </div>`;
-      })}
-    </div>
+    <div class="muted small" style=${{ marginBottom: '4px' }}>Expected level on a 0 to ${n - 1} scale${pv ? ` (previous ${fmtNum(pv.score)})` : ''}</div>
+    <${ScoreChart} probs=${a.probabilities} legend=${a.legend} score=${a.score} prevScore=${pv ? pv.score : null} prevProbs=${pv ? pv.probabilities : null} />
+    <${Uncertainty} ent=${answerEntropy(a)} />
   </div>`;
 }
 
-function NoulResult({ a }) {
+function NoulResult({ a, prev }) {
   const p = a.noul;
+  const pv = prev && prev.noul != null ? prev.noul : null;
   return html`<div class="noul">
-    <div class="noul-head"><span class="mono big">${fmtPct(p)}</span><span class="muted small"> P(true)</span>
-      <span class=${`verdict ${p >= 0.5 ? 'yes' : 'no'}`}>${p >= 0.5 ? 'TRUE' : 'FALSE'}</span></div>
-    <div class="noul-meter" role="meter" aria-valuenow=${p} aria-valuemin="0" aria-valuemax="1" aria-label="P(true)">
-      <div class="noul-fill" style=${{ width: `${p * 100}%` }}></div><div class="noul-mid"></div>
+    <div class="gauge-wrap">
+      <${Gauge} value=${p} prev=${pv} />
+      <div>
+        <span class=${`verdict ${p >= 0.5 ? 'yes' : 'no'}`}>${p >= 0.5 ? 'TRUE' : 'FALSE'}</span>
+        ${pv != null ? html`<div class="small muted" style=${{ marginTop: '6px' }}>previous run ${fmtPct(pv)}</div>` : null}
+        <${Uncertainty} ent=${answerEntropy(a)} />
+      </div>
     </div>
-    <div class="noul-scale muted small mono"><span>0</span><span>0.5</span><span>1</span></div>
   </div>`;
 }
 
-export function QuestionResult({ id, a, question }) {
+export function QuestionResult({ id, a, question, prev }) {
   if (!a) return null;
   const kind = a.type || (a.noul != null ? 'noul' : a.score != null ? 'score' : 'choice');
   const head = kind === 'choice' ? a.choice : kind === 'score' ? fmtNum(a.score) : (a.noul >= 0.5 ? 'true' : 'false');
+  const p = prev ? { type: prev.type || kind, ...prev } : null;
   return html`<section class="card qres">
     <header class="qres-head">
       <div class="qres-title"><span class="mono qid">${id}</span><span class=${`chip type-${kind}`}>${kind}</span></div>
@@ -68,7 +52,7 @@ export function QuestionResult({ id, a, question }) {
     </header>
     ${question && question.instructions ? html`<div class="muted small qinstr">${question.instructions}</div>` : null}
     <div class="qres-answer"><span class="answer">${head}</span></div>
-    ${kind === 'choice' ? html`<${ChoiceResult} a=${a} />` : kind === 'score' ? html`<${ScoreResult} a=${a} />` : html`<${NoulResult} a=${a} />`}
+    ${kind === 'choice' ? html`<${ChoiceResult} a=${a} prev=${p} />` : kind === 'score' ? html`<${ScoreResult} a=${a} prev=${p} />` : html`<${NoulResult} a=${a} prev=${p} />`}
   </section>`;
 }
 
@@ -88,6 +72,8 @@ export function Metrics({ run }) {
 
 export function ResultsView({ run, questions }) {
   const [tab, setTab] = useState('cards');
+  const { prevResult, showPrev } = useStore();
+  const prevAnswers = showPrev && prevResult && prevResult.answers ? prevResult.answers : null;
   const { running, result, error, request, slow } = run;
   const tabs = [
     { id: 'cards', label: 'Cards' }, { id: 'request', label: 'Request JSON' },
@@ -100,9 +86,12 @@ export function ResultsView({ run, questions }) {
     <${ErrorBox} error=${error} />
     ${tab === 'cards' ? html`<div>
       ${result ? html`<${Metrics} run=${run} />` : null}
-      ${!result && !error && !running ? html`<${Empty}>Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> or Run to get calibrated probabilities.<//>` : null}
+      ${result && prevResult ? html`<label class="row gap small" style=${{ margin: '8px 0 0', cursor: 'pointer' }}><input type="checkbox" checked=${showPrev} onChange=${(e) => set({ showPrev: e.target.checked })} />
+        <span>Overlay previous run</span><span class="muted">(ticks and deltas)</span></label>` : null}
+      ${!result && !error && !running ? html`<${Empty}><span class="glyph" aria-hidden="true">♭</span><strong>No result yet</strong><span>Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> or Run to get calibrated probabilities.</span><//>` : null}
+      ${running && !result ? html`<div class="skel" style=${{ height: '170px', marginTop: '10px' }} aria-hidden="true"></div>` : null}
       <div class="qres-list">
-        ${result ? Object.entries(result.answers || {}).map(([id, a]) => html`<${QuestionResult} key=${id} id=${id} a=${a} question=${(request && request.questions || questions || {})[id]} />`) : null}
+        ${result ? Object.entries(result.answers || {}).map(([id, a]) => html`<${QuestionResult} key=${id} id=${id} a=${a} prev=${prevAnswers ? prevAnswers[id] : null} question=${(request && request.questions || questions || {})[id]} />`) : null}
       </div>
     </div>` : null}
     ${tab === 'request' ? (request ? html`<${CodeBlock} json text=${JSON.stringify(truncateMedia(request), null, 2)} />` : html`<${Empty}>No request yet.<//>`) : null}

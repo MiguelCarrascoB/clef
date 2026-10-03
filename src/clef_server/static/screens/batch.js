@@ -6,11 +6,12 @@ import {
   parseCsv, toCsv, download, cardsToContract, validateQuestions, errCount, fmtPct, fmtNum, topAnswer, confidenceOf, confLevel,
 } from '../util.js';
 import { Empty } from '../components/common.js';
+import { BatchSummary, CalibrationCard } from '../components/summary.js';
 import { openInPlayground } from './playground.js';
 
 S.batch = {
   fmt: 'csv', text: '', fileName: '', stateMode: 'row', template: '{{text}}', schema: 'playground',
-  chunk: 8, status: 'idle', done: 0, total: 0, rows: [], parseError: null, sort: { col: null, dir: 1 }, notice: null,
+  chunk: 8, status: 'idle', done: 0, total: 0, rows: [], parseError: null, sort: { col: null, dir: 1 }, notice: null, filter: null,
 };
 const B = () => S.batch;
 const upd = (patch) => set({ batch: { ...S.batch, ...patch } });
@@ -110,7 +111,7 @@ function start() {
   try { parsed = parseInput(b.fmt, b.text); } catch (e) { upd({ parseError: e.message }); return; }
   if (!parsed.items.length) { upd({ parseError: 'No rows to process.' }); return; }
   const rows = parsed.items.map((item, i) => ({ i, item, state: stateFor(item, b), response: null, error: null }));
-  upd({ rows, parseError: null, sort: { col: null, dir: 1 } });
+  upd({ rows, parseError: null, sort: { col: null, dir: 1 }, filter: null });
   runChunks(rows.map((r) => r.i));
 }
 const retryFailed = () => runChunks(B().rows.filter((r) => !r.response).map((r) => r.i));
@@ -180,7 +181,10 @@ export function Batch() {
     if (!f) return;
     upd({ fmt, text: await f.text(), fileName: f.name, parseError: null });
   };
-  const sorted = sortRows(b.rows, b.sort);
+  const idSet = b.filter ? new Set(b.filter.ids) : null;
+  const visible = idSet ? b.rows.filter((r) => idSet.has(r.i)) : b.rows;
+  const sorted = sortRows(visible, b.sort);
+  const done = b.rows.filter((r) => r.response);
   const setSort = (col) => upd({ sort: { col, dir: b.sort.col === col ? -b.sort.dir : 1 } });
   const arrow = (col) => (b.sort.col === col ? (b.sort.dir > 0 ? ' ▲' : ' ▼') : '');
   const failed = b.rows.filter((r) => !r.response && r.error).length;
@@ -239,7 +243,11 @@ export function Batch() {
         ${b.total ? html`<div class="progress-wrap"><div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax=${b.total} aria-valuenow=${b.done}>
             <div class="progress-fill" style=${{ width: `${(b.done / b.total) * 100}%` }}></div></div>
           <div class="muted small mono">${b.done}/${b.total} · ${b.status}${failed ? ` · ${failed} failed` : ''}</div></div>` : null}
-        ${!b.rows.length ? html`<${Empty}>Provide input and press Run batch.<//>` : html`<div class="tablewrap"><table class="table">
+        ${done.length ? html`<${BatchSummary} questions=${questions} rows=${b.rows} filter=${b.filter} onFilter=${(f) => upd({ filter: f })} />` : null}
+        ${done.length ? html`<${CalibrationCard} questions=${questions} rows=${b.rows} columns=${preview.columns} />` : null}
+        ${b.filter ? html`<div class="filter-bar" role="status"><span>Showing <strong>${visible.length}</strong> of ${b.rows.length} rows where <span class="mono">${b.filter.label}</span></span>
+          <button class="btn sm" type="button" onClick=${() => upd({ filter: null })}>Clear filter</button></div>` : null}
+        ${!b.rows.length ? html`<${Empty}><span class="glyph" aria-hidden="true">▤</span><strong>No batch yet</strong><span>Upload a CSV or JSONL file (or paste rows), then press Run batch. Summary charts appear here.</span><//>` : html`<div class="tablewrap"><table class="table">
           <thead><tr><th class="sortable" onClick=${() => setSort('#')} aria-sort=${b.sort.col === '#' ? (b.sort.dir > 0 ? 'ascending' : 'descending') : 'none'}>#${arrow('#')}</th><th>State</th>
             ${Object.keys(questions).map((id) => html`<th key=${id} class="sortable" tabIndex="0" onClick=${() => setSort(id)} onKeyDown=${(e) => e.key === 'Enter' && setSort(id)}
               aria-sort=${b.sort.col === id ? (b.sort.dir > 0 ? 'ascending' : 'descending') : 'none'}>${id}${arrow(id)}</th>`)}</tr></thead>

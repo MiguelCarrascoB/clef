@@ -285,3 +285,65 @@ export async function copyText(text) {
     return ok;
   }
 }
+
+// ---- probability math -------------------------------------------------------------------------
+/** Normalised Shannon entropy of a probability vector: {bits, norm in 0..1}. */
+export function entropy(ps) {
+  const v = ps.filter((p) => p > 0);
+  const tot = v.reduce((a, b) => a + b, 0) || 1;
+  const bits = -v.reduce((a, p) => a + (p / tot) * Math.log2(p / tot), 0);
+  const n = ps.length;
+  return { bits, norm: n > 1 ? bits / Math.log2(n) : 0 };
+}
+export function uncertaintyLevel(norm) {
+  if (norm < 0.35) return { id: 'low', label: 'Confident', icon: '●' };
+  if (norm < 0.7) return { id: 'mid', label: 'Some doubt', icon: '◐' };
+  return { id: 'high', label: 'Uncertain', icon: '○' };
+}
+/** Entropy descriptor for any SystemOne answer. */
+export function answerEntropy(a) {
+  if (!a) return null;
+  if (a.type === 'noul' || (a.noul != null && !a.probabilities)) return entropy([a.noul, 1 - a.noul]);
+  if (a.probabilities) return entropy(Object.values(a.probabilities));
+  return null;
+}
+/** Fixed-width histogram of values in [lo, hi]: returns [{lo, hi, count, idx[]}] (last bin is closed). */
+export function binValues(values, lo, hi, nBins) {
+  const bins = Array.from({ length: nBins }, (_, i) => ({ lo: lo + ((hi - lo) * i) / nBins, hi: lo + ((hi - lo) * (i + 1)) / nBins, count: 0, idx: [] }));
+  values.forEach(({ v, i }) => {
+    if (v == null || Number.isNaN(v)) return;
+    let b = Math.floor(((v - lo) / (hi - lo || 1)) * nBins);
+    b = Math.max(0, Math.min(nBins - 1, b));
+    bins[b].count++; bins[b].idx.push(i);
+  });
+  return bins;
+}
+export const fmtMs = (v) => (v == null ? '-' : v >= 1000 ? `${(v / 1000).toFixed(2)} s` : `${Math.round(v)} ms`);
+export const LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+// ---- classify snippets ------------------------------------------------------------------------
+export function classifierSnippets(name, sample, hasKey) {
+  const origin = location.origin;
+  const text = sample || 'Checkout is down';
+  const q = (s) => JSON.stringify(s);
+  const py = [
+    'from clef_client import ClefClient',
+    '',
+    `result = ClefClient().classifier(${q(name).replace(/"/g, "'")}).classify(${q(text)})`,
+    'print(result.label, result.confidence)   # multi-label: result.labels',
+    'print(result.scores)',
+  ].join('\n');
+  const js = [
+    "import { ClefClient } from 'clef-client';",
+    '',
+    `const result = await new ClefClient().classifier('${name}').classify(${q(text)});`,
+    'console.log(result.label, result.confidence, result.scores);',
+  ].join('\n');
+  const curl = [
+    `curl -sS ${origin}/v1/classifiers/${name} \\`,
+    '  -H "Content-Type: application/json" \\',
+    hasKey ? '  -H "X-API-Key: <your-key>" \\' : null,
+    `  -d '${JSON.stringify({ input: text })}'`,
+  ].filter((x) => x !== null).join('\n');
+  return { python: py, javascript: js, curl };
+}

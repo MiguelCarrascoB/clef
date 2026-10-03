@@ -1,8 +1,9 @@
 // History: saved runs, replay, side-by-side comparison with percentage-point deltas.
-import { html } from '../vendor/standalone.module.js';
+import { html, useState, useRef } from '../vendor/standalone.module.js';
 import { S, set, useStore, removeHistory, clearHistory } from '../store.js';
 import { fmtDateTime, topAnswer, fmtPct, fmtNum, confidenceOf, confLevel } from '../util.js';
 import { Empty } from '../components/common.js';
+import { LineChart, ExportMenu } from '../components/charts.js';
 import { openInPlayground } from './playground.js';
 
 const statePreview = (st) => {
@@ -55,6 +56,41 @@ function Compare({ A, B }) {
   </div>`;
 }
 
+function Trend({ history }) {
+  const runs = history.slice().reverse(); // chronological
+  const qs = new Map();
+  runs.forEach((h) => Object.entries(h.response.answers || {}).forEach(([id, a]) => { if (!qs.has(id)) qs.set(id, a.type || (a.noul != null ? 'noul' : 'score')); }));
+  const [qSel, setQ] = useState('');
+  const [oSel, setO] = useState('');
+  const host = useRef(null);
+  if (!qs.size || runs.length < 2) return null;
+  const qid = qs.has(qSel) ? qSel : [...qs.keys()][0];
+  const type = qs.get(qid);
+  const opts = type === 'choice' ? [...new Set(runs.flatMap((h) => Object.keys(((h.response.answers || {})[qid] || {}).probabilities || {})))]
+    : type === 'score' ? ['expected level'] : ['P(true)'];
+  // default to the option the latest run chose (a flat 0% line for an unlikely option says little)
+  const latestChoice = type === 'choice' ? ((runs[runs.length - 1].response.answers || {})[qid] || {}).choice : null;
+  const opt = opts.includes(oSel) ? oSel : opts.includes(latestChoice) ? latestChoice : opts[0];
+  const maxLevel = type === 'score' ? Math.max(1, ...runs.map((h) => Object.keys(((h.response.answers || {})[qid] || {}).probabilities || {}).length - 1)) : 1;
+  const points = runs.map((h) => {
+    const a = (h.response.answers || {})[qid];
+    if (!a) return null;
+    const y = type === 'choice' ? (a.probabilities || {})[opt] : type === 'score' ? a.score : a.noul;
+    if (y == null) return null;
+    return { x: h.ts, y, title: fmtDateTime(h.ts), note: h.preset || 'custom' };
+  }).filter(Boolean);
+  const d = (t) => new Date(t);
+  const fmtX = (t) => `${d(t).getMonth() + 1}/${d(t).getDate()} ${String(d(t).getHours()).padStart(2, '0')}:${String(d(t).getMinutes()).padStart(2, '0')}`;
+  return html`<section class="card"><div class="card-head"><h3>Trend<span class="sub">${type === 'choice' ? 'probability' : type === 'score' ? 'expected level' : 'P(true)'} of one question across runs</span></h3>
+      <div class="row gap wrap"><select class="input" aria-label="Question" value=${qid} onChange=${(e) => { setQ(e.target.value); setO(''); }}>${[...qs.keys()].map((k) => html`<option key=${k} value=${k}>${k}</option>`)}</select>
+        ${type === 'choice' ? html`<select class="input" aria-label="Option" value=${opt} onChange=${(e) => setO(e.target.value)}>${opts.map((k) => html`<option key=${k} value=${k}>${k}</option>`)}</select>` : null}
+        <${ExportMenu} host=${host} name=${`clef-trend-${qid}`} /></div></div>
+    <div ref=${host}><${LineChart} points=${points} yMin=${0} yMax=${maxLevel} height=${200} yLabel=${type === 'choice' ? `P(${opt})` : opt}
+      fmtY=${type === 'score' ? (v) => fmtNum(v, 1) : (v) => fmtPct(v, 0)} fmtX=${fmtX}
+      ariaLabel=${`Trend of ${qid}${type === 'choice' ? ` option ${opt}` : ''} across ${points.length} runs, latest ${points.length ? (type === 'score' ? fmtNum(points[points.length - 1].y) : fmtPct(points[points.length - 1].y)) : 'none'}`} /></div>
+  </section>`;
+}
+
 export function History() {
   const { history, compare } = useStore();
   const sel = compare.map((id) => history.find((h) => h.id === id)).filter(Boolean);
@@ -67,7 +103,8 @@ export function History() {
         <span class="muted small">${sel.length === 2 ? 'Comparing A and B' : 'Tick two runs to compare'}</span>
         <button class="btn sm" type="button" disabled=${!history.length} onClick=${() => { if (confirm('Delete all history?')) clearHistory(); }}>Clear all</button></div></div>
     ${sel.length === 2 ? html`<${Compare} A=${sel[0]} B=${sel[1]} />` : null}
-    ${!history.length ? html`<${Empty}>No runs yet. Runs from the Playground appear here.<//>` : html`<div class="tablewrap"><table class="table hist">
+    <${Trend} history=${history} />
+    ${!history.length ? html`<${Empty}><span class="glyph" aria-hidden="true">◷</span><strong>No runs yet</strong><span>Runs from the Playground appear here, with a trend chart once you have two.</span><//>` : html`<div class="tablewrap"><table class="table hist">
       <thead><tr><th class="chk" aria-label="Compare"></th><th>Time</th><th>Preset</th><th>State</th><th>Top answers</th><th class="num">ms</th><th></th></tr></thead>
       <tbody>${history.map((h) => {
         const idx = compare.indexOf(h.id);
