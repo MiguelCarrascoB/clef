@@ -96,7 +96,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck scripts/*.sh
-        run: shellcheck scripts/*.sh
+        run: shellcheck -x -P SCRIPTDIR scripts/*.sh
 
   docker:
     name: docker build (${{ matrix.backend }}, no push)

@@ -16,9 +16,9 @@ fi
 echo "== [2/3] Install clef (ROCm 7.2 lock file, then the package in editable mode) =="
 "$CLEF_VENV/bin/python" -m pip install --upgrade pip -q
 "$CLEF_VENV/bin/python" -m pip install -r "$CLEF_HOME/requirements/rocm.txt"
-"$CLEF_VENV/bin/python" -m pip install -e "$CLEF_HOME[server,rocm]"     --extra-index-url https://download.pytorch.org/whl/rocm7.2
+"$CLEF_VENV/bin/python" -m pip install -e "${CLEF_HOME}[server,rocm]"     --extra-index-url https://download.pytorch.org/whl/rocm7.2
 if [ "${CLEF_INSTALL_DEV:-0}" = 1 ]; then
-  "$CLEF_VENV/bin/python" -m pip install -e "$CLEF_HOME[dev]"
+  "$CLEF_VENV/bin/python" -m pip install -e "${CLEF_HOME}[dev]"
 fi
 
 echo "== [3/3] Model weights (pinned revision, ~19 GB, resumable) =="

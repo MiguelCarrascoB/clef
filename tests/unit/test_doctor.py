@@ -84,6 +84,7 @@ def test_backend_check_on_cpu_warns_not_fails(monkeypatch):
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     monkeypatch.setattr(doctor.shutil, "which", lambda n: None)
     monkeypatch.setattr(bk, "_is_wsl", lambda: False)
+    monkeypatch.setattr(bk, "_cpu_memory_bytes", lambda: (2**30, 64 * 2**30, 48 * 2**30))  # host RAM must not matter
     r = doctor.Report(echo=False)
     b = doctor.check_backend(r, Config(device="cpu"))
     assert b is not None and b.name == "cpu"
