@@ -211,7 +211,7 @@ def test_preflight_error_warning_and_ok():
     with pytest.raises(PreflightError) as ei:
         bk.preflight(b, torch.bfloat16, "none", 19.0)
     msg = str(ei.value)
-    assert "need ~19.0 GB" in msg and "10.0 GB free" in msg and "CLEF_QUANT=nf4" in msg and "\n" not in msg
+    assert "need ~19.0 GB" in msg and "10.0 GB free" in msg and "CLEF_QUANT=int8" in msg and "\n" not in msg
     with_memory(b, free=20.0)
     warns = bk.preflight(b, torch.bfloat16, "none", 19.0)
     assert len(warns) == 1 and "low" in warns[0]
@@ -245,11 +245,37 @@ def test_quant_none_is_none():
     assert bk.quantization_config(Backend("cpu", torch.device("cpu")), "none", torch.float32) is None
 
 
-@pytest.mark.parametrize("name", ["rocm", "mps", "cpu"])
-def test_quant_refused_off_cuda(name):
+@pytest.mark.parametrize("name", ["mps", "cpu"])
+def test_nf4_refused_without_gpu_bitsandbytes(name):
     b = Backend(name, torch.device("cpu"))
-    with pytest.raises(BackendError, match=f"requires an NVIDIA GPU .*backend is {name}"):
-        bk.quantization_config(b, "int8", torch.bfloat16)
+    with pytest.raises(BackendError, match="needs an NVIDIA or AMD GPU"):
+        bk.quantization_config(b, "nf4", torch.bfloat16)
+
+
+def test_quant_method_rules():
+    cuda, rocm, mps = (Backend(n, torch.device("cpu")) for n in ("cuda", "rocm", "mps"))
+    assert bk.quant_method(cuda, "int8") == "bnb" and bk.quant_method(cuda, "nf4") == "bnb"
+    assert bk.quant_method(rocm, "int8") == "torchao" and bk.quant_method(mps, "int8") == "torchao"
+    assert bk.quant_method(rocm, "nf4") == "bnb"
+    assert bk.quant_method(cuda, "int8", "torchao") == "torchao"
+    assert bk.quant_method(rocm, "int8", "bnb") == "bnb"
+    with pytest.raises(BackendError, match="only available with bitsandbytes"):
+        bk.quant_method(cuda, "nf4", "torchao")
+    with pytest.raises(BackendError, match="CLEF_QUANT_BACKEND"):
+        bk.quant_method(cuda, "int8", "gguf")
+
+
+def test_quant_torchao_needs_package(monkeypatch):
+    monkeypatch.setattr(bk, "_has_module", lambda name: False)
+    with pytest.raises(BackendError, match="pip install torchao"):
+        bk.quantization_config(Backend("rocm", torch.device("cuda", 0)), "int8", torch.bfloat16)
+
+
+def test_quant_torchao_builds_config(monkeypatch):
+    pytest.importorskip("transformers")
+    pytest.importorskip("torchao")
+    qc = bk.quantization_config(Backend("rocm", torch.device("cuda", 0)), "int8", torch.bfloat16)
+    assert type(qc).__name__ == "TorchAoConfig" and "lm_head" in qc.modules_to_not_convert
 
 
 def test_quant_cuda_needs_bitsandbytes(monkeypatch):
@@ -272,6 +298,52 @@ def test_quant_cuda_builds_config(monkeypatch):
 def test_quant_unknown():
     with pytest.raises(BackendError, match="unknown CLEF_QUANT"):
         bk.quantization_config(Backend("cuda", torch.device("cuda", 0)), "fp4", torch.bfloat16)
+
+
+# ---------------------------------------------------------------- offload / cap / advice
+def test_preflight_cap_limits_available_memory():
+    b = with_memory(Backend("cuda", torch.device("cuda", 0)), free=24.0, total=24.0)
+    with pytest.raises(PreflightError, match="the cap allows 16.0 GB") as ei:
+        bk.preflight(b, torch.bfloat16, "none", 19.0, cap_gb=16.0)
+    assert "CLEF_OFFLOAD=cpu" in str(ei.value) and "raise CLEF_MAX_DEVICE_MEMORY_GB" in str(ei.value)
+    assert bk.preflight(b, torch.bfloat16, "int8", 19.0, cap_gb=16.0) == []
+
+
+def test_preflight_offload_defers_to_the_planner():
+    b = with_memory(Backend("rocm", torch.device("cuda", 0)), free=8.0, total=24.0)
+    assert bk.preflight(b, torch.bfloat16, "none", 19.0, cap_gb=6.0, offload="cpu") == []
+    assert "only 8.0 GB" in bk.preflight(b, torch.bfloat16, "none", 19.0, cap_gb=12.0, offload="cpu")[0]
+    # offload is meaningless on unified memory: the normal check applies
+    m = with_memory(Backend("mps", torch.device("mps")), free=8.0, total=16.0, kind="unified")
+    with pytest.raises(PreflightError):
+        bk.preflight(m, torch.bfloat16, "none", 19.0, offload="cpu")
+
+
+def test_recommend_memory_setting():
+    big = with_memory(Backend("cuda", torch.device("cuda", 0)), free=30.0, total=32.0)
+    assert bk.recommend_memory_setting(big) is None
+    mid = with_memory(Backend("rocm", torch.device("cuda", 0)), free=16.0, total=16.0)
+    assert "CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=15" in bk.recommend_memory_setting(mid)
+    twelve = with_memory(Backend("cuda", torch.device("cuda", 0)), free=11.5, total=12.0)
+    assert "CLEF_QUANT=int8 CLEF_OFFLOAD=cpu" in bk.recommend_memory_setting(twelve)
+    eight = with_memory(Backend("cuda", torch.device("cuda", 0)), free=7.8, total=8.0)
+    advice = bk.recommend_memory_setting(eight)
+    assert "CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=7" in advice and "3.5x slower" in advice
+    tiny = with_memory(Backend("cuda", torch.device("cuda", 0)), free=5.0, total=6.0)
+    assert "below" in bk.recommend_memory_setting(tiny)
+    mac = with_memory(Backend("mps", torch.device("mps")), free=18.0, total=24.0, kind="unified")
+    assert "CLEF_QUANT=int8" in bk.recommend_memory_setting(mac)
+
+
+def test_apply_memory_cap_only_on_discrete_memory():
+    assert Backend("cpu", torch.device("cpu")).apply_memory_cap(8.0) is False
+    assert Backend("mps", torch.device("mps")).apply_memory_cap(8.0) is False
+    assert Backend("cuda", torch.device("cuda", 0)).apply_memory_cap(0.0) is False
+
+
+def test_pin_host_is_identity_without_discrete_memory():
+    t = torch.zeros(2)
+    assert Backend("cpu", torch.device("cpu")).pin_host(t) is t
 
 
 # ---------------------------------------------------------------- OOM / memory / identity

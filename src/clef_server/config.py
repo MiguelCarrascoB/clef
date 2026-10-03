@@ -17,6 +17,7 @@ MODEL_REVISION = "17f0b0ad64efb65d273590632833508766b2aae6"
 DEVICES = ("auto", "cuda", "rocm", "mps", "cpu")
 DTYPES = ("auto", "bfloat16", "float16", "float32")
 QUANTS = ("none", "int8", "nf4")
+OFFLOADS = ("none", "cpu")
 KEY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
@@ -101,7 +102,18 @@ class Config:
     model_revision: str = field(default_factory=lambda: _str("CLEF_MODEL_REVISION", MODEL_REVISION))
     device: str = field(default_factory=lambda: _str("CLEF_DEVICE", "auto").lower())  # see DEVICES
     dtype: str = field(default_factory=lambda: _str("CLEF_DTYPE", "auto").lower())  # see DTYPES
-    quant: str = field(default_factory=lambda: _str("CLEF_QUANT", "none").lower())  # see QUANTS (CUDA only)
+    quant: str = field(
+        default_factory=lambda: _str("CLEF_QUANT", "none").lower()
+    )  # see QUANTS (backend rules)
+    quant_backend: str = field(
+        default_factory=lambda: _str("CLEF_QUANT_BACKEND", "auto").lower()
+    )  # auto|bnb|torchao
+    # Smaller-memory options (docs/memory.md): cap the device memory the process may use and, with
+    # CLEF_OFFLOAD=cpu, keep whatever does not fit under the cap in host RAM and stream it in per forward.
+    offload: str = field(default_factory=lambda: _str("CLEF_OFFLOAD", "none").lower())  # see OFFLOADS
+    max_device_memory_gb: float = field(
+        default_factory=lambda: _float("CLEF_MAX_DEVICE_MEMORY_GB", 0.0)
+    )  # 0 = auto
     preflight: bool = field(default_factory=lambda: _bool("CLEF_PREFLIGHT", True))  # memory check before load
     telemetry: bool = field(default_factory=lambda: _bool("CLEF_TELEMETRY", True))  # pynvml / amdsmi
     max_tokens: int = field(default_factory=lambda: _int("CLEF_MAX_TOKENS", 16384))
@@ -176,9 +188,14 @@ class Config:
             ("CLEF_DEVICE", self.device.split(":")[0], DEVICES),
             ("CLEF_DTYPE", self.dtype, DTYPES),
             ("CLEF_QUANT", self.quant, QUANTS),
+            ("CLEF_QUANT_BACKEND", self.quant_backend, ("auto", "bnb", "torchao")),
         ):
             if value not in allowed:
                 raise ValueError(f"{name}={value!r} is not one of {', '.join(allowed)}")
+        if self.offload not in OFFLOADS:
+            raise ValueError(f"CLEF_OFFLOAD={self.offload!r} is not one of {', '.join(OFFLOADS)}")
+        if self.max_device_memory_gb < 0:
+            raise ValueError("CLEF_MAX_DEVICE_MEMORY_GB must be >= 0 (0 = no cap)")
         if not 0.0 <= self.classify_threshold <= 1.0:
             raise ValueError("CLEF_CLASSIFY_THRESHOLD must be within [0, 1]")
         if self.rate_limit < 0:

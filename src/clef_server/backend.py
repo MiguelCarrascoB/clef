@@ -30,7 +30,17 @@ BACKENDS = ("cuda", "rocm", "mps", "cpu")
 
 # Weights are ~19 GB in bf16. Multiplier of the bf16 size each dtype / quantization needs resident.
 _SIZE_FACTOR = {"bfloat16": 1.0, "float16": 1.0, "float32": 2.0}
-_QUANT_FACTOR = {"int8": 0.55, "nf4": 0.32}
+# Measured device memory of the process after load + inference on the 7900 XTX, as a fraction of the 19 GB
+# bf16 weights (docs/memory.md): torchao / bitsandbytes int8 11.2 GB, bitsandbytes nf4 7.9 GB.
+_QUANT_FACTOR = {"int8": 0.60, "nf4": 0.42}
+_TORCHAO_SKIP = ["lm_head", "model.visual"]  # vocabulary gathers and the vision tower stay in bf16
+# Recommendation tiers for clef doctor, from the cap a device can afford (docs/memory.md, measured):
+_OFFLOAD_FAST_GB = 14  # bf16 offload costs <= ~1.2x latency from here up
+_INT8_OFFLOAD_GB = 10  # int8 + host embeddings: 9.7 GB incl. context (bf16 offload at 11 GB is 2.3x slower)
+_OFFLOAD_MIN_GB = (
+    7  # smallest cap measured to work (3.5x slower); 6 GB segfaulted at load on WSL2 (pinned memory)
+)
+ACTIVATION_RESERVE_GB = 2.5  # device memory kept free for activations when planning an offload split
 _HEADROOM_GB = 3.0  # activations + CUDA context + allocator slack; below need+headroom is a warning only
 
 
@@ -214,6 +224,38 @@ class Backend:
             return True
         # MPS raises a plain RuntimeError("MPS backend out of memory ...")
         return self.name == "mps" and isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+    # ---- host <-> device (offload)
+    @property
+    def has_discrete_memory(self) -> bool:
+        """cuda / rocm: separate device memory (offload to the host makes sense); mps / cpu share one pool."""
+        return self.name in ("cuda", "rocm")
+
+    def pin_host(self, tensor: Any) -> Any:
+        """Page-locked copy of a host tensor (fast async host->device copies); itself if unsupported."""
+        if not self.has_discrete_memory:
+            return tensor
+        try:
+            return tensor.pin_memory()
+        except Exception as exc:
+            log.debug("pin_memory failed: %s", exc)
+            return tensor
+
+    def host_copier(self) -> HostCopier:
+        return HostCopier(self)
+
+    def apply_memory_cap(self, cap_gb: float) -> bool:
+        """Hard-limit this process's allocator to cap_gb of device memory. Returns whether a limit was set."""
+        if cap_gb <= 0 or not self.has_discrete_memory:
+            return False
+        try:
+            torch = _torch()
+            total = torch.cuda.get_device_properties(self.device).total_memory
+            torch.cuda.set_per_process_memory_fraction(min(1.0, cap_gb * GB / total), self.device)
+            return True
+        except Exception as exc:
+            log.warning("could not apply CLEF_MAX_DEVICE_MEMORY_GB=%s: %s", cap_gb, exc)
+            return False
 
     # ---- identity
     def device_name(self) -> str:
@@ -502,6 +544,40 @@ class Backend:
         return data
 
 
+class _PendingCopy:
+    """Device tensors being copied on a side stream; `wait()` makes the compute stream depend on the copy."""
+
+    def __init__(self, tensors: list, event: Any, backend: Backend):
+        self._tensors, self._event, self._backend = tensors, event, backend
+
+    def wait(self) -> list:
+        if self._event is not None:
+            stream = _torch().cuda.current_stream(self._backend.device)
+            stream.wait_event(self._event)
+            for t in self._tensors:  # allocated on the copy stream, consumed on this one
+                t.record_stream(stream)
+        return self._tensors
+
+
+class HostCopier:
+    """Copies (pinned) host tensors to the device. cuda / rocm: on a side stream, overlapping compute."""
+
+    def __init__(self, backend: Backend):
+        self._backend = backend
+        self._stream = _torch().cuda.Stream(backend.device) if backend.has_discrete_memory else None
+
+    def fetch(self, host: list) -> _PendingCopy:
+        torch = _torch()
+        dev = self._backend.device
+        if self._stream is None:
+            return _PendingCopy([t.to(dev) for t in host], None, self._backend)
+        with torch.cuda.stream(self._stream):
+            out = [t.to(dev, non_blocking=True) for t in host]
+            event = torch.cuda.Event()
+            event.record(self._stream)
+        return _PendingCopy(out, event, self._backend)
+
+
 def _num(value: Any) -> float | None:
     try:
         return round(float(str(value).split()[0]), 1)
@@ -629,6 +705,27 @@ def _dtype_name(dtype: Any) -> str:
     return str(dtype).replace("torch.", "")
 
 
+QUANT_BACKENDS = ("auto", "bnb", "torchao")
+
+
+def quant_method(backend: Backend, quant: str, choice: str = "auto") -> str:
+    """Library that implements CLEF_QUANT on this backend: "bnb" (bitsandbytes) or "torchao".
+
+    auto: CUDA keeps bitsandbytes for int8 / nf4 (the original behaviour, untouched). Every other backend uses
+    torchao for int8: measured on the RX 7900 XTX it is 2x faster than bitsandbytes int8 and 3x closer to bf16
+    (docs/memory.md). nf4 exists only in bitsandbytes (CUDA, and ROCm where it loads but is lossy).
+    """
+    if choice not in QUANT_BACKENDS:
+        raise BackendError(f"unknown CLEF_QUANT_BACKEND={choice!r} (use auto, bnb or torchao)")
+    if choice != "auto":
+        if quant == "nf4" and choice == "torchao":
+            raise BackendError("CLEF_QUANT=nf4 is only available with bitsandbytes (CLEF_QUANT_BACKEND=bnb)")
+        return choice
+    if quant == "nf4":
+        return "bnb"
+    return "bnb" if backend.name == "cuda" else "torchao"
+
+
 def required_gb(dtype: Any, quant: str, weights_gb: float) -> float:
     """Resident memory the weights need for this dtype / quantization (weights_gb is the bf16 size)."""
     if quant in _QUANT_FACTOR:
@@ -636,56 +733,127 @@ def required_gb(dtype: Any, quant: str, weights_gb: float) -> float:
     return weights_gb * _SIZE_FACTOR.get(_dtype_name(dtype), 1.0)
 
 
-def preflight(backend: Backend, dtype: Any, quant: str, weights_gb: float) -> list[str]:
-    """Raise PreflightError when free memory is clearly below what the load needs; warn when close."""
-    need = required_gb(dtype, quant, weights_gb)
+def preflight(
+    backend: Backend,
+    dtype: Any,
+    quant: str,
+    weights_gb: float,
+    cap_gb: float = 0.0,
+    offload: str = "none",
+) -> list[str]:
+    """Raise PreflightError when free memory is clearly below what the load needs; warn when close.
+
+    cap_gb (CLEF_MAX_DEVICE_MEMORY_GB) lowers the memory the weights may use. With offload=cpu the engine
+    plans the split itself (and raises its own PreflightError): only cap vs free memory is checked here.
+    """
     mem = backend.memory()
     free, total, kind = mem.get("free_gb"), mem.get("total_gb"), mem.get("kind")
     if free is None:
         return []
     label = {"vram": "GPU memory", "unified": "unified memory", "system": "system memory"}.get(kind, "memory")
+    if offload == "cpu" and backend.has_discrete_memory:
+        if cap_gb > free:
+            return [f"CLEF_MAX_DEVICE_MEMORY_GB={cap_gb:g} but only {free:.1f} GB of {label} is free"]
+        return []
+    need = required_gb(dtype, quant, weights_gb)
+    capped = 0.0 < cap_gb < free
+    avail = cap_gb if capped else free
     what = f"{quant}" if quant in _QUANT_FACTOR else _dtype_name(dtype)
-    if free < need:
+    if avail < need:
         tips = ["free memory (stop other GPU processes)" if kind != "system" else "free system memory"]
         if _dtype_name(dtype) == "float32":
             tips.append("use CLEF_DTYPE=bfloat16")
-        if backend.name == "cuda" and quant == "none":
-            tips.append("use CLEF_QUANT=nf4 or int8 (bitsandbytes)")
+        if backend.has_discrete_memory and quant == "none":
+            tips.append("use CLEF_OFFLOAD=cpu (lossless) or CLEF_QUANT=int8")
+        elif backend.has_discrete_memory and quant == "int8":
+            tips.append("add CLEF_OFFLOAD=cpu (embeddings on the host)")
+        if backend.name in ("mps", "cpu") and quant == "none":
+            tips.append("use CLEF_QUANT=int8")
         if backend.name == "mps":
             tips.append("close other apps or use a Mac with more unified memory")
+        if capped:
+            tips.append("raise CLEF_MAX_DEVICE_MEMORY_GB")
         raise PreflightError(
-            f"not enough {label} to load the model ({what}): need ~{need:.1f} GB, {free:.1f} GB free"
-            + (f" of {total:.1f} GB" if total else "")
+            f"not enough {label} to load the model ({what}): need ~{need:.1f} GB, "
+            + (f"the cap allows {avail:.1f} GB" if capped else f"{avail:.1f} GB free")
+            + (f" of {total:.1f} GB" if total and not capped else "")
             + f" on {backend.device_name()}. Try: {'; '.join(tips)}. Set CLEF_PREFLIGHT=0 to skip this check."
         )
-    if free < need + _HEADROOM_GB:
+    if avail < need + _HEADROOM_GB:
         return [
-            f"low {label}: {free:.1f} GB free, the model needs ~{need:.1f} GB plus activations; "
-            "long inputs or large batches may run out of memory"
+            f"low {label}: {avail:.1f} GB {'allowed' if capped else 'free'}, the model needs ~{need:.1f} GB "
+            "plus activations; long inputs or large batches may run out of memory"
         ]
     return []
 
 
-def quantization_config(backend: Backend, quant: str, dtype: Any) -> Any | None:
-    """None for "none". int8 / nf4 -> transformers BitsAndBytesConfig, ONLY on cuda."""
+def quantization_config(backend: Backend, quant: str, dtype: Any, choice: str = "auto") -> Any | None:
+    """None for "none"; else the transformers quantization config for this backend (see quant_method)."""
     quant = (quant or "none").lower()
     if quant == "none":
         return None
     if quant not in _QUANT_FACTOR:
         raise BackendError(f"unknown CLEF_QUANT={quant!r} (use none, int8 or nf4)")
-    if backend.name != "cuda":
-        raise BackendError(
-            f"CLEF_QUANT={quant} requires an NVIDIA GPU (bitsandbytes); backend is {backend.name}"
-        )
-    if not _has_module("bitsandbytes"):
-        raise BackendError(f"CLEF_QUANT={quant} needs bitsandbytes: pip install bitsandbytes")
-    from transformers import BitsAndBytesConfig
+    method = quant_method(backend, quant, choice)
+    if method == "bnb":
+        if backend.name not in ("cuda", "rocm"):
+            raise BackendError(
+                f"CLEF_QUANT={quant} with bitsandbytes needs an NVIDIA or AMD GPU; backend is {backend.name}"
+                + ("; CLEF_QUANT=int8 uses torchao there" if quant == "int8" else "")
+            )
+        if not _has_module("bitsandbytes"):
+            raise BackendError(f"CLEF_QUANT={quant} needs bitsandbytes: pip install bitsandbytes")
+        from transformers import BitsAndBytesConfig
 
-    if quant == "int8":
-        return BitsAndBytesConfig(load_in_8bit=True)
-    return BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=dtype,
-        bnb_4bit_use_double_quant=True,
-    )
+        if quant == "int8":
+            return BitsAndBytesConfig(load_in_8bit=True)
+        return BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+    if not _has_module("torchao"):
+        raise BackendError(f"CLEF_QUANT={quant} on {backend.name} needs torchao: pip install torchao")
+    from torchao.quantization import Int8WeightOnlyConfig
+    from transformers import TorchAoConfig
+
+    # The vocabulary tables are only gathered from (never multiplied), so they are never quantized.
+    return TorchAoConfig(quant_type=Int8WeightOnlyConfig(), modules_to_not_convert=list(_TORCHAO_SKIP))
+
+
+def recommend_memory_setting(backend: Backend, weights_gb: float = 19.0) -> str | None:
+    """One-line advice from the detected memory (clef doctor). None when the defaults fit comfortably."""
+    mem = backend.memory()
+    total, free = mem.get("total_gb"), mem.get("free_gb")
+    if total is None:
+        return None
+    avail = min(x for x in (total, free) if x is not None)
+    if avail >= weights_gb + _HEADROOM_GB:
+        return None
+    unified = mem.get("kind") == "unified"
+    gb = f"{total:.0f} GB {'unified memory' if unified else 'GPU memory'} detected"
+    if backend.has_discrete_memory:
+        usable = int(max(avail - 0.5, 0.0))  # the driver context adds ~0.65 GB on top of the cap (measured)
+        if usable >= _OFFLOAD_FAST_GB:
+            return (
+                f"{gb}: use CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB={usable} "
+                "(lossless; the rest of the model lives in host RAM, see docs/memory.md)"
+            )
+        if usable >= _INT8_OFFLOAD_GB:
+            return (
+                f"{gb}: use CLEF_QUANT=int8 CLEF_OFFLOAD=cpu (about 9 GB on the device, small accuracy cost; "
+                f"lossless alternative CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB={usable} is ~2x slower)"
+            )
+        if usable >= _OFFLOAD_MIN_GB:
+            return (
+                f"{gb}: use CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB={usable} "
+                "(lossless but about 3.5x slower, needs ~15 GB of free host RAM, see docs/memory.md)"
+            )
+        return f"{gb}: below the ~{_OFFLOAD_MIN_GB} GB the smallest supported setting needs"
+    if backend.name == "mps":
+        return (
+            f"{gb}: use CLEF_QUANT=int8 (torchao, about 11 GB; "
+            "not validated on Apple Silicon, see docs/memory.md)"
+        )
+    return f"{gb}: use CLEF_QUANT=int8 (torchao, about 11 GB) or more RAM"

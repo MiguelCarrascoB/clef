@@ -27,6 +27,7 @@ from typing import Any
 DEVICES = ("auto", "cuda", "rocm", "mps", "cpu")
 DTYPES = ("auto", "bfloat16", "float16", "float32")
 QUANTS = ("none", "int8", "nf4")
+OFFLOADS = ("none", "cpu")
 
 # flag attribute -> environment variable set by `clef serve`
 FLAG_ENV = {
@@ -35,6 +36,8 @@ FLAG_ENV = {
     "device": "CLEF_DEVICE",
     "dtype": "CLEF_DTYPE",
     "quant": "CLEF_QUANT",
+    "offload": "CLEF_OFFLOAD",
+    "max_device_memory_gb": "CLEF_MAX_DEVICE_MEMORY_GB",
     "model_path": "CLEF_MODEL_PATH",
 }
 
@@ -510,7 +513,19 @@ def build_parser() -> argparse.ArgumentParser:
     netflags(sp)
     sp.add_argument("--device", choices=DEVICES, help="CLEF_DEVICE")
     sp.add_argument("--dtype", choices=DTYPES, help="CLEF_DTYPE")
-    sp.add_argument("--quant", choices=QUANTS, help="CLEF_QUANT (int8/nf4: CUDA + bitsandbytes only)")
+    sp.add_argument("--quant", choices=QUANTS, help="CLEF_QUANT: smaller weights (see docs/memory.md)")
+    sp.add_argument(
+        "--offload",
+        choices=OFFLOADS,
+        help="CLEF_OFFLOAD: cpu keeps embeddings and what exceeds the device cap in host RAM",
+    )
+    sp.add_argument(
+        "--max-device-memory-gb",
+        dest="max_device_memory_gb",
+        type=float,
+        metavar="GB",
+        help="CLEF_MAX_DEVICE_MEMORY_GB: device memory this server may use (0 = no cap)",
+    )
     sp.add_argument("--model-path", dest="model_path", metavar="DIR", help="CLEF_MODEL_PATH")
     sp.add_argument("--detach", action="store_true", help="start in the background and wait until healthy")
     sp.add_argument(

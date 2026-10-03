@@ -22,6 +22,18 @@ def test_choices_match_config():
     assert cli.DEVICES == config.DEVICES
     assert cli.DTYPES == config.DTYPES
     assert cli.QUANTS == config.QUANTS
+    assert cli.OFFLOADS == config.OFFLOADS
+
+
+def test_serve_memory_flags_map_to_env():
+    a = parse("serve", "--offload", "cpu", "--max-device-memory-gb", "14.5", "--quant", "int8")
+    env = cli.serve_env(a, base={})
+    assert env["CLEF_OFFLOAD"] == "cpu"
+    assert env["CLEF_MAX_DEVICE_MEMORY_GB"] == "14.5"
+    assert env["CLEF_QUANT"] == "int8"
+    assert "CLEF_OFFLOAD" not in cli.serve_env(parse("serve"), base={})
+    with pytest.raises(SystemExit):
+        parse("serve", "--offload", "disk")
 
 
 def test_serve_defaults_and_flags():

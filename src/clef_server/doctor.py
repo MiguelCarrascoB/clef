@@ -89,7 +89,8 @@ def check_config(r: Report) -> Config | None:
     r.add(
         OK,
         "config",
-        f"device={cfg.device} dtype={cfg.dtype} quant={cfg.quant} host={cfg.host}:{cfg.port} v{VERSION}",
+        f"device={cfg.device} dtype={cfg.dtype} quant={cfg.quant} offload={cfg.offload} "
+        f"host={cfg.host}:{cfg.port} v{VERSION}",
     )
     return cfg
 
@@ -272,9 +273,10 @@ def check_backend(r: Report, cfg: Config, server_up: bool = False) -> backend_mo
         r.add(FAIL, "dtype", str(exc))
         return b
     try:
-        backend_mod.quantization_config(b, cfg.quant, dtype)
+        backend_mod.quantization_config(b, cfg.quant, dtype, cfg.quant_backend)
         if cfg.quant != "none":
-            r.add(OK, "quantization", cfg.quant)
+            method = backend_mod.quant_method(b, cfg.quant, cfg.quant_backend)
+            r.add(OK, "quantization", f"{cfg.quant} ({'bitsandbytes' if method == 'bnb' else 'torchao'})")
     except backend_mod.BackendError as exc:
         r.add(FAIL, "quantization", str(exc))
 
@@ -298,13 +300,25 @@ def check_backend(r: Report, cfg: Config, server_up: bool = False) -> backend_mo
         r.add(SKIP, "memory preflight", "model already loaded by the running clef server")
         return b
     try:
-        warns = backend_mod.preflight(b, dtype, cfg.quant, WEIGHTS_GB)
+        warns = backend_mod.preflight(
+            b,
+            dtype,
+            cfg.quant,
+            WEIGHTS_GB,
+            cap_gb=cfg.max_device_memory_gb,
+            offload=cfg.offload,
+        )
         for w in warns:
             r.add(WARN, "memory preflight", w)
         if not warns:
-            r.add(OK, "memory preflight", f"enough memory for {cfg.dtype}/{cfg.quant}")
+            extra = f" offload={cfg.offload}" if cfg.offload != "none" else ""
+            r.add(OK, "memory preflight", f"enough memory for {cfg.dtype}/{cfg.quant}{extra}")
     except backend_mod.PreflightError as exc:
         r.add(FAIL, "memory preflight", str(exc))
+    if cfg.quant == "none" and cfg.offload == "none":
+        advice = backend_mod.recommend_memory_setting(b, WEIGHTS_GB)
+        if advice:
+            r.add(WARN, "memory setting", advice)
     return b
 
 

@@ -125,6 +125,182 @@ def _weights_gb(path: Any) -> float:
 
 
 @dataclass
+class LoadInfo:
+    """What `load_model` did, for logs, /health warnings and the memory benchmark."""
+
+    mode: str = "standard"  # standard | offload
+    streamed_layers: int = 0
+    n_layers: int = 0
+    host_weights_gb: float = 0.0
+    device_weights_gb: float = 0.0
+    notes: list[str] = field(default_factory=list)
+    streamer: Any = None
+
+
+def _file_gb(path: Path) -> float:
+    try:
+        return path.stat().st_size / 1024**3
+    except OSError:
+        return 0.0
+
+
+def device_budget_gb(backend: Backend, cfg: Any) -> float | None:
+    """Device memory for the weights: the explicit cap, else what is free now, minus activation headroom."""
+    cap = float(getattr(cfg, "max_device_memory_gb", 0.0) or 0.0)
+    if cap > 0:
+        total = cap
+    else:
+        free = backend.memory().get("free_gb")
+        if free is None:
+            return None
+        total = float(free)
+    return max(total - backend_mod.ACTIVATION_RESERVE_GB, 0.0)
+
+
+def load_model(mod: Any, path: Any, backend: Backend, dtype: Any, cfg: Any) -> tuple[Any, Any, LoadInfo]:
+    """Load (model, processor, info) honouring cfg.quant / cfg.offload / cfg.max_device_memory_gb.
+
+    The standard path (no offload) is the model's own `load_release_model`, optionally with a quantization
+    config. With CLEF_OFFLOAD=cpu the backbone is loaded with a per-module device map (embeddings and the
+    layers that do not fit under the cap on the host) and the clef model is assembled here from the release's
+    own classes, so the model directory is never touched. See offload.py.
+    """
+    info = LoadInfo()
+    quant = getattr(cfg, "quant", "none")
+    offload = getattr(cfg, "offload", "none")
+    cap = float(getattr(cfg, "max_device_memory_gb", 0.0) or 0.0)
+    if cap > 0 and backend.apply_memory_cap(cap):
+        info.notes.append(f"device memory capped at {cap:g} GB")
+    if offload == "cpu" and not backend.has_discrete_memory:
+        info.notes.append(
+            f"CLEF_OFFLOAD=cpu has no effect on {backend.name} (device and host share one memory pool)"
+        )
+        offload = "none"
+    qc = backend_mod.quantization_config(backend, quant, dtype, getattr(cfg, "quant_backend", "auto"))
+    if offload == "cpu":
+        try:
+            return _load_offloaded(mod, path, backend, dtype, cfg, info, qc)
+        except (PreflightError, BackendError):
+            raise
+        except Exception as exc:
+            if qc is None:
+                raise
+            # transformers refused host entries in the device_map for this quantizer: load, then move them
+            log.warning(
+                "direct host placement failed with %s (%s); moving the embeddings after load", quant, exc
+            )
+            backend.empty_cache()
+    kwargs: dict[str, Any] = {}
+    if qc is not None:
+        kwargs["quantization_config"] = qc
+    model, processor = mod.load_release_model(
+        None if path is None else str(path), device=backend.device, dtype=dtype, **kwargs
+    )
+    if offload == "cpu":
+        _embeddings_to_host(model, backend, info)
+    return model, processor, info
+
+
+def _load_offloaded(
+    mod: Any, path: Any, backend: Backend, dtype: Any, cfg: Any, info: LoadInfo, qc: Any = None
+):
+    import json
+
+    from safetensors.torch import load_file
+    from transformers import AutoProcessor, Qwen3_5ForConditionalGeneration
+
+    from . import offload as off
+
+    root = Path(path)
+    sizes = off.checkpoint_sizes(root)
+    layer_bytes, embed_bytes, other_bytes, _ = off.split_sizes(sizes, _bytes_scale(dtype))
+    head_bytes = int(_file_gb(root / "joint_head.safetensors") * 1024**3 * _bytes_scale(dtype))
+    budget_gb = device_budget_gb(backend, cfg)
+    if budget_gb is None or qc is not None:  # unknown memory, or quantized layers: only the vocabulary moves
+        budget_gb = 1e9
+    plan = off.plan_layers(
+        layer_bytes, embed_bytes, other_bytes, int(budget_gb * 1024**3), head_bytes=head_bytes
+    )
+    if not plan.feasible:
+        raise PreflightError(
+            f"CLEF_MAX_DEVICE_MEMORY_GB leaves {budget_gb:.1f} GB for weights: not enough even with every "
+            "layer "
+            f"streamed from host memory ({plan.note}). Raise the cap or use a quantized model (CLEF_QUANT)."
+        )
+    host_free = backend_mod._cpu_memory_bytes()[2]
+    if cfg.preflight and host_free is not None and plan.host_gb + 2.0 > host_free / 1024**3:
+        raise PreflightError(
+            f"not enough host RAM for CLEF_OFFLOAD=cpu: {plan.host_gb:.1f} GB of weights stay in host "
+            "memory, "
+            f"{host_free / 1024**3:.1f} GB free. Raise CLEF_MAX_DEVICE_MEMORY_GB or free memory."
+        )
+    device = str(backend.device)
+    extra = {"quantization_config": qc} if qc is not None else {}
+    backbone = Qwen3_5ForConditionalGeneration.from_pretrained(
+        root, dtype=dtype, device_map=plan.device_map(device), **extra
+    )
+    _strip_accelerate_hooks(backbone)
+    backbone.config.use_cache = False
+    lm = backbone.model.language_model
+    lm.embed_tokens = off.HostEmbedding(lm.embed_tokens, backend.device)
+    backbone.lm_head = off.HostOutputEmbedding(backbone.lm_head, backend.device)
+    streamer = None
+    if plan.streamed:
+        streamer = off.LayerStreamer(
+            list(lm.layers), plan.streamed, backend.host_copier(), lookahead=2, pin=backend.pin_host
+        )
+        streamer.install()
+    head = mod.JointSchemaHead(**json.loads((root / "joint_head_config.json").read_text(encoding="utf-8")))
+    head.load_state_dict(load_file(root / "joint_head.safetensors"), strict=True)
+    head = head.to(device=backend.device, dtype=dtype)
+    processor = AutoProcessor.from_pretrained(root)
+    model = mod.ClefModel(backbone, head).eval()
+    info.mode = "offload"
+    info.streamed_layers = len(plan.streamed)
+    info.n_layers = plan.n_layers
+    info.host_weights_gb = round(plan.host_gb, 2)
+    info.device_weights_gb = round(plan.device_weights_gb, 2)
+    info.streamer = streamer
+    if qc is not None:
+        info.notes.append(f"offload: token and output embeddings on the host ({plan.host_gb:.1f} GB)")
+    else:
+        info.notes.append(
+            f"offload: {len(plan.streamed)}/{plan.n_layers} decoder layers + embeddings on the host "
+            f"({plan.host_gb:.1f} GB host, ~{plan.device_weights_gb:.1f} GB device weights)"
+        )
+    return model, processor, info
+
+
+def _embeddings_to_host(model: Any, backend: Backend, info: LoadInfo) -> None:
+    """Move the token / output embeddings (~4 GB in bf16) to the host; they are only ever gathered from."""
+    from . import offload as off
+
+    backbone = model.language_model
+    lm = backbone.model.language_model
+    lm.embed_tokens = off.HostEmbedding(lm.embed_tokens.to("cpu"), backend.device)
+    backbone.lm_head = off.HostOutputEmbedding(backbone.lm_head.to("cpu"), backend.device)
+    backend.empty_cache()
+    info.mode = "offload"
+    info.notes.append("offload: token and output embeddings on the host (~4 GB less device memory)")
+
+
+def _bytes_scale(dtype: Any) -> float:
+    """Checkpoint tensors are bf16 (2 bytes); float32 doubles them."""
+    return 2.0 if _dtype_name(dtype) == "float32" else 1.0
+
+
+def _strip_accelerate_hooks(model: Any) -> None:
+    """transformers dispatches a device_map with accelerate hooks that leave host params on `meta`; remove
+    them (this restores real host tensors) so offload.py owns data movement."""
+    from accelerate.hooks import remove_hook_from_module
+
+    remove_hook_from_module(model, recurse=True)
+    if hasattr(model, "hf_device_map"):
+        with contextlib.suppress(Exception):
+            del model.hf_device_map
+
+
+@dataclass
 class _Item:
     enc: Any
     questions: dict[str, Any]
@@ -173,6 +349,7 @@ class Engine:
         self._started = False
         self._encode_lock = threading.Lock()
         self._mod: Any = None
+        self._load_info: LoadInfo | None = None
         self._model: Any = None
         self._processor: Any = None
         self._pad_id = 0
@@ -403,15 +580,21 @@ class Engine:
             # is injected too, so unit tests never depend on the host's RAM.
             if cfg.preflight and (not self._custom_loader or self._injected_backend):
                 self._warnings.extend(
-                    backend_mod.preflight(b, dtype, cfg.quant, _weights_gb(path) if path else WEIGHTS_GB)
+                    backend_mod.preflight(
+                        b,
+                        dtype,
+                        cfg.quant,
+                        _weights_gb(path) if path else WEIGHTS_GB,
+                        cap_gb=getattr(cfg, "max_device_memory_gb", 0.0),
+                        offload=getattr(cfg, "offload", "none"),
+                    )
                 )
-            kwargs: dict[str, Any] = {}
-            qc = backend_mod.quantization_config(b, cfg.quant, dtype)
-            if qc is not None:
-                kwargs["quantization_config"] = qc
-            model, processor = self._mod.load_release_model(
-                None if path is None else str(path), device=b.device, dtype=dtype, **kwargs
-            )
+            model, processor, load_info = load_model(self._mod, path, b, dtype, cfg)
+            self._load_info = load_info
+            for note in load_info.notes:
+                log.info("%s", note)
+                if "no effect" in note:
+                    self._warnings.append(note)
             model.eval()
             self._model, self._processor = model, processor
             pad = getattr(processor.tokenizer, "pad_token_id", None)
@@ -517,6 +700,7 @@ class Engine:
             except Exception:
                 log.exception("stats.record_forward failed")
         except Exception as exc:
+            self._reset_streamer()
             if self._backend.is_oom(exc):
                 log.error("device OOM on group of %d (tokens=%d)", len(group), sum(i.length for i in group))
                 self._backend.empty_cache()
@@ -526,6 +710,15 @@ class Engine:
                 log.exception("forward failed")
                 for it in group:
                     _resolve(it, exc=exc)
+
+    def _reset_streamer(self) -> None:
+        """After a failed forward, put offloaded layers back on the host (their hooks did not finish)."""
+        streamer = self._load_info.streamer if self._load_info else None
+        if streamer is not None:
+            try:
+                streamer.reset()
+            except Exception:
+                log.exception("offload reset failed")
 
     def padded_length(self, length: int) -> int:
         """Text-batch sequence length after padding: the bucket (opt-in) or the next pad_multiple."""

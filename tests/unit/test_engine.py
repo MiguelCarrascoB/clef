@@ -277,6 +277,14 @@ class FakeBackend:
         self.free_gb = free_gb
         self.telemetry_calls = 0
 
+    @property
+    def has_discrete_memory(self):
+        return self.name in ("cuda", "rocm")
+
+    def apply_memory_cap(self, cap_gb):
+        self.cap = cap_gb
+        return True
+
     def synchronize(self):
         self.syncs += 1
 
@@ -404,11 +412,13 @@ def test_backend_error_is_status_error(monkeypatch):
     eng.shutdown()
 
 
-def test_quant_on_non_cuda_is_status_error():
-    eng = Engine(make_cfg(quant="nf4"), FakeStats(), loader=make_loader(FakeModel()), backend=FakeBackend())
+def test_nf4_without_gpu_bitsandbytes_is_status_error():
+    eng = Engine(
+        make_cfg(quant="nf4"), FakeStats(), loader=make_loader(FakeModel()), backend=FakeBackend(name="mps")
+    )
     eng.start()
     assert wait_for(lambda: eng.status == "error")
-    assert "requires an NVIDIA GPU" in eng.error and "rocm" in eng.error
+    assert "needs an NVIDIA or AMD GPU" in eng.error and "mps" in eng.error
     eng.shutdown()
 
 
@@ -609,3 +619,27 @@ async def test_pads_to_multiple_by_default(started):
     await asyncio.gather(*(eng.decide([rec(s)]) for s in ["a", "bb cc"]))
     assert model.calls == [(2, 8, False)]  # longest is 5 tokens -> next multiple of 4
     assert eng.padded_length(8) == 8 and eng.padded_length(9) == 12
+
+
+def test_memory_cap_is_applied_before_load():
+    backend = FakeBackend()
+    eng = Engine(
+        make_cfg(max_device_memory_gb=14.0), FakeStats(), loader=make_loader(FakeModel()), backend=backend
+    )
+    eng.start()
+    assert wait_for(lambda: eng.status in ("ready", "warming"))
+    assert backend.cap == 14.0
+    eng.shutdown()
+
+
+def test_offload_on_unified_memory_is_a_warning_not_an_error():
+    eng = Engine(
+        make_cfg(offload="cpu"),
+        FakeStats(),
+        loader=make_loader(FakeModel()),
+        backend=FakeBackend(name="mps"),
+    )
+    eng.start()
+    assert wait_for(lambda: eng.status in ("ready", "warming"))
+    assert any("no effect" in w for w in eng.info()["warnings"])
+    eng.shutdown()
