@@ -1,0 +1,48 @@
+ticket,department
+"I was charged twice for my March subscription, please refund one of the payments.",billing
+"The invoice PDF shows the wrong VAT number for our company.",billing
+"Can I get a copy of last year's receipts for my accountant?",billing
+"My card was declined but the money left my account anyway.",billing
+"We would like to switch from monthly to annual billing and keep the discount.",billing
+"Why did my renewal price go up by 15% this year?",billing
+"Please send the September invoice to finance@acme-corp.example instead.",billing
+"I cancelled before the trial ended and still got charged.",billing
+"Where do I update my payment method before the renewal fails?",billing
+"The credit note for order 88213 never arrived.",billing
+"Our PO number is missing from the last three invoices.",billing
+"You billed us for 25 seats but we only have 18 users.",billing
+"Refund request: the add-on was purchased by mistake yesterday.",billing
+"The app crashes every time I open the reports page.",technical
+"API requests return 502 errors since this morning.",technical
+"Exported CSV files are empty when I filter by date.",technical
+"Webhook deliveries stopped arriving about an hour ago.",technical
+"The dashboard loads forever and then shows a blank page.",technical
+"Mobile app freezes on the splash screen after the latest update.",technical
+"Search returns results from the wrong workspace.",technical
+"Uploading files larger than 50 MB fails with a timeout.",technical
+"SSO login loops back to the sign-in page in Safari.",technical
+"The Slack integration posts every notification twice.",technical
+"Rate limit errors appear even though we are far below our quota.",technical
+"Charts show yesterday's numbers instead of today's.",technical
+"Dark mode makes the settings page unreadable on Firefox.",technical
+"I can't log in, the password reset email never arrives.",account
+"Please change the email address on my profile.",account
+"How do I add a teammate to our workspace?",account
+"My two-factor codes are rejected after I changed phones.",account
+"I want to delete my account and all my data.",account
+"How can I transfer ownership of the workspace to a colleague?",account
+"I need to rename my organisation without losing history.",account
+"Someone I don't know was added to our team, how do I remove them?",account
+"Can you merge my two accounts? I signed up with different emails.",account
+"Please update the company name displayed on my profile.",account
+"My username shows as 'null' since this morning.",account
+"How do I change the language of my profile?",account
+"I was charged after my account was locked, what now?",billing
+"Login works but my invoice history page throws an error.",technical
+"I can't update my card because the settings page won't load.",technical
+"The password reset link says it expired immediately.",account
+"After the upgrade my seats vanished and I was billed anyway.",billing
+"The export button is greyed out for admin users.",technical
+"Why is the account owner billed when the team lead made the purchase?",billing
+"Two-factor setup fails with 'invalid QR code' on a new phone.",account
+"Can't reach the billing page, it returns a 403 for my admin account.",technical
