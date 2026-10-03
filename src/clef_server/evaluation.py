@@ -363,6 +363,7 @@ class MetricsRequest(_Base):
     multi_label: bool = False
     threshold: float | None = Field(None, ge=0.0, le=1.0, description="multi-label decision threshold")
     bins: int = Field(10, ge=2, le=100, description="reliability-diagram bins")
+    include_predictions: bool = Field(False, description="return one prediction object per row (by index)")
 
     @field_validator("labels")
     @classmethod
@@ -532,11 +533,13 @@ def router(ctx: AppContext) -> APIRouter:
                 raise ValueError(f"rows: too many rows (max {cfg.max_job_eval_rows})")
             check_label_count(body.labels, body.multi_label, cfg.max_labels)
             rows = [{"gold": x.gold, "scores": x.scores} for x in body.rows]
-            metrics, _ = await run_in_threadpool(
+            metrics, preds = await run_in_threadpool(
                 compute_metrics, body.labels, rows, body.multi_label, body.threshold, body.bins
             )
         except Exception as exc:
             raise ctx.map_exception(exc) from exc
+        if body.include_predictions:
+            metrics["predictions"] = preds
         return metrics
 
     @r.post(

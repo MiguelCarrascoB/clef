@@ -116,7 +116,10 @@ def test_metrics_endpoint(api) -> None:
     r = client.post("/v1/evaluate/metrics", json={"labels": LABELS, "rows": ROWS, "bins": 5})
     assert r.status_code == 200, r.text
     assert r.json()["accuracy"] == 0.75 and len(r.json()["calibration"]["bins"]) == 5
-    assert eng.calls == []  # no inference
+    assert eng.calls == [] and "predictions" not in r.json()  # no inference
+    body = {"labels": LABELS, "rows": ROWS, "include_predictions": True}
+    p = client.post("/v1/evaluate/metrics", json=body)
+    assert [x["predicted"] for x in p.json()["predictions"]] == ["a", "a", "a", "b"]
     bad = client.post(
         "/v1/evaluate/metrics", json={"labels": LABELS, "rows": [{"gold": "zzz", "scores": {}}]}
     )
