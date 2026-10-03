@@ -54,4 +54,44 @@ noisy tail (p95 2873 ms).
 | int8 | pending hardware | pending | pending | pending |
 | nf4 | pending hardware | pending | pending | pending |
 
-The only local GPU is AMD, and bitsandbytes quantization is CUDA only, so these were not measured.
+These rows are still pending: the bitsandbytes-on-CUDA path was not measured (no NVIDIA GPU). On the AMD GPU,
+int8 / nf4 (bitsandbytes and torchao) and CPU offload were measured; see the last section.
+
+## Smaller-memory options on ROCm (offload, int8, nf4), 2026-10-03
+
+Setup: RX 7900 XTX 24 GB, ROCm 7.2, torch 2.11.0+rocm7.2, WSL2 (25 GB RAM), 2026-10-03, one configuration per process,
+bf16 measured first and last in the same session (152 / 154 ms p50, 4.72 / 4.67 req/s: 1% drift). Workload: 200
+records (choice 2-6 options, score 3-5 levels, noul; 1-3 questions each; states of ~15-1500 tokens; 10 with an
+image). "single" = 100 text records one at a time through `Engine.decide`; "c=8" = 160 requests, 8 in flight, through
+the engine's micro-batching. Parity = every answer option's probability against the bf16 run of the same session,
+one record per forward (399 questions).
+
+| Setting | Device GB, peak allocated / reserved | Host RAM after load | single p50 / p95 | req/s c=8 | Max / mean abs prob diff | Top-1 flips |
+| --- | --- | --- | --- | --- | --- | --- |
+| bf16 (default) | 18.4 / 19.4 | 1.5 GB | 152 / 560 ms | 4.72 | reference | - |
+| `OFFLOAD=cpu` cap 16 | 13.8 / 15.6 | 5.1 GB | 169 / 600 ms | 4.36 | 0 / 0 | 0 / 399 |
+| `OFFLOAD=cpu` cap 15 | 13.1 / 15.0 | 6.2 GB | 175 / 597 ms | 4.15 | 0 / 0 | 0 / 399 |
+| `OFFLOAD=cpu` cap 12 | 9.8 / 12.0 | 9.9 GB | 327 / 648 ms | 3.47 | 0 / 0 | 0 / 399 |
+| `OFFLOAD=cpu` cap 11 | 9.0 / 11.0 | 11.1 GB | 343 / 634 ms | 3.37 | 0 / 0 | 0 / 399 |
+| `OFFLOAD=cpu` cap 8 | 5.8 / 8.0 | 14.3 GB | 498 / 667 ms | 2.80 | 0 / 0 | 0 / 399 |
+| `OFFLOAD=cpu` cap 7 | 5.1 / 7.0 | 15.0 GB | 540 / 671 ms | 2.59 | 0 / 0 | 0 / 399 |
+| `OFFLOAD=cpu` cap 6 | crashed (segfault while loading; 28 layers pinned on WSL2) | | | | | |
+| `QUANT=int8` (torchao) | 12.0 / 12.9 | 1.5 GB | 198 / 595 ms | 4.23 | 0.062 / 0.0058 | 2 / 399 |
+| `QUANT=int8 OFFLOAD=cpu` (embeddings on host) | 8.3 / 9.2 | 2.5 GB | 206 / 611 ms | 4.10 | 0.062 / 0.0058 | 2 / 399 |
+| `QUANT=int8 QUANT_BACKEND=bnb` (bitsandbytes) | 11.6 / 12.7 | 2.5 GB | 420 / 680 ms | 3.01 | 0.262 / 0.0175 | 22 / 399 |
+| `QUANT=nf4` (bitsandbytes) | 8.5 / 9.2 | 1.5 GB | 249 / 637 ms | 3.66 | 0.449 / 0.0329 | 35 / 399 |
+| *fp16 (noise floor, separate run, 200 text records)* | *18.2 / 18.4* | | *159 ms (bf16 that run: 176)* | | *0.021 / 0.0019* | *0 / 399* |
+
+- The cap is enforced on the PyTorch allocator. The whole process (reserved memory + driver context) measured about
+  0.65 GB above the cap, so use `N - 0.5` GB for an `N` GB card: 15 for 16 GB, 11 for 12 GB, 7 for 8 GB.
+- Host RAM after load is the process RSS once the model is in place: the pinned copies of everything that was moved
+  off the GPU. During loading RSS peaks higher (up to ~19 GB) because the safetensors files are memory-mapped; those
+  pages are reclaimable page cache.
+- p95 is dominated by the longest records of the eval set (~1500 tokens), which are compute-bound and unaffected by
+  the settings; p50 is the number that moves.
+- Offload latency is the PCIe copy of the streamed layers (about 0.43 GB per layer at ~26 GB/s) partly hidden behind
+  compute; batching amortises it (req/s at c=8 falls less than single latency rises).
+- int8 flips: 2 of 399 questions changed their top option, against 0 for fp16 vs bf16. The mean
+  probability error 0.006 is ~3x the fp16/bf16 noise floor.
+
+Background: [docs/memory.md](memory.md). Reproduce with `bench/memory_bench.py`. CUDA and Apple Silicon rows are still pending hardware.
