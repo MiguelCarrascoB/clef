@@ -13,6 +13,7 @@ The same job in four languages: triage a support ticket ("Checkout is down, orde
 | `classify_csv.py` | same as `classify.py`; classifies a CSV column in chunks |
 | `openai_sdk.py` | `pip install openai`; the official OpenAI SDK against clef ([guide](../docs/openai-compat.md)) |
 | `hf_zero_shot.py` | `pip install huggingface_hub`; `InferenceClient.zero_shot_classification` against clef |
+| `jobs.py` | same as `classify.py`; classifies a CSV column as an async job (submit, poll, page results), see [docs/jobs.md](../docs/jobs.md) |
 
 All read two environment variables:
 
@@ -27,6 +28,7 @@ python examples/classify.py
 node examples/classify.mjs
 pwsh examples/classify.ps1        # or: powershell -File examples\classify.ps1
 python examples/classify_csv.py examples/tickets.csv -o out.csv --column text --labels billing,technical,account
+python examples/jobs.py examples/tickets.csv -o out.csv --column text --labels billing,technical,account
 ```
 
 `classify_csv.py` writes the input columns plus `label`, `confidence` and one `score_<label>` column per label
