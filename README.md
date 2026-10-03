@@ -109,14 +109,14 @@ from clef_client import ClefClient
 c = ClefClient("http://127.0.0.1:8910", api_key=None)
 
 r = c.classify("Checkout is down", ["billing", "technical"])
-r.label, r.confidence, r.scores                 # 'technical', 0.96, {...}
+r.label, r.confidence, r.scores  # 'technical', 0.96, {...}
 
 # multi-label: every label whose P(true) >= threshold
 c.classify("Refund me, the app also crashes", ["billing", "technical", "feature"], multi_label=True).labels
 
-c.classify_many(["...", "..."], ["billing", "technical"])                        # shared labels, input order
+c.classify_many(["...", "..."], ["billing", "technical"])  # shared labels, input order
 c.score("Server has been down for two hours", ["low", "medium", "high"]).score  # expected level index
-c.classifier("support-triage").classify("My invoice is wrong")                  # a saved classifier
+c.classifier("support-triage").classify("My invoice is wrong")  # a saved classifier
 ```
 
 | Endpoint | Use it for |

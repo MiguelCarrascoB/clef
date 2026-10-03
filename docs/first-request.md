@@ -21,7 +21,7 @@ Then ask which label fits an input.
 === "Python"
 
     ```python
-    from clef_client import ClefClient   # AsyncClefClient has the same methods
+    from clef_client import ClefClient  # AsyncClefClient has the same methods
 
     c = ClefClient("http://127.0.0.1:8910", api_key=None)
 
