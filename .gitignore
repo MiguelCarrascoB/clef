@@ -20,3 +20,6 @@ docs/prompts/
 # Docs build
 site/
 .venv-docs/
+
+# Claude Code agent worktrees
+.claude/worktrees/
