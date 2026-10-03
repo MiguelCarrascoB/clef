@@ -16,3 +16,7 @@ bench/out/
 
 # Internal working notes (agent prompts with local paths)
 docs/prompts/
+
+# Docs build
+site/
+.venv-docs/
