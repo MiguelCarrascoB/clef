@@ -13,7 +13,7 @@ from __future__ import annotations
 from ._async import AsyncClassifier, AsyncClefClient
 from ._common import DEFAULT_URL, ClefError, image_to_data_url, video_to_data_url
 from ._sync import Classifier, ClefClient
-from .types import Classification, ScoreResult
+from .types import Classification, Job, JobItem, ScoreResult
 
 __all__ = [
     "AsyncClassifier",
@@ -23,6 +23,8 @@ __all__ = [
     "Classifier",
     "ClefClient",
     "ClefError",
+    "Job",
+    "JobItem",
     "ScoreResult",
     "image_to_data_url",
     "video_to_data_url",

@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from . import _common as c
-from .types import Classification, ScoreResult, parse_classification, parse_result, parse_score
+from .types import (
+    Classification,
+    Job,
+    JobItem,
+    ScoreResult,
+    parse_classification,
+    parse_job,
+    parse_job_item,
+    parse_result,
+    parse_score,
+)
 
 DEFAULT_MODEL = "clef-flash"
 
@@ -149,6 +162,104 @@ class AsyncClefClient:
 
     async def delete_classifier(self, name: str) -> dict[str, Any]:
         return await self._request("DELETE", f"/v1/classifiers/{quote(name, safe='')}")
+
+    # -- async jobs (large batches; see docs/jobs.md) --
+    async def submit_job(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        webhook: str | dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Job:
+        """Queue a job and return at once. ``webhook``: a URL, or ``{"url", "secret", "events"}``."""
+        body = c.job_body(kind, payload, webhook, metadata)
+        return parse_job(await self._request("POST", "/v1/jobs", json=body))
+
+    async def classify_job(
+        self,
+        inputs: list[Any],
+        labels: list[str] | dict[str, str] | None = None,
+        *,
+        classifier: str | None = None,
+        instructions: str | None = None,
+        multi_label: bool = False,
+        threshold: float | None = None,
+        model: str | None = DEFAULT_MODEL,
+        webhook: str | dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Job:
+        """``classify_many`` without holding a connection open: labels or a saved ``classifier`` name."""
+        payload = c.classify_job_payload(
+            inputs, labels, classifier, instructions, multi_label, threshold, model
+        )
+        return await self.submit_job("classify", payload, webhook=webhook, metadata=metadata)
+
+    async def job(self, job_id: str) -> Job:
+        return parse_job(await self._request("GET", c.job_path(job_id)))
+
+    async def jobs(
+        self, *, status: str | None = None, kind: str | None = None, limit: int = 50, offset: int = 0
+    ) -> list[Job]:
+        """One page of jobs, newest first."""
+        params = c.job_list_params(status, kind, limit, offset)
+        body = await self._request("GET", "/v1/jobs", params=params)
+        return [parse_job(j) for j in body.get("jobs", [])]
+
+    async def cancel_job(self, job_id: str) -> Job:
+        return parse_job(await self._request("POST", c.job_path(job_id, "/cancel")))
+
+    async def delete_job(self, job_id: str) -> dict[str, Any]:
+        return await self._request("DELETE", c.job_path(job_id))
+
+    async def wait_job(
+        self,
+        job_id: str,
+        timeout: float | None = None,
+        poll: float = 1.0,
+        on_progress: Callable[[Job], None] | None = None,
+    ) -> Job:
+        """Poll until succeeded / failed / cancelled (check ``job.ok``); TimeoutError after ``timeout`` s."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            job = await self.job(job_id)
+            if on_progress:
+                on_progress(job)
+            if job.finished:
+                return job
+            if deadline is not None and time.monotonic() + poll > deadline:
+                raise TimeoutError(
+                    f"job {job_id} still {job.status} after {timeout} s ({job.done}/{job.total})"
+                )
+            await asyncio.sleep(poll)
+
+    async def job_results(
+        self, job_id: str, *, page_size: int = 500, offset: int = 0
+    ) -> AsyncIterator[JobItem]:
+        """Every result row currently stored, in input order, fetched page by page."""
+        while True:
+            page = await self._request(
+                "GET", c.job_path(job_id, "/results"), params={"offset": offset, "limit": page_size}
+            )
+            for row in page.get("items", []):
+                yield parse_job_item(row, page.get("kind", ""))
+            offset = page.get("next_offset")
+            if offset is None or not page.get("items"):
+                return
+
+    async def save_job_results(self, job_id: str, path: str | Path, format: str = "ndjson") -> Path:
+        """Stream the whole result (``ndjson`` or ``csv``) to a file without loading it in memory."""
+        dest = Path(path)
+        async with self._http.stream(
+            "GET", c.job_path(job_id, "/results"), params={"format": format}
+        ) as resp:
+            if not resp.is_success:
+                await resp.aread()
+                raise c.error_from(resp)
+            with dest.open("wb") as fh:
+                async for chunk in resp.aiter_bytes():
+                    fh.write(chunk)
+        return dest
 
     async def aclose(self) -> None:
         await self._http.aclose()

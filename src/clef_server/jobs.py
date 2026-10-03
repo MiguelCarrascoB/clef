@@ -481,6 +481,7 @@ class JobList(BaseModel):
 
 class JobResultsPage(BaseModel):
     id: str
+    kind: str
     status: str
     offset: int
     count: int
@@ -1144,6 +1145,7 @@ def router(ctx: AppContext) -> APIRouter:
             more = nxt < fresh["done"] or fresh["status"] in ACTIVE
             return {
                 "id": job_id,
+                "kind": fresh["kind"],
                 "status": fresh["status"],
                 "offset": offset,
                 "count": len(page),

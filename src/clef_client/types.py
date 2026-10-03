@@ -91,3 +91,87 @@ def parse_score(body: dict[str, Any], request_id: str | None = None) -> ScoreRes
 def parse_result(body: dict[str, Any]) -> Classification | ScoreResult:
     """Saved classifiers answer with either shape; ``distribution`` marks a score."""
     return parse_score(body) if "distribution" in body else parse_classification(body)
+
+
+TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
+
+@dataclass(frozen=True)
+class Job:
+    """An async job (``POST /v1/jobs``).
+
+    ``status``: queued, running, succeeded, failed, cancelled or interrupted. ``result`` is the kind's final
+    summary (classify: ``{"items", "ok", "errors", "by_label"}``); ``raw`` is the full server body (timings,
+    webhook delivery status, ...).
+    """
+
+    id: str
+    kind: str
+    status: str
+    done: int
+    total: int | None
+    failed: int = 0
+    percent: float | None = None
+    eta_s: float | None = None
+    error: str | None = None
+    result: Any = None
+    metadata: dict[str, Any] | None = None
+    created_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    webhook: dict[str, Any] | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def finished(self) -> bool:
+        return self.status in TERMINAL_STATUSES
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "succeeded"
+
+
+@dataclass(frozen=True)
+class JobItem:
+    """One result row; ``result`` is typed for classify / score jobs (None for failed rows, other kinds)."""
+
+    index: int
+    error: str | None
+    result: Classification | ScoreResult | None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+def parse_job(body: dict[str, Any]) -> Job:
+    progress = body.get("progress") or {}
+    return Job(
+        id=body["id"],
+        kind=body.get("kind", ""),
+        status=body["status"],
+        done=int(progress.get("done", 0)),
+        total=progress.get("total"),
+        failed=int(progress.get("failed", 0)),
+        percent=progress.get("percent"),
+        eta_s=body.get("eta_s"),
+        error=body.get("error"),
+        result=body.get("result"),
+        metadata=body.get("metadata"),
+        created_at=body.get("created_at"),
+        started_at=body.get("started_at"),
+        finished_at=body.get("finished_at"),
+        webhook=body.get("webhook"),
+        raw=body,
+    )
+
+
+def parse_job_item(row: dict[str, Any], kind: str) -> JobItem:
+    error = row.get("error")
+    result: Classification | ScoreResult | None = None
+    if error is None and kind == "classify":
+        result = parse_classification({**row, "multi_label": "labels" in row})
+    elif error is None and kind == "score":
+        result = parse_score(row)
+    return JobItem(index=int(row.get("index", -1)), error=error, result=result, raw=row)

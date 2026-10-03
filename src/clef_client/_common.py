@@ -10,6 +10,7 @@ import os
 import random
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -235,3 +236,48 @@ def classifier_def(
 
 def classifier_call_body(input: Any, images: Any, videos: Any, threshold: float | None) -> dict[str, Any]:
     return _clean({"input": input, "images": images, "videos": videos, "threshold": threshold})
+
+
+# -- async jobs --
+def job_body(
+    kind: str, payload: dict[str, Any], webhook: str | dict[str, Any] | None, metadata: dict[str, Any] | None
+) -> dict[str, Any]:
+    """``webhook`` is a URL or ``{"url", "secret", "events"}``."""
+    hook = {"url": webhook} if isinstance(webhook, str) else webhook
+    return _clean({"kind": kind, "payload": payload, "webhook": hook, "metadata": metadata})
+
+
+def classify_job_payload(
+    inputs: list[Any],
+    labels: Any,
+    classifier: str | None,
+    instructions: str | None,
+    multi_label: bool,
+    threshold: float | None,
+    model: str | None,
+) -> dict[str, Any]:
+    payload = _clean(
+        {
+            "labels": labels,
+            "classifier": classifier,
+            "instructions": instructions,
+            "multi_label": True if multi_label else None,
+            "threshold": threshold,
+            "model": model,
+        }
+    )
+    payload["inputs"] = list(inputs)
+    return payload
+
+
+def job_path(job_id: str, suffix: str = "") -> str:
+    return f"/v1/jobs/{quote(job_id, safe='')}{suffix}"
+
+
+def job_list_params(status: str | None, kind: str | None, limit: int, offset: int) -> dict[str, Any]:
+    return _clean({"status": status, "kind": kind, "limit": limit, "offset": offset or None})
+
+
+def stream_error(resp: httpx.Response) -> ClefError:
+    resp.read()
+    return error_from(resp)
