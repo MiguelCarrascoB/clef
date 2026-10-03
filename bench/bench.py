@@ -34,25 +34,46 @@ def add_backend_args(ap: argparse.ArgumentParser) -> None:
         "--dtype", default=os.environ.get("CLEF_DTYPE", "auto"), help="auto, bfloat16, float16, float32"
     )
     ap.add_argument(
-        "--quant", default=os.environ.get("CLEF_QUANT", "none"), help="none, int8, nf4 (CUDA only)"
+        "--quant", default=os.environ.get("CLEF_QUANT", "none"), help="none, int8, nf4 (see docs/memory.md)"
+    )
+    ap.add_argument(
+        "--offload", default=os.environ.get("CLEF_OFFLOAD", "none"), help="none, cpu (host-RAM offload)"
+    )
+    ap.add_argument(
+        "--max-device-gb",
+        type=float,
+        default=float(os.environ.get("CLEF_MAX_DEVICE_MEMORY_GB", 0)),
+        help="device memory cap in GB (0 = none)",
     )
 
 
-def load_model(model_path: str, device: str, dtype: str, quant: str = "none"):
-    """Detect the backend, resolve the dtype and load the model. Returns (backend, torch dtype, model, processor)."""
+def load_model(
+    model_path: str,
+    device: str,
+    dtype: str,
+    quant: str = "none",
+    offload: str = "none",
+    max_device_gb: float = 0.0,
+):
+    """Detect the backend, resolve the dtype and load the model (same path as the server). Returns (backend, torch dtype, model, processor)."""
+    import dataclasses
+
     from clef_server import backend as backend_mod
+    from clef_server.config import Config
+    from clef_server.engine import _import_model_module
+    from clef_server.engine import load_model as engine_load_model
 
     backend = backend_mod.detect(device)
     torch_dtype, warning = backend.resolve_dtype(dtype)
     if warning:
         print("warning:", warning)
-    kwargs = {}
-    qc = backend_mod.quantization_config(backend, quant, torch_dtype)
-    if qc is not None:
-        kwargs["quantization_config"] = qc
-    from joint_schema_model import load_release_model
-
-    model, processor = load_release_model(model_path, device=backend.device, dtype=torch_dtype, **kwargs)
+    cfg = dataclasses.replace(
+        Config(), quant=quant, offload=offload, max_device_memory_gb=max_device_gb, model_path=model_path
+    )
+    mod = _import_model_module(model_path)
+    model, processor, info = engine_load_model(mod, model_path, backend, torch_dtype, cfg)
+    for note in info.notes:
+        print(note)
     return backend, torch_dtype, model, processor
 
 
@@ -147,7 +168,9 @@ def main() -> int:
     from joint_schema_model import collate_records, encode_record
 
     t0 = time.perf_counter()
-    backend, torch_dtype, model, processor = load_model(args.model_path, args.device, args.dtype, args.quant)
+    backend, torch_dtype, model, processor = load_model(
+        args.model_path, args.device, args.dtype, args.quant, args.offload, args.max_device_gb
+    )
     dev = backend.device
     sync = backend.synchronize
     print(

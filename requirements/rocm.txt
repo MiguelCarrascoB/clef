@@ -141,6 +141,8 @@ torch==2.11.0+rocm7.2
     # via
     #   -c requirements/constraints-rocm.txt
     #   clef-local (pyproject.toml)
+torchao==0.18.0+rocm7.2
+    # via clef-local (pyproject.toml)
 tqdm==4.70.1
     # via
     #   huggingface-hub

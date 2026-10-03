@@ -56,9 +56,11 @@ server = [
 cuda = ["torch>=2.6", "flash-linear-attention", "nvidia-ml-py", "bitsandbytes"]
 # causal-conv1d only ships an sdist: building it needs nvcc / the CUDA toolkit. Optional extra speed.
 cuda-fast = ["causal-conv1d"]
-rocm = ["torch>=2.6", "flash-linear-attention"]
-mps = ["torch>=2.6"]
-cpu = ["torch>=2.6"]
+# torchao: weight-only int8 for CLEF_QUANT=int8 off CUDA (docs/memory.md); optional on cuda (`quant` extra).
+rocm = ["torch>=2.6", "flash-linear-attention", "torchao>=0.17"]
+mps = ["torch>=2.6", "torchao>=0.17"]
+cpu = ["torch>=2.6", "torchao>=0.17"]
+quant = ["torchao>=0.17"]
 dev = ["pytest", "pytest-asyncio", "ruff", "httpx"]
 
 [tool.hatch.version]

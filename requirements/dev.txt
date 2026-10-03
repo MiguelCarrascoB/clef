@@ -251,6 +251,10 @@ torch==2.14.1+cpu ; sys_platform != 'darwin'
     # via
     #   -c requirements/cpu.txt
     #   clef-local (pyproject.toml)
+torchao==0.18.0+cpu
+    # via
+    #   -c requirements/cpu.txt
+    #   clef-local (pyproject.toml)
 tqdm==4.70.1
     # via
     #   -c requirements/cpu.txt

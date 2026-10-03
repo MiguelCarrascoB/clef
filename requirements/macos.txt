@@ -126,6 +126,8 @@ tomli==2.4.1
     # via huggingface-hub
 torch==2.11.0
     # via clef-local (pyproject.toml)
+torchao==0.18.0
+    # via clef-local (pyproject.toml)
 tqdm==4.70.1
     # via
     #   huggingface-hub

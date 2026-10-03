@@ -149,6 +149,8 @@ torch==2.14.1 ; sys_platform == 'darwin'
     # via clef-local (pyproject.toml)
 torch==2.14.1+cpu ; sys_platform != 'darwin'
     # via clef-local (pyproject.toml)
+torchao==0.18.0+cpu
+    # via clef-local (pyproject.toml)
 tqdm==4.70.1
     # via
     #   huggingface-hub

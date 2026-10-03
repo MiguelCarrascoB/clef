@@ -7,11 +7,12 @@ so it is split into extras:
 | --- | --- |
 | *(base)* | `httpx`: enough for `clef_client` |
 | `server` | fastapi, uvicorn, pydantic, pillow, imageio(+ffmpeg), numpy, transformers==5.10.2, safetensors, huggingface_hub, einops, psutil. **No torch.** |
-| `cuda` | torch, flash-linear-attention, nvidia-ml-py, bitsandbytes (the only backend where `CLEF_QUANT=int8/nf4` works) |
+| `cuda` | torch, flash-linear-attention, nvidia-ml-py, bitsandbytes (`CLEF_QUANT=int8/nf4` on CUDA; also works on ROCm, see docs/memory.md) |
+| `quant` | torchao (weight-only int8 for `CLEF_QUANT=int8`; already part of `rocm`, `mps` and `cpu`; optional on CUDA via `CLEF_QUANT_BACKEND=torchao`) |
 | `cuda-fast` | causal-conv1d (sdist only: needs `nvcc` / the CUDA toolkit; optional speed-up, `clef doctor` reports the fast path) |
-| `rocm` | torch, flash-linear-attention (torch must come from the ROCm index) |
-| `mps` | torch (Apple Silicon) |
-| `cpu` | torch (CPU wheels) |
+| `rocm` | torch, flash-linear-attention, torchao (torch must come from the ROCm index) |
+| `mps` | torch, torchao (Apple Silicon) |
+| `cpu` | torch, torchao (CPU wheels) |
 | `dev` | pytest, pytest-asyncio, ruff, httpx |
 
 Always combine `server` with exactly one backend: `clef-local[server,cuda]`, `clef-local[server,rocm]`, ...
@@ -30,7 +31,7 @@ Every file starts with `--index-url` and `--extra-index-url` lines, so `pip inst
 torch from the right index. `constraints-rocm.txt` holds the hand-picked ROCm pins used when compiling `rocm.txt`.
 
 Known gaps: `causal-conv1d` has no wheels for any platform, so it is left out of every lock (install it with the
-`cuda-fast` extra on a machine with the CUDA toolkit). `bitsandbytes` is only in `cuda.txt` (no ROCm/MPS/CPU use).
+`cuda-fast` extra on a machine with the CUDA toolkit). `bitsandbytes` is only in `cuda.txt` (its nf4 also loads on ROCm: `pip install bitsandbytes`, not recommended); `torchao` is in `rocm.txt`, `macos.txt`, `cpu.txt` and `dev.txt`.
 No lock is provided for native Windows + CUDA: use `--torch-backend` (below) or install CUDA torch first.
 
 ### Regenerate
