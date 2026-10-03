@@ -8,3 +8,7 @@ models/
 *.egg-info/
 .env
 bench/out/
+build/
+dist/
+*.egg-info
+.venv

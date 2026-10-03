@@ -1,0 +1,66 @@
+# clef in Docker. Pick the profile that matches your GPU:
+#   docker compose --profile cuda up -d --build        # NVIDIA (needs the NVIDIA Container Toolkit)
+#   docker compose --profile rocm up -d --build        # AMD (needs /dev/kfd and /dev/dri on the host)
+# First run: fetch the ~19 GB weights into the volume (resumable):
+#   docker compose --profile cuda run --rm clef-cuda clef download --yes
+#
+# Network: the server listens on 0.0.0.0 INSIDE the container, but the port is published on the host's loopback
+# only. To serve other machines on your network set CLEF_BIND=0.0.0.0 AND CLEF_API_KEYS (name:key,name2:key2),
+# for example in a .env file next to this one. Never expose it without keys.
+x-clef-env: &clef-env
+  CLEF_HOST: 0.0.0.0
+  CLEF_PORT: 8910
+  CLEF_API_KEYS: ${CLEF_API_KEYS:-}
+  CLEF_DEVICE: ${CLEF_DEVICE:-auto}
+  CLEF_DTYPE: ${CLEF_DTYPE:-auto}
+  CLEF_QUANT: ${CLEF_QUANT:-none}
+  CLEF_RATE_LIMIT: ${CLEF_RATE_LIMIT:-0}
+  CLEF_CORS_ORIGINS: ${CLEF_CORS_ORIGINS:-}
+
+services:
+  clef-cuda:
+    profiles: ["cuda"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cuda
+    image: clef:cuda
+    environment: *clef-env
+    ports:
+      - "${CLEF_BIND:-127.0.0.1}:${CLEF_PUBLISH_PORT:-8910}:8910"
+    volumes:
+      - clef-models:/models   # HF cache: the weights
+      - clef-data:/data       # logs, saved classifiers
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  clef-rocm:
+    profiles: ["rocm"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.rocm
+    image: clef:rocm
+    environment: *clef-env   # unofficial Radeon cards: add HSA_OVERRIDE_GFX_VERSION (e.g. 11.0.0 for RDNA3) here
+    ports:
+      - "${CLEF_BIND:-127.0.0.1}:${CLEF_PUBLISH_PORT:-8910}:8910"
+    volumes:
+      - clef-models:/models
+      - clef-data:/data
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    security_opt:
+      - seccomp=unconfined
+    ipc: host
+    restart: unless-stopped
+
+volumes:
+  clef-models:
+  clef-data:

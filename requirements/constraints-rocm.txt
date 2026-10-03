@@ -1,0 +1,4 @@
+# Pins that are known to work on ROCm 7.2 (measured on RX 7900 XTX under WSL2). Used as `-c` when compiling rocm.txt.
+torch==2.11.0+rocm7.2
+flash-linear-attention==0.5.2
+fla-core==0.5.2

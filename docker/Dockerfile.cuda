@@ -1,0 +1,33 @@
+# clef server image for NVIDIA GPUs (CUDA 12.8 wheels from requirements/cuda.txt).
+# Build from the repo root:  docker build -f docker/Dockerfile.cuda -t clef:cuda .
+# Run with the NVIDIA Container Toolkit installed:  docker compose --profile cuda up
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-pip python3-venv ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+# Dependencies first (cached unless the lock file changes), then the package itself.
+COPY requirements/cuda.txt requirements/cuda.txt
+RUN python3 -m pip install -r requirements/cuda.txt
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+RUN python3 -m pip install --no-deps .
+
+# Weights live in a volume (never baked into the image): `docker compose run --rm clef-cuda clef download --yes`
+ENV HF_HOME=/models/hf \
+    CLEF_STATE_DIR=/data/state \
+    CLEF_HOST=0.0.0.0 \
+    CLEF_PORT=8910
+VOLUME ["/models", "/data"]
+EXPOSE 8910
+
+# CLEF_HOST=0.0.0.0 makes the server reachable from outside the container: set CLEF_API_KEYS (see docker-compose.yml).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
+  CMD python3 -c "import os,urllib.request as u; u.urlopen('http://127.0.0.1:%s/livez' % os.environ.get('CLEF_PORT','8910'), timeout=3)"
+CMD ["clef", "serve"]

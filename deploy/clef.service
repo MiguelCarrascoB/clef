@@ -1,18 +1,24 @@
-# systemd --user unit for the clef-flash server (installed by scripts/install_service.sh).
-# Requires systemd=true in /etc/wsl.conf (see deploy/wsl.conf.sample).
+# systemd --user unit for the clef server (Linux, or WSL2 with systemd=true; see deploy/wsl.conf.sample).
+# Install with scripts/install_service.sh (substitutes __CLEF_BIN__ with the `clef` on your PATH), or by hand:
+#   sed "s#__CLEF_BIN__#$(command -v clef)#" deploy/clef.service > ~/.config/systemd/user/clef.service
+#   systemctl --user daemon-reload && systemctl --user enable --now clef
+# Runs as your user in the foreground (`clef serve`), so systemd supervises it and journald holds the log.
+# Settings go in ~/.config/clef/env, one KEY=value per line (CLEF_API_KEYS, CLEF_HOST, CLEF_PORT, CLEF_DEVICE, ...).
+# Start without a login session: sudo loginctl enable-linger $USER
 [Unit]
-Description=clef-flash local decision server
-After=network.target
+Description=clef local decision server
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-# __CLEF_HOME__ is substituted by install_service.sh
-ExecStart=/usr/bin/env bash __CLEF_HOME__/scripts/run_server.sh
+ExecStart=__CLEF_BIN__ serve
 Restart=on-failure
 RestartSec=5
-TimeoutStartSec=300
+# Loading 19 GB of weights can take minutes on a cold disk
+TimeoutStartSec=600
 TimeoutStopSec=30
-# Optional overrides (CLEF_API_KEY, CLEF_PORT, ...), one KEY=value per line
+# Optional overrides, the leading '-' makes the file optional
 EnvironmentFile=-%h/.config/clef/env
 
 [Install]

@@ -51,4 +51,4 @@ chmod 644 /etc/profile.d/rocm-wsl.sh
 
 echo "DONE: WSL root bootstrap complete"
 HSA_ENABLE_DXG_DETECTION=1 /opt/rocm/bin/rocminfo 2>/dev/null | grep -E "Marketing Name|Name:" | head -6 \
-  || echo "(rocminfo probe will be verified later as user: python scripts/doctor.py)"
+  || echo "(rocminfo probe will be verified later as user: clef doctor)"

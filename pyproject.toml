@@ -1,20 +1,75 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
 [project]
 name = "clef-local"
-version = "2.0.0"
-description = "Local deployment of the Cloudflare clef-flash decision model (ROCm / WSL2) behind a FastAPI server"
+dynamic = ["version"]  # single source of truth: VERSION in src/clef_server/config.py
+description = "Run Cloudflare's clef-flash decision model locally (CUDA, ROCm, Apple Silicon or CPU) behind a FastAPI server with a web console"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 # The WSL venv runs Python 3.10; CI runs 3.12. Keep the floor at what is actually deployed.
 requires-python = ">=3.10"
-dependencies = ["httpx>=0.27"]  # only what clef_client needs
+keywords = ["llm", "classification", "fastapi", "clef-flash", "local-inference"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: GPU",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Base install = what clef_client needs. The server and a torch build are extras (see below).
+dependencies = ["httpx>=0.27"]
 
-# The venv is built from requirements/*.txt (exact pins), not `pip install -e`.
-# These groups document what each file contains.
+[project.urls]
+Homepage = "https://github.com/MiguelCarrascoB/clef"
+Source = "https://github.com/MiguelCarrascoB/clef"
+
+[project.scripts]
+clef = "clef_server.cli:main"
+
+# Install the server with ONE backend extra, e.g.  clef-local[server,cuda]  (see requirements/README.md).
+# `server` deliberately does not pull torch: the right torch wheel depends on the platform and GPU.
 [project.optional-dependencies]
 server = [
-  "torch==2.11.0", "transformers==5.10.2", "fastapi", "uvicorn[standard]", "pydantic>=2",
-  "pillow", "imageio", "imageio-ffmpeg", "numpy", "flash-linear-attention", "safetensors",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2",
+  "pillow",
+  "imageio",
+  "imageio-ffmpeg",
+  "numpy",
+  "transformers==5.10.2",
+  "safetensors",
+  "huggingface_hub",
+  "einops",
+  "psutil",
 ]
+# Backends: torch + the optional fast paths for that backend.
+cuda = ["torch>=2.6", "flash-linear-attention", "nvidia-ml-py", "bitsandbytes"]
+# causal-conv1d only ships an sdist: building it needs nvcc / the CUDA toolkit. Optional extra speed.
+cuda-fast = ["causal-conv1d"]
+rocm = ["torch>=2.6", "flash-linear-attention"]
+mps = ["torch>=2.6"]
+cpu = ["torch>=2.6"]
 dev = ["pytest", "pytest-asyncio", "ruff", "httpx"]
+
+[tool.hatch.version]
+path = "src/clef_server/config.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clef_server", "src/clef_client"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "bench", "docs", "scripts", "deploy", "docker", "requirements", "README.md",
+           "CHANGELOG.md", "LICENSE", "pyproject.toml", "docker-compose.yml", "clef.ps1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

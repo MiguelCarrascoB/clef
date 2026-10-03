@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for macOS (Apple Silicon). Template: replace __CLEF_BIN__ and __HOME__, then load it:
+
+    sed -e "s#__CLEF_BIN__#$(command -v clef)#" -e "s#__HOME__#$HOME#g" deploy/com.clef.server.plist \
+      > ~/Library/LaunchAgents/com.clef.server.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.clef.server.plist
+    launchctl kickstart -k gui/$(id -u)/com.clef.server        # (re)start now
+    launchctl bootout gui/$(id -u)/com.clef.server              # stop and unload
+
+  Add settings under EnvironmentVariables (CLEF_API_KEYS, CLEF_PORT, ...). `clef logs` reads the server's own log
+  file; launchd's stdout/stderr go to ~/Library/Logs/clef.log.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.clef.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__CLEF_BIN__</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/clef.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/clef.log</string>
+</dict>
+</plist>

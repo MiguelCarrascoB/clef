@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Windows wrapper for the clef-flash server running in WSL2 (Ubuntu).
+  Windows wrapper for the clef server running in WSL2 (Ubuntu): a thin layer over the `clef` CLI inside the venv.
+  Keeps a hidden WSL session alive so the detached server survives. (Native Windows install: use `clef` directly.)
 .EXAMPLE
   .\clef.ps1 start | stop | restart | status | logs | test | bench [http] [args] | doctor | open
 #>
@@ -22,8 +23,9 @@ $RepoWin = (Resolve-Path $PSScriptRoot).Path.TrimEnd('\')
 $RepoWsl = '/mnt/' + $RepoWin.Substring(0, 1).ToLower() + $RepoWin.Substring(2).Replace('\', '/')
 
 function Invoke-Wsl([string]$Script) {
-    # Script runs in a bash login-less shell inside WSL; env.sh supplies the whole environment.
-    & wsl.exe -d $Distro -- bash -c $Script | Out-Host
+    # A LOGIN shell, so /etc/profile.d hooks from the ROCm-on-WSL install (e.g. LD_LIBRARY_PATH for amdsmi,
+    # HSA_ENABLE_DXG_DETECTION) reach the server. Measured: with `bash -c` GPU telemetry was unavailable.
+    & wsl.exe -d $Distro -- bash -lc $Script | Out-Host
     return $LASTEXITCODE
 }
 
@@ -98,7 +100,7 @@ switch ($Command) {
         if ($ok) { exit 0 } else { exit 1 }
     }
     'doctor' {
-        exit (Invoke-Wsl ". '$RepoWsl/scripts/env.sh' && cd '$RepoWsl' && python scripts/doctor.py")
+        exit (Invoke-Wsl ". '$RepoWsl/scripts/env.sh' && cd '$RepoWsl' && clef_run doctor $($Rest -join ' ')")
     }
     'test' {
         $extra = $Rest -join ' '
@@ -113,7 +115,7 @@ switch ($Command) {
         $http = ($Rest.Count -gt 0 -and $Rest[0] -eq 'http')
         if ($http) {
             $args2 = ($Rest | Select-Object -Skip 1) -join ' '
-            exit (Invoke-Wsl ". '$RepoWsl/scripts/env.sh' && cd '$RepoWsl' && python bench/http_bench.py $args2")
+            exit (Invoke-Wsl ". '$RepoWsl/scripts/env.sh' && cd '$RepoWsl' && CLEF_URL=http://127.0.0.1:$Port clef_run bench $args2")
         }
         Write-Host 'In-process bench needs the GPU: stop the server first (.\clef.ps1 stop). Use "bench http" for the live server.' -ForegroundColor Yellow
         exit (Invoke-Wsl ". '$RepoWsl/scripts/env.sh' && cd '$RepoWsl' && python bench/bench.py $($Rest -join ' ')")
