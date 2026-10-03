@@ -1,0 +1,21 @@
+{
+  "name": "clef-client",
+  "version": "3.0.0",
+  "description": "Dependency-free JavaScript client for the clef-flash server (Node 18+ and browsers)",
+  "type": "module",
+  "private": true,
+  "main": "./src/index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": ["src", "index.d.ts", "README.md"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test test/client.test.js"
+  },
+  "license": "Apache-2.0"
+}
