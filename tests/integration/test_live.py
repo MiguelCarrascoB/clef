@@ -62,7 +62,7 @@ def test_health_fields(http):
         assert key in h, key
     assert h["status"] in ("ready", "warming")
     assert h["gpu"]["available"] is True
-    assert h["version"].startswith("2.")
+    assert h["version"].startswith(("2.", "3."))
 
 
 def test_text_decision_shape(http):
@@ -200,3 +200,160 @@ def test_video_red_ball(http):
     a = r.json()["answers"]
     assert a["has_ball"]["noul"] > 0.5
     assert a["ball_color"]["choice"] == "red"
+
+
+# ------------------------------------------------------------------ v3: classification API (live parity)
+
+LABELS = {"billing": "Payments or invoices", "technical": "Bugs or outages", "sales": "Pricing or purchases"}
+INSTR = "Which team should handle the message?"
+TICKETS = [
+    TICKET,
+    "Customers are double-charged on invoices since the payment update.",
+    "Can I get a quote for 200 seats?",
+]
+
+
+def post_ok(http, path, **body):
+    r = http.post(path, json=body)
+    assert r.status_code == 200, f"{path}: {r.status_code} {r.text}"
+    return r.json()
+
+
+def test_health_has_backend(http):
+    h = http.get("/health").json()
+    assert h.get("backend") in ("cuda", "rocm", "mps", "cpu")
+    assert "telemetry" in h and "memory_kind" in h["gpu"]
+
+
+def test_classify_single_matches_systemone(http):
+    got = post_ok(http, "/v1/classify", input=TICKET, labels=LABELS, instructions=INSTR)
+    ref = post_ok(
+        http,
+        "/v1/systemone",
+        model="clef-flash",
+        state=TICKET,
+        questions={"label": {"type": "choice", "criteria": LABELS, "instructions": INSTR}},
+    )["answers"]["label"]
+    assert got["multi_label"] is False and got["label"] == ref["choice"]
+    assert got["confidence"] == pytest.approx(ref["confidence"], abs=1e-3)
+    assert set(got["scores"]) == set(LABELS)
+    for opt, p in ref["probabilities"].items():
+        assert got["scores"][opt] == pytest.approx(p, abs=1e-3)
+    assert got["usage"]["input_tokens"] > 0 and got["request_id"]
+
+
+def test_classify_list_labels_matches_systemone(http):
+    got = post_ok(http, "/v1/classify", input=TICKET, labels=["billing", "technical"])
+    ref = post_ok(
+        http,
+        "/v1/systemone",
+        state=TICKET,
+        questions={"label": {"type": "choice", "criteria": {"billing": "billing", "technical": "technical"}}},
+    )["answers"]["label"]
+    for opt, p in ref["probabilities"].items():
+        assert got["scores"][opt] == pytest.approx(p, abs=1e-3)
+
+
+def test_classify_multi_label_matches_systemone(http):
+    got = post_ok(
+        http, "/v1/classify", input=TICKET, labels=LABELS, instructions=INSTR, multi_label=True, threshold=0.3
+    )
+    questions = {}
+    for name, desc in LABELS.items():
+        q = {"type": "noul", "instructions": f'{INSTR} Does the label "{name}" apply?'}
+        if desc != name:
+            q["criteria"] = {"true": desc}
+        questions[name] = q
+    ref = post_ok(http, "/v1/systemone", state=TICKET, questions=questions)["answers"]
+    assert got["multi_label"] is True and got["threshold"] == 0.3
+    for name in LABELS:
+        assert got["scores"][name] == pytest.approx(ref[name]["noul"], abs=1e-3)
+    expect = sorted((n for n in LABELS if ref[n]["noul"] >= 0.3), key=lambda n: -ref[n]["noul"])
+    assert got["labels"] == expect
+    assert "label" not in got
+
+
+def test_score_matches_systemone(http):
+    levels = ["Can wait", "This week", "Today"]
+    got = post_ok(http, "/v1/score", input=TICKET, levels=levels, instructions="How urgent is it?")
+    ref = post_ok(
+        http,
+        "/v1/systemone",
+        state=TICKET,
+        questions={"score": {"type": "score", "criteria": levels, "instructions": "How urgent is it?"}},
+    )["answers"]["score"]
+    for i, level in enumerate(levels):
+        assert got["distribution"][level] == pytest.approx(ref["probabilities"][str(i)], abs=1e-3)
+    assert got["score"] == pytest.approx(
+        sum(i * p for i, p in enumerate(got["distribution"].values())), abs=1e-3
+    )
+    assert got["level"] == levels[got["level_index"]]
+    assert got["level_index"] == max(range(3), key=lambda i: got["distribution"][levels[i]])
+
+
+def test_classify_batch_order_and_parity(http):
+    got = post_ok(http, "/v1/classify/batch", inputs=TICKETS, labels=LABELS, instructions=INSTR)
+    assert len(got["results"]) == len(TICKETS) and got["batch_ms"] > 0 and got["request_id"]
+    for text, res in zip(TICKETS, got["results"], strict=True):
+        single = post_ok(http, "/v1/classify", input=text, labels=LABELS, instructions=INSTR)
+        assert res["label"] == single["label"]
+        for opt, p in single["scores"].items():
+            assert res["scores"][opt] == pytest.approx(
+                p, abs=2e-2
+            )  # batched vs single padding differs slightly
+    assert got["results"][0]["label"] == "technical"
+    assert got["results"][1]["label"] == "billing"
+
+
+def test_saved_classifier_round_trip(http):
+    name = f"live-test-{os.getpid()}"
+    definition = {"kind": "classify", "labels": LABELS, "instructions": INSTR, "description": "live test"}
+    try:
+        r = http.put(f"/v1/classifiers/{name}", json=definition)
+        assert r.status_code == 200, r.text
+        doc = r.json()
+        assert doc["name"] == name and doc["created_at"] and doc["updated_at"]
+        assert name in [c["name"] for c in http.get("/v1/classifiers").json()["classifiers"]]
+        assert http.get(f"/v1/classifiers/{name}").json()["labels"] == LABELS
+
+        ran = post_ok(http, f"/v1/classifiers/{name}", input=TICKET)
+        direct = post_ok(http, "/v1/classify", input=TICKET, labels=LABELS, instructions=INSTR)
+        assert ran["classifier"] == name and ran["label"] == direct["label"]
+        for opt, p in direct["scores"].items():
+            assert ran["scores"][opt] == pytest.approx(p, abs=1e-3)
+
+        batch = post_ok(http, f"/v1/classifiers/{name}/batch", inputs=TICKETS)
+        assert batch["classifier"] == name and len(batch["results"]) == len(TICKETS)
+
+        again = http.put(f"/v1/classifiers/{name}", json=definition).json()
+        assert again["created_at"] == doc["created_at"]
+    finally:
+        http.delete(f"/v1/classifiers/{name}")
+    assert http.get(f"/v1/classifiers/{name}").status_code == 404
+    assert http.delete(f"/v1/classifiers/{name}").status_code == 404
+
+
+def test_timeseries_shape(http):
+    post_ok(http, "/v1/classify", input=TICKET, labels=["billing", "technical"])
+    ts = http.get("/v1/stats/timeseries", params={"window_s": 300, "step_s": 5}).json()
+    assert ts["window_s"] == 300 and ts["step_s"] == 5 and ts["now"] > 0
+    n = len(ts["t"])
+    assert n == 60 and ts["t"] == sorted(ts["t"])
+    for col in (
+        "rps",
+        "p50_ms",
+        "p95_ms",
+        "error_rate",
+        "avg_batch",
+        "queue_depth",
+        "padding_ratio",
+        "mem_used_gb",
+        "gpu_util_pct",
+        "gpu_temp_c",
+        "gpu_power_w",
+    ):
+        assert len(ts[col]) == n, col
+    assert sum(ts["rps"]) > 0
+    assert http.get("/v1/stats/timeseries", params={"window_s": 300, "step_s": 400}).status_code == 400
+    stats = http.get("/v1/stats").json()
+    assert "by_endpoint" in stats and "by_key" in stats and "telemetry" in stats
