@@ -1,14 +1,18 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
-models/
-*.log
-.ruff_cache/
-.pytest_cache/
 *.egg-info/
-.env
-bench/out/
 build/
 dist/
-*.egg-info
-.venv
+.pytest_cache/
+.ruff_cache/
+
+# Local data and secrets
+models/
+bench/out/
+*.log
+.env
+
+# Internal working notes (agent prompts with local paths)
+docs/prompts/
