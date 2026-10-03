@@ -183,3 +183,129 @@ test('baseUrl trailing slash is trimmed; no apiKey header by default', async () 
   assert.equal(m.calls[0].url, 'http://h:1/health');
   assert.equal('X-API-Key' in m.calls[0].headers, false);
 });
+
+// --- async jobs ---
+
+const jobBody = (status = 'queued', done = 0, total = null, extra = {}) => ({
+  id: 'job_1',
+  kind: 'classify',
+  status,
+  progress: { done, total, failed: 0, percent: null },
+  eta_s: null,
+  error: null,
+  result: null,
+  metadata: null,
+  webhook: null,
+  ...extra,
+});
+
+const ROWS = [
+  { index: 0, label: 'billing', confidence: 0.9, scores: { billing: 0.9, technical: 0.1 } },
+  { index: 1, error: 'input is too long' },
+  { index: 2, labels: ['a', 'b'], scores: { a: 0.8, b: 0.6 }, threshold: 0.5 },
+];
+
+test('submitJob / classifyJob bodies and typed Job', async () => {
+  const m = mock(() => json(202, jobBody('queued')));
+  const c = client(m);
+  const job = await c.submitJob('classify', { inputs: ['a'], labels: ['x', 'y'] }, { webhook: 'https://h.example/x', metadata: { m: 1 } });
+  assert.equal(m.calls[0].url, 'http://127.0.0.1:8910/v1/jobs');
+  assert.equal(m.calls[0].method, 'POST');
+  assert.deepEqual(m.calls[0].body, {
+    kind: 'classify',
+    payload: { inputs: ['a'], labels: ['x', 'y'] },
+    webhook: { url: 'https://h.example/x' },
+    metadata: { m: 1 },
+  });
+  assert.equal(job.id, 'job_1');
+  assert.equal(job.status, 'queued');
+  assert.equal(job.finished, false);
+  assert.equal(job.done, 0);
+  assert.equal(job.raw.kind, 'classify');
+
+  await c.classifyJob(['a', 'b'], ['x', 'y'], { instructions: 'why', multiLabel: true, threshold: 0.4, webhook: { url: 'u', secret: 's' } });
+  assert.deepEqual(m.calls[1].body.payload, {
+    labels: ['x', 'y'],
+    instructions: 'why',
+    multi_label: true,
+    threshold: 0.4,
+    model: 'clef-flash',
+    inputs: ['a', 'b'],
+  });
+  assert.deepEqual(m.calls[1].body.webhook, { url: 'u', secret: 's' });
+  await c.classifyJob(['a'], null, { classifier: 'triage' });
+  assert.deepEqual(m.calls[2].body.payload, { classifier: 'triage', model: 'clef-flash', inputs: ['a'] });
+});
+
+test('job, jobs, cancelJob, deleteJob', async () => {
+  const m = mock((call) => {
+    if (call.url.endsWith('/cancel')) return json(200, jobBody('cancelled'));
+    if (call.method === 'DELETE') return json(200, { deleted: 'job_1' });
+    if (call.url.includes('/v1/jobs?')) return json(200, { jobs: [jobBody(), jobBody('succeeded')], total: 2 });
+    return json(200, jobBody('running', 5, 10, { eta_s: 2.5 }));
+  });
+  const c = client(m);
+  const job = await c.job('job_1');
+  assert.deepEqual([job.status, job.done, job.total, job.etaS], ['running', 5, 10, 2.5]);
+  const list = await c.jobs({ status: 'running', limit: 10, offset: 20 });
+  assert.deepEqual(list.map((j) => j.status), ['queued', 'succeeded']);
+  assert.equal(m.calls[1].url, 'http://127.0.0.1:8910/v1/jobs?status=running&limit=10&offset=20');
+  assert.equal((await c.cancelJob('job_1')).status, 'cancelled');
+  assert.deepEqual(await c.deleteJob('job_1'), { deleted: 'job_1' });
+  await c.job('a/b');
+  assert.equal(m.calls.at(-1).url, 'http://127.0.0.1:8910/v1/jobs/a%2Fb');
+});
+
+test('waitJob polls until finished, reports progress, times out', async () => {
+  const polls = [jobBody('queued'), jobBody('running', 1, 3), jobBody('succeeded', 3, 3, { result: { items: 3 } })];
+  const m = mock(() => json(200, polls.shift()));
+  const c = client(m);
+  c._sleep = async () => {};
+  const seen = [];
+  const job = await c.waitJob('job_1', { pollMs: 0, onProgress: (j) => seen.push(j.done) });
+  assert.equal(job.ok, true);
+  assert.equal(job.finished, true);
+  assert.deepEqual(job.result, { items: 3 });
+  assert.deepEqual(seen, [0, 1, 3]);
+
+  const failed = await client(mock(json(200, jobBody('failed', 0, 3, { error: 'engine gone' })))).waitJob('job_1');
+  assert.equal(failed.finished, true);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error, 'engine gone');
+
+  const slow = client(mock(json(200, jobBody('running', 1, 9))));
+  slow._sleep = async () => {};
+  await assert.rejects(slow.waitJob('job_1', { timeoutMs: 0, pollMs: 10 }), /still running/);
+});
+
+test('jobResults pages through next_offset and types rows', async () => {
+  const m = mock((call) => {
+    const q = new URL(call.url).searchParams;
+    const off = Number(q.get('offset'));
+    const items = ROWS.slice(off, off + Number(q.get('limit')));
+    const next = off + items.length;
+    return json(200, { id: 'job_1', kind: 'classify', items, next_offset: next < 3 ? next : null });
+  });
+  const items = [];
+  for await (const it of client(m).jobResults('job_1', { pageSize: 2 })) items.push(it);
+  assert.deepEqual(items.map((i) => i.index), [0, 1, 2]);
+  assert.equal(items[0].ok, true);
+  assert.equal(items[0].result.label, 'billing');
+  assert.equal(items[1].ok, false);
+  assert.equal(items[1].error, 'input is too long');
+  assert.equal(items[1].result, null);
+  assert.equal(items[2].result.multiLabel, true);
+  assert.deepEqual(items[2].result.labels, ['a', 'b']);
+  assert.equal(m.calls.length, 2);
+  assert.match(m.calls[1].url, /offset=2&limit=2$/);
+});
+
+test('jobResults types score rows and errors surface as ClefError', async () => {
+  const row = { index: 0, score: 1.0, level: 'high', level_index: 1, distribution: { low: 0.1, high: 0.9 } };
+  const c = client(mock(json(200, { kind: 'score', items: [row], next_offset: null })));
+  let item;
+  for await (const it of c.jobResults('job_1')) item = it; // (Array.fromAsync needs Node 22)
+  assert.equal(item.result.level, 'high');
+  const bad = client(mock(json(404, { detail: "job 'x' not found", request_id: 'r' })));
+  await assert.rejects(bad.job('x'), (e) => e instanceof ClefError && e.status === 404);
+});

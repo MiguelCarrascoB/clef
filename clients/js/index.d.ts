@@ -82,6 +82,70 @@ export interface ClassifierDefinition {
   description?: string;
 }
 
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+export type JobEvent = 'job.succeeded' | 'job.failed' | 'job.cancelled' | 'job.progress';
+
+export interface WebhookSpec {
+  url: string;
+  /** Signs deliveries: X-Clef-Signature = sha256=HMAC(secret, `${timestamp}.${body}`). */
+  secret?: string;
+  /** Default: job.succeeded, job.failed, job.cancelled. */
+  events?: JobEvent[];
+}
+
+export interface JobOptions {
+  webhook?: string | WebhookSpec;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ClassifyJobOptions extends JobOptions {
+  /** Name of a saved classify classifier, instead of `labels`. */
+  classifier?: string;
+  instructions?: string;
+  multiLabel?: boolean;
+  threshold?: number;
+  model?: string;
+}
+
+export interface Job {
+  id: string;
+  kind: string;
+  status: JobStatus;
+  done: number;
+  total: number | null;
+  failed: number;
+  percent: number | null;
+  etaS: number | null;
+  error: string | null;
+  /** The kind's final summary (classify: { items, ok, errors, by_label }). */
+  result: any;
+  metadata: Record<string, unknown> | null;
+  createdAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** { url, events, has_secret, deliveries } - the secret is never returned. */
+  webhook: Record<string, any> | null;
+  /** succeeded, failed or cancelled. */
+  finished: boolean;
+  ok: boolean;
+  raw: Record<string, any>;
+}
+
+export interface JobItem {
+  index: number;
+  error: string | null;
+  ok: boolean;
+  /** Typed for classify / score jobs; null for failed rows and other kinds (use `raw`). */
+  result: Classification | ScoreResult | null;
+  raw: Record<string, any>;
+}
+
+export interface WaitJobOptions {
+  timeoutMs?: number;
+  pollMs?: number;
+  onProgress?: (job: Job) => void;
+}
+
 export class Classifier {
   constructor(client: ClefClient, name: string);
   readonly name: string;
@@ -109,6 +173,14 @@ export class ClefClient {
   classify(input: unknown, labels: Labels, opts?: ClassifyOptions): Promise<Classification>;
   classifyMany(inputs: unknown[], labels: Labels, opts?: ClassifyManyOptions): Promise<Classification[]>;
   score(input: unknown, levels: string[], opts?: ScoreOptions): Promise<ScoreResult>;
+  submitJob(kind: string, payload: Record<string, any>, opts?: JobOptions): Promise<Job>;
+  classifyJob(inputs: unknown[], labels?: Labels | null, opts?: ClassifyJobOptions): Promise<Job>;
+  job(id: string): Promise<Job>;
+  jobs(opts?: { status?: JobStatus; kind?: string; limit?: number; offset?: number }): Promise<Job[]>;
+  cancelJob(id: string): Promise<Job>;
+  deleteJob(id: string): Promise<{ deleted: string }>;
+  waitJob(id: string, opts?: WaitJobOptions): Promise<Job>;
+  jobResults(id: string, opts?: { pageSize?: number; offset?: number }): AsyncGenerator<JobItem, void, undefined>;
   classifier(name: string): Classifier;
   listClassifiers(): Promise<Array<Record<string, any>>>;
   saveClassifier(name: string, def?: ClassifierDefinition): Promise<Record<string, any>>;
@@ -118,4 +190,6 @@ export class ClefClient {
 
 export function parseClassification(body: Record<string, any>, requestId?: string | null): Classification;
 export function parseScore(body: Record<string, any>, requestId?: string | null): ScoreResult;
+export function parseJob(body: Record<string, any>): Job;
+export function parseJobItem(row: Record<string, any>, kind?: string): JobItem;
 export function bytesToDataUrl(bytes: Uint8Array | ArrayBuffer, mime?: string): string;

@@ -82,6 +82,41 @@ function parseBatch(body, classifier = null) {
   });
 }
 
+const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
+
+export function parseJob(body) {
+  const p = body.progress || {};
+  return {
+    id: body.id,
+    kind: body.kind ?? '',
+    status: body.status,
+    done: p.done ?? 0,
+    total: p.total ?? null,
+    failed: p.failed ?? 0,
+    percent: p.percent ?? null,
+    etaS: body.eta_s ?? null,
+    error: body.error ?? null,
+    result: body.result ?? null,
+    metadata: body.metadata ?? null,
+    createdAt: body.created_at ?? null,
+    startedAt: body.started_at ?? null,
+    finishedAt: body.finished_at ?? null,
+    webhook: body.webhook ?? null,
+    finished: TERMINAL.has(body.status),
+    ok: body.status === 'succeeded',
+    raw: body,
+  };
+}
+
+// One result row; `result` is a typed Classification / ScoreResult for classify / score jobs (null on error rows).
+export function parseJobItem(row, kind = '') {
+  const error = row.error ?? null;
+  let result = null;
+  if (error === null && kind === 'classify') result = parseClassification({ ...row, multi_label: 'labels' in row });
+  else if (error === null && kind === 'score') result = parseScore(row);
+  return { index: row.index ?? -1, error, ok: error === null, result, raw: row };
+}
+
 function chunks(items, size) {
   if (!size || size <= 0 || items.length <= size) return [items];
   const out = [];
@@ -220,6 +255,70 @@ export class ClefClient {
   async score(input, levels, { instructions, images, videos, model = 'clef-flash' } = {}) {
     const body = clean({ input, levels, instructions, images, videos, model });
     return parseScore(await this._request('POST', '/v1/score', body));
+  }
+
+  // --- async jobs (large batches; see docs/jobs.md) ---
+  /** Queue a job and return at once. `webhook`: a URL string or { url, secret, events }. */
+  async submitJob(kind, payload, { webhook, metadata } = {}) {
+    const hook = typeof webhook === 'string' ? { url: webhook } : webhook;
+    return parseJob(await this._request('POST', '/v1/jobs', clean({ kind, payload, webhook: hook, metadata })));
+  }
+
+  /** classifyMany without holding a connection open: `labels` or a saved `classifier` name. */
+  classifyJob(inputs, labels, { classifier, instructions, multiLabel = false, threshold, model = 'clef-flash', webhook, metadata } = {}) {
+    const payload = clean({
+      labels,
+      classifier,
+      instructions,
+      multi_label: multiLabel ? true : undefined,
+      threshold,
+      model,
+    });
+    payload.inputs = inputs;
+    return this.submitJob('classify', payload, { webhook, metadata });
+  }
+
+  async job(id) {
+    return parseJob(await this._request('GET', `/v1/jobs/${enc(id)}`));
+  }
+
+  /** One page of jobs, newest first. */
+  async jobs({ status, kind, limit = 50, offset = 0 } = {}) {
+    const q = new URLSearchParams(clean({ status, kind, limit, offset: offset || undefined }));
+    return ((await this._request('GET', `/v1/jobs?${q}`)).jobs || []).map(parseJob);
+  }
+
+  async cancelJob(id) {
+    return parseJob(await this._request('POST', `/v1/jobs/${enc(id)}/cancel`));
+  }
+
+  deleteJob(id) {
+    return this._request('DELETE', `/v1/jobs/${enc(id)}`);
+  }
+
+  /** Poll until succeeded / failed / cancelled (check `job.ok`). Rejects with an Error after `timeoutMs`. */
+  async waitJob(id, { timeoutMs, pollMs = 1000, onProgress } = {}) {
+    const deadline = timeoutMs == null ? null : Date.now() + timeoutMs;
+    for (;;) {
+      const job = await this.job(id);
+      if (onProgress) onProgress(job);
+      if (job.finished) return job;
+      if (deadline !== null && Date.now() + pollMs > deadline) {
+        throw new Error(`job ${id} still ${job.status} after ${timeoutMs} ms (${job.done}/${job.total})`);
+      }
+      await this._sleep(pollMs);
+    }
+  }
+
+  /** Async iterator over every result row currently stored, in input order, page by page. */
+  async *jobResults(id, { pageSize = 500, offset = 0 } = {}) {
+    for (;;) {
+      const q = new URLSearchParams({ offset, limit: pageSize });
+      const page = await this._request('GET', `/v1/jobs/${enc(id)}/results?${q}`);
+      for (const row of page.items || []) yield parseJobItem(row, page.kind);
+      if (page.next_offset == null || !(page.items || []).length) return;
+      offset = page.next_offset;
+    }
   }
 
   // --- saved classifiers ---
