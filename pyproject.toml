@@ -1,0 +1,41 @@
+[project]
+name = "clef-local"
+version = "2.0.0"
+description = "Local deployment of the Cloudflare clef-flash decision model (ROCm / WSL2) behind a FastAPI server"
+readme = "README.md"
+# The WSL venv runs Python 3.10; CI runs 3.12. Keep the floor at what is actually deployed.
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.27"]  # only what clef_client needs
+
+# The venv is built from requirements/*.txt (exact pins), not `pip install -e`.
+# These groups document what each file contains.
+[project.optional-dependencies]
+server = [
+  "torch==2.11.0", "transformers==5.10.2", "fastapi", "uvicorn[standard]", "pydantic>=2",
+  "pillow", "imageio", "imageio-ffmpeg", "numpy", "flash-linear-attention", "safetensors",
+]
+dev = ["pytest", "pytest-asyncio", "ruff", "httpx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "strict"
+markers = ["gpu: needs a live server / GPU (tests/integration)"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = ["bench/out"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "SIM117"]
+"bench/*" = ["E501"]
+"scripts/*" = ["E402"]
+"tests/conftest.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["clef_client"]

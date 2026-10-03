@@ -1,11 +1,12 @@
-"""Canonical clef-flash example (from the model card), running on AMD RX 7900 XTX via ROCm."""
+"""Canonical clef-flash example (from the model card) on the local GPU. Loads the model (~45 s)."""
+
+import os
 import sys
 import time
 
 import torch
-from huggingface_hub import snapshot_download  # noqa: F401 (imported to mirror the card)
 
-path = "~/models/clef-flash"
+path = os.environ.get("CLEF_MODEL_PATH", os.path.expanduser("~/models/clef-flash"))
 sys.path.insert(0, path)
 from joint_schema_model import collate_records, encode_record, load_release_model
 
@@ -27,25 +28,22 @@ record = {
 
 encoded = encode_record(processor.tokenizer, record, processor=processor)
 batch = collate_records([encoded], processor.tokenizer.pad_token_id, torch.device("cuda"))
-t0 = time.time()
 with torch.inference_mode():
+    model(batch)  # warm-up: first call compiles kernels
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
     logits = model(batch)[0]
-elapsed_ms = (time.time() - t0) * 1000
-print(f"forward pass: {elapsed_ms:.1f} ms")
+    torch.cuda.synchronize()
+print(f"warm forward pass: {(time.perf_counter() - t0) * 1000:.1f} ms")
 
-for question, question_logits in zip(encoded.questions, logits):
-    probabilities = question_logits.float().softmax(-1).tolist()
-    print(question.question_id, dict(zip(question.option_ids, probabilities)))
+probs = [
+    dict(zip(q.option_ids, ql.float().softmax(-1).tolist(), strict=False))
+    for q, ql in zip(encoded.questions, logits, strict=False)
+]
+for q, p in zip(encoded.questions, probs, strict=False):
+    print(q.question_id, p)
 
-# quick sanity assertions (logits is already this record's per-question tensor list)
-probs_status = dict(
-    zip(encoded.questions[0].option_ids, logits[0].float().softmax(-1).tolist())
-)
-assert probs_status["overdue"] > 0.5, "expected overdue to dominate"
-probs_large = dict(
-    zip(encoded.questions[1].option_ids, logits[1].float().softmax(-1).tolist())
-)
-assert probs_large["true"] > 0.5, "expected true to dominate (1250 > 1000)"
-vr = round(torch.cuda.max_memory_allocated() / 1e9, 2)
-print(f"peak VRAM: {vr} GB")
+assert probs[0]["overdue"] > 0.5, "expected overdue to dominate"
+assert probs[1]["true"] > 0.5, "expected true to dominate (1250 > 1000)"
+print(f"peak VRAM: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
 print("MODEL RUN PASSED")

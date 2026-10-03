@@ -1,0 +1,31 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/*.txt
+      - name: Install (CPU torch + non-GPU deps; the ROCm pins are NOT used here)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # server pins minus the ROCm/GPU-only packages, then the dev pins
+          grep -vEi '^(torch|torchvision|triton|flash-linear|fla-core|--extra-index-url|#)' requirements/server.txt > /tmp/server-ci.txt
+          grep -vE '^(-r|#)' requirements/dev.txt > /tmp/dev-ci.txt
+          pip install -r /tmp/server-ci.txt -r /tmp/dev-ci.txt
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format (files owned by the ops/client layer)
+        run: ruff format --check clef_client bench scripts tests/integration tests/unit/test_client.py
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+      - name: unit tests
+        run: python -m pytest tests/unit -q

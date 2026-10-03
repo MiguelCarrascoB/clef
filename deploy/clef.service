@@ -1,0 +1,19 @@
+# systemd --user unit for the clef-flash server (installed by scripts/install_service.sh).
+# Requires systemd=true in /etc/wsl.conf (see deploy/wsl.conf.sample).
+[Unit]
+Description=clef-flash local decision server
+After=network.target
+
+[Service]
+Type=simple
+# __CLEF_HOME__ is substituted by install_service.sh
+ExecStart=/usr/bin/env bash __CLEF_HOME__/scripts/run_server.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+TimeoutStopSec=30
+# Optional overrides (CLEF_API_KEY, CLEF_PORT, ...), one KEY=value per line
+EnvironmentFile=-%h/.config/clef/env
+
+[Install]
+WantedBy=default.target

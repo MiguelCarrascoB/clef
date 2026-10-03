@@ -1,0 +1,4 @@
+# /etc/wsl.conf inside Ubuntu (needs `wsl --shutdown` afterwards).
+# systemd is required for the optional clef.service autostart.
+[boot]
+systemd=true

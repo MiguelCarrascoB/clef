@@ -1,0 +1,10 @@
+# %USERPROFILE%\.wslconfig on Windows (needs `wsl --shutdown` afterwards). Tuned for a 32 GB host.
+[wsl2]
+memory=26GB
+swap=6GB
+swapFile=D:\wsl-swap.vhdx
+processors=12
+
+[experimental]
+autoMemoryReclaim=gradual
+sparseVhd=true
