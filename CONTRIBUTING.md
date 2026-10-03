@@ -1,0 +1,77 @@
+# Contributing
+
+Thanks for helping. Architecture and the API contract live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): change the
+contract first, then the code.
+
+## Dev setup
+
+Python 3.10 or newer (the code must stay 3.10 compatible: no `typing.Self`, `tomllib`, `ExceptionGroup`). The unit tests
+need only CPU torch; they never load the model weights. [uv](https://docs.astral.sh/uv/) is recommended.
+
+**Linux / macOS**
+
+```bash
+git clone https://github.com/MiguelCarrascoB/clef && cd clef
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install -r requirements/cpu.txt        # macOS: requirements/macos.txt
+uv pip install -e ".[server,dev]"
+```
+
+**Windows (PowerShell)**
+
+```powershell
+git clone https://github.com/MiguelCarrascoB/clef; cd clef
+uv venv --python 3.12; .venv\Scripts\activate
+uv pip install -r requirements/cpu.txt
+uv pip install -e ".[server,dev]"
+```
+
+**Windows + WSL2 / AMD ROCm (the maintainer's setup)**: see the README quick start, install `requirements/rocm.txt`
+inside WSL, then `pip install -e ".[server,dev]"`. Use `.\clef.ps1` from Windows.
+
+**Node** (JS client only): Node 18+, no install step.
+
+## Checks (CI runs the same)
+
+```bash
+ruff check .
+ruff format --check .
+pytest tests/unit                       # CPU, no weights
+python scripts/export_openapi.py --check   # openapi.json up to date; run without --check after API changes
+node --test clients/js/test/client.test.js           # JS client
+shellcheck scripts/*.sh
+```
+
+Run `ruff format` only on files you changed; a repo-wide format in a multi-person change touches everyone's files.
+Python line length is 110.
+
+CI (`.github/workflows/ci.yml`) runs on Ubuntu (Python 3.10 and 3.12), macOS 14 and Windows (3.12): ruff, unit tests,
+OpenAPI check, wheel build and a CLI smoke test from the built wheel (`clef --help`, `clef version`,
+`clef doctor --no-gpu`), plus the JS tests, shellcheck and a build-only Docker job for the CUDA and ROCm images.
+Nothing is published; a `v*` tag builds a GitHub Release with the wheel, sdist and `openapi.json`.
+
+## Tests
+
+- `tests/unit`: CPU, no weights, no GPU, mocked backends and engine. Add tests with every change; backend-specific
+  logic is tested with fake `Backend` objects.
+- `tests/integration` (`pytest -m gpu`): runs against a live server (`CLEF_URL`, `CLEF_API_KEY`) and skips when none
+  answers.
+
+## Rules of the code
+
+- `backend.py` is the only place with device-specific code. No `torch.cuda.*` elsewhere.
+- One uvicorn worker, one GPU worker thread.
+- Never edit the model directory; wrap or re-implement in the engine.
+- No hardcoded user paths (`/home/<name>`, `C:\Users\<name>`); use `~`, `%LOCALAPPDATA%` or the state directory helpers.
+- Do not log request contents or keys.
+
+## Hardware checklist
+
+CI cannot exercise GPUs, and macOS runners have no MPS. If your change touches a backend (dtype, memory, fast paths,
+quantization, telemetry), say in the PR which hardware you ran it on. Maintainers with a real NVIDIA or Mac machine:
+follow [docs/hardware-validation.md](docs/hardware-validation.md) and paste the results. Performance changes need
+before/after numbers from `clef bench`; a regression of more than 5% on the verified ROCm setup blocks a change.
+
+## Pull requests
+
+Small, focused PRs with the checklist in the template filled in. Update the CHANGELOG for user-visible changes.

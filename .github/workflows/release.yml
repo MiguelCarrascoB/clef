@@ -1,0 +1,53 @@
+name: release
+# Tag v* -> build wheel + sdist and attach them, with openapi.json, to a GitHub Release.
+# Nothing is published to PyPI, GHCR or npm.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag matches the package version
+        run: |
+          VERSION="$(python -c "import sys; sys.path.insert(0, 'src'); from clef_server.config import VERSION; print(VERSION)")"
+          if [ "v${VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match pyproject version ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Install CPU torch and the package (needed to export the OpenAPI schema)
+        run: |
+          python -m pip install --upgrade pip build
+          pip install -r requirements/cpu.txt
+          pip install -e ".[server,dev]"
+
+      - name: Unit tests
+        run: python -m pytest tests/unit -q
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Check and attach openapi.json
+        run: |
+          python scripts/export_openapi.py --check
+          cp openapi.json dist/openapi.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/openapi.json
+          generate_release_notes: true

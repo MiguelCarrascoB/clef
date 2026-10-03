@@ -21,9 +21,8 @@ tests. Change it first, then the code.
 | `clef_server/media.py` | data-URL / (optional) URL fetching with SSRF guard + caps, image/video decode |
 | `clef_server/stats.py` | request log ring buffer, latency histogram, counters, forward stats, **time series ring buffer** |
 | `clef_server/main.py` | FastAPI app factory `create_app(cfg, engine)`, routes, middleware, error mapping, `run(cfg)` |
-| `clef_server/cli.py` | the `clef` command (serve/stop/status/logs/doctor/download/bench/open/version) |
+| `clef_server/cli.py` | the `clef` command (serve/stop/status/logs/doctor/download/bench/open/version); `download` is a pinned, resumable `snapshot_download` with a disk-space check |
 | `clef_server/doctor.py` | environment checks per backend; `main(argv) -> int` |
-| `clef_server/download.py` | pinned, resumable `snapshot_download` with a disk-space check |
 | `clef_server/httpbench.py` | the async HTTP load test (`clef bench`; `bench/http_bench.py` is a shim) |
 | `clef_server/static/` | Clef Console (zero-build Preact + htm SPA, vendored uPlot) served at `/` |
 | `clef_client/` | sync + async Python client (`httpx`), typed classify results |
@@ -117,7 +116,7 @@ system memory (psutil if installed, else None).
 `telemetry()`: `{"available": bool, "source": "nvml"|"amdsmi"|"rocm-smi"|None, "util_pct", "temp_c", "power_w",
 "mem_used_gb", "mem_total_gb"}`; values None when unknown. Imports `pynvml` / `amdsmi` lazily; failures are
 logged once at debug level and turn the result into `{"available": false, ...}`. rocm-smi (subprocess) results are
-cached for >= 2 s. Under WSL, AMD telemetry is usually unavailable (no SMI over /dev/dxg) - that is fine.
+cached for >= 2 s. Under WSL (measured, 7900 XTX) amdsmi gives utilization + temperature only; its VRAM usage is impossible (> total) and is dropped.
 
 ## Engine interface (`engine.py`)
 

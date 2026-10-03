@@ -1,190 +1,294 @@
-# clef-flash local (AMD RX 7900 XTX / WSL2 ROCm)
+# clef
 
-[Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash) running 100% locally: a 9B multimodal
-**decision model** served by FastAPI on an RX 7900 XTX through ROCm 7.2 in WSL2 (ROCDXG).
+Run the Cloudflare [clef-flash](https://huggingface.co/Cloudflare/clef-flash) 9B multimodal **decision model**
+(Qwen3.5-9B backbone + joint schema head) locally, behind a FastAPI server, a CLI, Python and JavaScript clients and
+a web console.
 
-It reads a `state` (text, JSON, images, videos) plus typed questions (`choice`, `score`, `noul`) and returns a
-calibrated probability for every option of every question in **one forward pass** - no text generation.
-Concurrent requests are micro-batched on a single GPU worker. API is Jev / SystemOne compatible.
+It reads an input (text, JSON, images, videos) plus a set of options and returns a **calibrated probability for
+every option in one forward pass**. No text generation, no parsing of free-form output.
 
-## Quick start (Windows PowerShell)
+```python
+from clef_client import ClefClient
+
+ClefClient().classify("Checkout is down", ["billing", "technical"])
+# -> label='technical' confidence=0.96 scores={'billing': 0.04, 'technical': 0.96}
+```
+
+Runs on NVIDIA (CUDA), AMD (ROCm, also under WSL2), Apple Silicon (MPS) and CPU. Not every backend has been run on
+real hardware yet; see the [support matrix](#support-matrix).
+
+## Support matrix
+
+| Platform | Backend | Status |
+| --- | --- | --- |
+| Windows + WSL2, AMD RX 7900 XTX | ROCm 7.2 | **verified** (development machine, all tests + benchmarks) |
+| Ubuntu / Windows + WSL2, NVIDIA | CUDA | **untested on hardware** (code paths unit-tested with mocked backends) |
+| macOS, Apple Silicon | MPS | **untested on hardware** (CI macOS runners have no MPS) |
+| Any OS, no GPU | CPU | **verified in CI** (unit tests on Ubuntu, macOS, Windows; the model is not loaded in CI) |
+
+"Untested on hardware" becomes "verified" only after a maintainer runs [docs/hardware-validation.md](docs/hardware-validation.md)
+on a real machine and pastes the result into [docs/hardware-results.md](docs/hardware-results.md).
+
+## Hardware requirements
+
+The weights are ~19 GB in bf16 and peak device memory is ~19.5 GB (measured on ROCm).
+
+| Setup | Memory | Notes |
+| --- | --- | --- |
+| NVIDIA / AMD GPU, bf16 | **24 GB VRAM** | the realistic floor |
+| Apple Silicon, bf16 | **32 GB unified memory or more** | macOS 14+ for bf16 |
+| NVIDIA 16 GB with `CLEF_QUANT=int8` or `nf4` | 16 GB VRAM | CUDA only (bitsandbytes). Accuracy and latency: pending hardware |
+| CPU | ~40 GB RAM | works, but slow. Meant for development and tests |
+
+Disk: ~19 GB for the weights plus ~21 GB free during `clef download`.
+
+## Quick start
+
+Everything below ends with the same three commands: `clef download` (one-time, ~19 GB), `clef serve`, then open
+<http://127.0.0.1:8910/>. The recommended installer is [uv](https://docs.astral.sh/uv/); plain `pip` in a venv works
+too. Pick the lock file that matches your hardware from `requirements/` (see `requirements/README.md`).
+
+> Install commands assume the repo is cloned. Nothing is published to PyPI, so install from the checkout (or from the
+> wheel on the GitHub Releases page).
+
+One-line install without cloning (uv >= 0.8; `--torch-backend=auto` picks the CUDA / ROCm / CPU torch build for the
+machine; swap the extra for `rocm`, `mps` or `cpu`):
+
+```bash
+uv tool install "clef-local[server,cuda] @ git+https://github.com/MiguelCarrascoB/clef" --torch-backend=auto
+clef doctor && clef download && clef serve
+```
+
+### macOS (Apple Silicon)
+
+```bash
+git clone https://github.com/MiguelCarrascoB/clef && cd clef
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install -r requirements/macos.txt
+uv pip install -e ".[server]"
+clef doctor            # checks MPS, macOS version, memory, disk
+clef download
+clef serve
+```
+
+Needs macOS 14+ for bf16. `PYTORCH_ENABLE_MPS_FALLBACK=1` is set automatically; the fla Triton kernels do not run on
+Mac, so the (fast enough) torch fallback is expected.
+
+### Ubuntu + NVIDIA
+
+Requires a current NVIDIA driver (`nvidia-smi` works). No CUDA toolkit is needed for the default install.
+
+```bash
+git clone https://github.com/MiguelCarrascoB/clef && cd clef
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install -r requirements/cuda.txt
+uv pip install -e ".[server]"
+clef doctor
+clef download
+clef serve
+```
+
+16 GB card: `CLEF_QUANT=nf4 clef serve` (or `int8`), after `uv pip install bitsandbytes`. See
+[troubleshooting](docs/troubleshooting.md#cuda).
+
+### Windows + WSL2, AMD ROCm (the verified setup)
+
+Windows side: current Adrenalin driver, WSL2 with Ubuntu, `.wslconfig` from `deploy/wslconfig.sample`
+(`memory=26GB` on a 32 GB host). Inside WSL:
+
+```bash
+sudo bash scripts/wsl_setup_root.sh      # ROCm + librocdxg (once)
+bash scripts/wsl_setup_user.sh           # venv, model download
+```
+
+Then from PowerShell:
 
 ```powershell
-.\clef.ps1 doctor     # preflight: GPU, pins, model files, env
-.\clef.ps1 start      # detached in WSL, waits until the model is loaded (~45 s + warmup)
-.\clef.ps1 status     # table from /health
-.\clef.ps1 open       # the Console: http://localhost:8910/
-.\clef.ps1 test       # unit tests + integration tests against the live server
-.\clef.ps1 logs       # tail the server log (Ctrl+C to leave)
+.\clef.ps1 doctor
+.\clef.ps1 start         # detached in WSL, keeps a hidden keep-alive session, waits until ready
+.\clef.ps1 open          # http://localhost:8910/
 .\clef.ps1 stop
 ```
 
-`bench [http]` runs the benchmarks (see below). From inside WSL the same commands are
-`bash scripts/launch_server.sh start|stop|restart|status|logs`.
+Details and failure modes: [troubleshooting](docs/troubleshooting.md#rocm-under-wsl2).
+
+### Windows + WSL2, NVIDIA CUDA
+
+Install the NVIDIA Windows driver (it exposes the GPU to WSL; do not install a Linux driver inside WSL). Then follow
+[Ubuntu + NVIDIA](#ubuntu--nvidia) inside the WSL distro and use `.\clef.ps1 start` from Windows if you want the
+keep-alive wrapper. **Untested on hardware.**
+
+### Docker
+
+```bash
+docker compose --profile cuda up -d     # NVIDIA, needs the NVIDIA container toolkit
+docker compose --profile rocm up -d     # AMD, Linux host only
+```
+
+The compose file mounts a volume for the weights; download them once with
+`docker compose --profile cuda run --rm clef-cuda clef download --yes` (or `--profile rocm ... clef-rocm`). Ports are
+published on `127.0.0.1`; for LAN access set `CLEF_BIND=0.0.0.0` together with `CLEF_API_KEYS`. GPU containers on Docker Desktop for Windows/macOS
+are not supported; use the WSL2 or native paths above.
+
+### CPU only
+
+```bash
+uv venv --python 3.12 && source .venv/bin/activate        # Windows: .venv\Scripts\activate
+uv pip install -r requirements/cpu.txt
+uv pip install -e ".[server]"
+clef download && CLEF_DEVICE=cpu clef serve
+```
+
+Expect seconds per record and ~40 GB of RAM. Use it for development, not for serving.
+
+## CLI
+
+| Command | What it does |
+| --- | --- |
+| `clef serve [--host --port --device --dtype --quant --model-path --detach --timeout]` | start the server (foreground; `--detach` writes a pidfile and waits until healthy) |
+| `clef stop` / `clef status [--json]` / `clef logs [-f] [-n N]` | manage a detached server |
+| `clef doctor [--no-gpu] [--smoke] [--json]` | environment checks per backend; `--smoke` loads the model and runs one record |
+| `clef download [--revision SHA] [--dir DIR] [--yes]` | pinned, resumable download of the weights with a disk-space check |
+| `clef bench [args]` | HTTP load test against the running server |
+| `clef open` | open the console in the browser |
+| `clef version` | print the version |
+
+Config is `CLEF_*` environment variables (flags set the same variables). Table in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#configuration-configpy). Key ones: `CLEF_DEVICE` (`auto`),
+`CLEF_DTYPE` (`auto`), `CLEF_QUANT`, `CLEF_MODEL_PATH`, `CLEF_HOST`, `CLEF_PORT`, `CLEF_API_KEYS`,
+`CLEF_RATE_LIMIT`, `CLEF_STATE_DIR`.
+
+## Classification API
+
+`POST /v1/classify` is the short way to ask "which of these labels fits this input?". It runs on the same engine as
+`/v1/systemone` and returns the same probabilities. Full guide: [docs/classification.md](docs/classification.md).
+Machine-readable schema: [openapi.json](openapi.json) (also served at `/openapi.json`, interactive at `/docs`), so
+you can generate a client in any language.
+
+**curl**
+
+```bash
+curl -s http://127.0.0.1:8910/v1/classify -H 'Content-Type: application/json' \
+  -d '{"input": "Checkout is down", "labels": ["billing", "technical"]}'
+# {"label":"technical","confidence":0.96,"scores":{"billing":0.04,"technical":0.96}, ...}
+```
+
+**Python** (`from clef_client import ClefClient`; `AsyncClefClient` has the same methods)
+
+```python
+c = ClefClient("http://127.0.0.1:8910", api_key=None)
+
+r = c.classify("Checkout is down", ["billing", "technical"])
+r.label, r.confidence, r.scores  # 'technical', 0.96, {...}
+
+# multi-label: every label whose P(true) >= threshold
+c.classify("Refund me, the app also crashes", ["billing", "technical", "feature"], multi_label=True).labels
+
+c.classify_many(["...", "..."], ["billing", "technical"])  # shared label set, results in input order
+c.score("Server has been down for two hours", ["low", "medium", "high"]).score  # expected level index
+
+c.classifier("support-triage").classify("My invoice is wrong")  # a saved classifier
+```
+
+**JavaScript** (Node 18+ and browsers, no dependencies; `clients/js`)
+
+```js
+import { ClefClient } from "./clients/js/src/index.js";
+
+const c = new ClefClient({ baseUrl: "http://127.0.0.1:8910" });
+const r = await c.classify("Checkout is down", ["billing", "technical"]);
+console.log(r.label, r.confidence, r.scores);
+await c.classifier("support-triage").classify("My invoice is wrong");
+```
+
+Saved classifiers (`PUT /v1/classifiers/{name}`) store labels and instructions on the server so callers send only the
+input. More runnable examples are in `examples/` (curl, Python, JavaScript, PowerShell, a CSV classifier).
+
+The original SystemOne API (`POST /v1/systemone`, `POST /v1/batch`, typed `choice` / `score` / `noul` questions, images
+and videos) is unchanged; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Remote access
+
+Default bind is `127.0.0.1`: only the machine itself can call the server. To use it from other machines on your
+network:
+
+```bash
+CLEF_HOST=0.0.0.0 CLEF_API_KEYS=~/.config/clef/keys CLEF_RATE_LIMIT=120 clef serve
+```
+
+Use named API keys and a firewall rule limiting the port to your LAN. Binding a non-loopback host without keys logs
+a loud warning. For anything beyond a trusted LAN, put it behind a TLS reverse proxy (Caddy example included).
+Details: [docs/remote-access.md](docs/remote-access.md).
 
 ## Console
 
-`http://localhost:8910/` serves the Clef Console (request playground, live stats, request log).
+`http://127.0.0.1:8910/` serves the Clef Console: Ops (live KPIs and time-series charts), Playground (SystemOne and
+Classify modes), Batch (per-question charts, CSV/JSON in), History.
 
-## API
-
-`POST /v1/systemone`, `POST /v1/batch`, `GET /health`, `GET /livez`, `GET /v1/stats`, `GET /v1/log`,
-`GET /v1/events` (SSE). Full contract (schemas, limits, errors, timing fields):
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Interactive docs at `/docs`.
-
-```powershell
-$body = @{
-  model = 'clef-flash'; state = 'Our checkout started returning errors and orders are blocked.'
-  questions = @{
-    department = @{ type = 'choice'; instructions = 'Which team should handle the message?'
-                    criteria = @{ billing = 'Payments or invoices'; technical = 'Bugs or outages' } }
-    outage     = @{ type = 'noul'; instructions = 'Is a service down?' }
-  }
-} | ConvertTo-Json -Depth 6
-Invoke-RestMethod http://localhost:8910/v1/systemone -Method Post -Body $body -ContentType 'application/json'
-```
-
-Answers: `choice` -> `choice`, `confidence`, `probabilities`; `score` -> expected `score`, `confidence`, `legend`,
-`probabilities`; `noul` -> `noul` (P(true)). Images/videos go in as `data:` URLs (`http(s)` only with
-`CLEF_ALLOW_URL_FETCH=1`); all media of a request is evaluated together in one record.
-
-## Python client
-
-```python
-from clef_client import ClefClient, image_to_data_url
-
-c = ClefClient("http://127.0.0.1:8910", api_key=None)  # AsyncClefClient has the same methods
-out = c.decide(
-    "A photo is attached.",
-    {"red": {"type": "noul", "instructions": "Does any image show a red square?"}},
-    images=[image_to_data_url("photo.png")],
-)
-print(out["answers"]["red"]["noul"], out["timing"])
-c.batch([{"model": "clef-flash", "state": "...", "questions": {...}}])
-c.health()
-c.stats()  # errors raise ClefError(status, detail, request_id)
-```
-
-## Configuration
-
-Server settings are `CLEF_*` environment variables read by `server/config.py`; shell defaults live in
-`scripts/env.sh` (single source of truth, sourced by every script). Everything is overridable.
-
-| Variable | Default | Meaning |
+| | Light | Dark |
 | --- | --- | --- |
-| `CLEF_HOME` | repo root | repo location (env.sh) |
-| `CLEF_VENV` | `~/venvs/clef` | Python venv (env.sh) |
-| `CLEF_MODEL_PATH` | `~/models/clef-flash` | model directory |
-| `CLEF_LOG_DIR` | `~/.local/state/clef` | `server.log` (+ `.1`-`.3`) and `server.pid` (env.sh) |
-| `CLEF_HOST` / `CLEF_PORT` | `127.0.0.1` / `8910` | bind address |
-| `CLEF_API_KEY` | unset | require `X-API-Key` / Bearer on `/v1/*` |
-| `CLEF_DEVICE` / `CLEF_DTYPE` | `cuda` / `bfloat16` | |
-| `CLEF_MAX_TOKENS` | 16384 | max tokens per record |
-| `CLEF_MAX_BODY_MB` | 64 | request body limit |
-| `CLEF_MAX_IMAGES` / `CLEF_MAX_VIDEOS` | 8 / 2 | media per request |
-| `CLEF_MAX_PIXELS` | 1048576 | images above this are downscaled |
-| `CLEF_MAX_FRAMES` / `CLEF_VIDEO_FPS` | 32 / 2.0 | video sampling |
-| `CLEF_MAX_BATCH` / `CLEF_MAX_QUESTIONS` | 64 / 64 | request caps |
-| `CLEF_ALLOW_URL_FETCH` / `CLEF_URL_FETCH_MAX_MB` | 0 / 32 | remote media (SSRF-guarded) |
-| `CLEF_MAX_MICROBATCH` / `CLEF_BATCH_WINDOW_MS` | 8 / 4.0 | micro-batching |
-| `CLEF_BUCKETS` | `128,...,4096` | length groups for micro-batching (and warmup shapes) |
-| `CLEF_PAD_MULTIPLE` | 64 | pad text batches to a multiple of this (aligned GEMMs are faster) |
-| `CLEF_PAD_TO_BUCKET` | 0 | pad to the full bucket instead (wastes compute; for experiments) |
-| `CLEF_WARMUP` | 1 | warm every bucket at startup |
-| `CLEF_LOG_STATE` / `CLEF_LOG_BUFFER` | 0 / 1000 | request log (state preview off by default) |
-| `CLEF_START_TIMEOUT` | 300 | seconds `launch_server.sh start` waits (env.sh) |
-| `CLEF_TUNABLEOP` | 0 | `1` enables PyTorch TunableOp (results cached in `~/.cache/clef`) |
-| `HSA_ENABLE_DXG_DETECTION` / `HSA_OVERRIDE_GFX_VERSION` | `1` / `11.0.0` | ROCm on WSL |
-| `HF_HUB_OFFLINE` | 1 | never touch the network |
-| `TRITON_CACHE_DIR`, `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL` | see env.sh | perf defaults |
+| Ops | ![ops light](docs/screenshots/ops-light.png) | ![ops dark](docs/screenshots/ops-dark.png) |
+| Playground | ![playground light](docs/screenshots/playground-light.png) | ![playground dark](docs/screenshots/playground-dark.png) |
+| Classify | ![classify light](docs/screenshots/classify-light.png) | ![classify dark](docs/screenshots/classify-dark.png) |
+| Batch | ![batch light](docs/screenshots/batch-light.png) | ![batch dark](docs/screenshots/batch-dark.png) |
+| History | ![history light](docs/screenshots/history-light.png) | ![history dark](docs/screenshots/history-dark.png) |
 
-## Benchmarks
+Screenshots were taken against the live server on the RX 7900 XTX with `bench/http_bench.py` traffic
+(`python scripts/screenshots.py`, Playwright + the installed Edge/Chrome). The v2 console, before the redesign, is in
+`docs/screenshots/v2/`.
 
-Measured on the RX 7900 XTX (ROCm 7.2, WSL2, bf16), v2 server, ~330-token records, 100 requests per level:
+## Performance
 
-| HTTP concurrency | req/s | p50 ms | p95 ms | avg server batch |
-| --- | --- | --- | --- | --- |
-| 1 | 7.0 | 142 | 150 | 1.0 |
-| 8 | 8.2 | 970 | 985 | 6.1 |
-| 16 | 8.9 | 1756 | 1931 | 7.8 |
+Measured on the AMD RX 7900 XTX (ROCm 7.2, WSL2, bf16), the only GPU the project has been run on. Records of ~330
+tokens, `clef bench`, 100 requests per level. v2 and v3 were run back to back on 2026-10-03 under the same conditions
+(details: [docs/hardware-results.md](docs/hardware-results.md)):
 
-v1 (same card): single-record p50 162 ms / p95 222 ms. Warm restart: model load ~45-100 s (page cache), warmup
-~12 s with a warm Triton cache (~110 s the very first time).
+| | v2 | v3 |
+| --- | --- | --- |
+| Single record p50 / p95 | 150.1 / 155.4 ms | 149.0 / 159.2 ms (2nd run 149.3 / 153.6) |
+| Throughput, concurrency 1 | 6.6 req/s | 6.6-6.7 req/s |
+| Throughput, concurrency 8 | 8.3 req/s | 8.1-8.2 req/s |
+| Throughput, concurrency 16 (micro-batching) | 8.1 req/s | 8.8-8.9 req/s |
+| Peak VRAM | ~19.5 GB | ~19.5 GB |
 
-What the profiler says (`bench/profile_forward.py`): GEMMs are ~83% of GPU kernel time and already run at
-~95 TFLOPS, so the card is compute-bound and batching adds little throughput (6.9 -> 8.9 req/s). Single-record
-forwards are ~50% host overhead (75 ms of kernels in ~150 ms); HIP-graph capture would remove most of it but
-is blocked by a device sync in transformers' SDPA masking (`masking_utils._ignore_causal_mask_sdpa`). The joint
-head is ~5% of the forward. Padding to multiples of 64 beats both raw lengths and full buckets (GEMM tile
-alignment), see `CLEF_PAD_MULTIPLE`.
+The model is **compute-bound**: GEMMs are ~83% of GPU kernel time at ~95 TFLOPS, so batching adds only ~30%
+throughput. Single-record forwards spend ~50% of the time on host overhead; graph capture would remove most of it but
+is blocked by a device sync in transformers' SDPA masking. Padding text batches to a multiple of 64 beats both raw
+lengths and full buckets (`CLEF_PAD_MULTIPLE`); that was measured on ROCm only. NVIDIA, Mac and CPU numbers are
+pending hardware.
 
-- `bench/http_bench.py` - realistic: async load against the live server at concurrency 1/2/4/8/16, throughput,
-  p50/p95/p99 and the server-reported batch-size distribution (exercises micro-batching).
-  `.\clef.ps1 bench http --requests 100`
-- `bench/bench.py` - in-process: forward-only vs end-to-end, p50/p90/p99, batch sizes, mixed lengths, token
-  counts and TFLOPS estimate. Needs the GPU, so stop the server first. `.\clef.ps1 bench --mixed`
-- `bench/profile_forward.py` - torch.profiler: top kernels and GEMM/attention/linear-attn/conv grouping, chrome trace
-  in `bench/out/`.
+Benchmarks: `clef bench` (HTTP, realistic), `bench/bench.py` (in-process, needs the GPU), `bench/profile_forward.py`
+(torch.profiler), `bench/parity.py` (probability parity across dtypes and quantization).
 
-## Testing
-
-```powershell
-.\clef.ps1 test        # = unit (tests/unit, no GPU/weights) + integration (tests/integration, live server)
-```
-
-Integration tests (`pytest -m gpu`) use `CLEF_URL` / `CLEF_API_KEY` and skip when no server answers. CI runs
-ruff, shellcheck and the unit tests on CPU.
-
-## Service / autostart
-
-Optional systemd user service (WSL needs `systemd=true`, see `deploy/wsl.conf.sample`):
+## Development
 
 ```bash
-bash scripts/install_service.sh      # copies deploy/clef.service, daemon-reload, enable (does not start)
-systemctl --user start clef          # journalctl --user -u clef -f
+uv venv --python 3.12 && source .venv/bin/activate
+uv pip install -r requirements/cpu.txt         # or macos.txt
+uv pip install -e ".[server,dev]"
+pytest tests/unit
+ruff check . && ruff format --check .
 ```
 
-Overrides (API key, port) go in `~/.config/clef/env` (`KEY=value` per line). `deploy/wslconfig.sample` is the
-Windows-side `.wslconfig` (memory=26GB for a 32 GB host).
-
-## Setup from scratch
-
-As root in WSL: `bash scripts/wsl_setup_root.sh` (ROCm 7.2.4 + librocdxg 1.2.2; versions overridable). As
-user: `bash scripts/wsl_setup_user.sh` (idempotent: clones weights only if missing at the pinned
-`CLEF_MODEL_REV`, creates the venv if missing, `pip install -r requirements/server.txt`). The venv is
-Python 3.10; `requirements/server.txt` holds exact pins (torch 2.11.0+rocm7.2, transformers 5.10.2,
-flash-linear-attention 0.5.2). Dev tools: `CLEF_INSTALL_DEV=1` or `pip install -r requirements/dev.txt`.
-
-## Troubleshooting
-
-Run `.\clef.ps1 doctor` first.
-
-- **`No CUDA GPUs are available`**: `HSA_ENABLE_DXG_DETECTION=1` must be set (env.sh does; required until
-  ROCm 7.13+ in WSL). Update the Windows Adrenalin driver if `/dev/dxg` is missing.
-- **First forwards are slow (seconds to minutes)**: one-time Triton/SDPA kernel compilation per input shape.
-  Startup warmup covers the length buckets; caches live in `~/.triton/cache`.
-- **OOM in WSL**: `%USERPROFILE%\.wslconfig` `memory=26GB`; applies after `wsl --shutdown`.
-- **`start` says something already answers on the port**: a server not started by `launch_server.sh` (no pidfile)
-  holds it; stop that process or use another port (`.\clef.ps1` honours `$env:CLEF_PORT`).
-- **bench refuses to run**: the server holds ~19.6 GB of VRAM; `.\clef.ps1 stop` first (or `--force`).
-- **causal-conv1d**: its HIP build does not work on WSL-ROCm yet; `flash-linear-attention` is active and the
-  torch fallback is already fast.
-- Weights live only in the WSL filesystem (fast safetensors I/O, no double storage).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Architecture and API contract: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Problems: [docs/troubleshooting.md](docs/troubleshooting.md), or run `clef doctor` first.
 
 ## Layout
 
 ```
-clef.ps1            Windows wrapper (start/stop/status/logs/test/bench/doctor/open)
-server/             FastAPI app: main, schemas, media, stats, engine, config, static/ (Console)
-clef_client/        sync + async Python client
-scripts/            env.sh, launch_server.sh, run_server.sh, doctor.py, setup + service scripts, model_smoke.py
-deploy/             clef.service, wsl.conf.sample, wslconfig.sample
-requirements/       server.txt (exact pins), dev.txt
-bench/              bench.py, http_bench.py, profile_forward.py
-tests/              unit/ (CPU) and integration/ (live server, marker gpu)
-docs/ARCHITECTURE.md  API + module contract
+src/clef_server/    FastAPI app, engine, backends, CLI, doctor, console (static/)
+src/clef_client/    sync + async Python client
+clients/js/         dependency-free JavaScript/TypeScript client
+examples/           curl, Python, JavaScript, PowerShell, CSV classifier
+requirements/       per-backend lock files (rocm, cuda, cpu, macos) and dev
+docker/             Dockerfile.cuda, Dockerfile.rocm (+ docker-compose.yml at the root)
+deploy/             systemd unit, launchd plist, Windows Task Scheduler snippet, WSL samples
+scripts/            thin wrappers, WSL setup, openapi export
+bench/              benchmarks and parity check
+docs/               ARCHITECTURE, classification, remote-access, troubleshooting, hardware-*
 ```
 
 ## License
 
-Model: Apache-2.0 (Cloudflare clef-flash, base model Qwen/Qwen3.5-9B).
+Apache-2.0, see [LICENSE](LICENSE). The model is Cloudflare clef-flash, also Apache-2.0 (base model Qwen/Qwen3.5-9B).
+Security: [SECURITY.md](SECURITY.md).
