@@ -18,12 +18,16 @@ from .config import Config
 
 TRACKED_EXACT = frozenset({"/v1/systemone", "/v1/batch", "/v1/classify", "/v1/classify/batch", "/v1/score"})
 _CLASSIFIER_RUN = re.compile(r"^/v1/classifiers/[^/]+(/batch)?$")
+# compat routes (OpenAI chat completions, Hugging Face zero-shot): see compat.py
+_COMPAT_RUN = re.compile(r"^(/v1/chat/completions|(/hf)?/models/.+)$")
 
 
 def is_tracked(method: str, path: str) -> bool:
     """POST inference routes: logged, counted in stats and rate limited."""
     if method != "POST":
         return False
+    if _COMPAT_RUN.match(path):
+        return True
     return path in TRACKED_EXACT or bool(_CLASSIFIER_RUN.match(path))
 
 
