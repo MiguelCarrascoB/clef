@@ -10,3 +10,6 @@
 *.webp binary
 *.mp4 binary
 *.ico binary
+openapi.json text eol=lf
+*.plist text eol=lf
+Dockerfile.* text eol=lf
