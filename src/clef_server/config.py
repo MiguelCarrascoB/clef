@@ -136,6 +136,20 @@ class Config:
     allow_url_fetch: bool = field(default_factory=lambda: _bool("CLEF_ALLOW_URL_FETCH", False))
     url_fetch_max_mb: int = field(default_factory=lambda: _int("CLEF_URL_FETCH_MAX_MB", 32))
 
+    # async jobs + webhooks (see docs/jobs.md)
+    max_job_items: int = field(default_factory=lambda: _int("CLEF_MAX_JOB_ITEMS", 100_000))
+    job_ttl_hours: float = field(
+        default_factory=lambda: _float("CLEF_JOB_TTL_HOURS", 168.0)
+    )  # 0 = keep forever
+    max_jobs: int = field(default_factory=lambda: _int("CLEF_MAX_JOBS", 100))  # queued + running jobs
+    job_engine_wait_s: float = field(default_factory=lambda: _float("CLEF_JOB_ENGINE_WAIT_S", 600.0))
+    # Hosts / IPs / CIDRs webhooks may be delivered to. Empty (default) = webhooks are OFF.
+    webhook_allow: tuple[str, ...] = field(
+        default_factory=lambda: _csv(os.environ.get("CLEF_WEBHOOK_ALLOW", ""))
+    )
+    webhook_timeout_s: float = field(default_factory=lambda: _float("CLEF_WEBHOOK_TIMEOUT_S", 10.0))
+    webhook_attempts: int = field(default_factory=lambda: _int("CLEF_WEBHOOK_ATTEMPTS", 5))
+
     # engine / performance
     max_microbatch: int = field(default_factory=lambda: _int("CLEF_MAX_MICROBATCH", 8))
     batch_window_ms: float = field(default_factory=lambda: _float("CLEF_BATCH_WINDOW_MS", 4.0))
@@ -197,6 +211,8 @@ class Config:
             "max_tokens": self.max_tokens,
             "classify_threshold": self.classify_threshold,
             "allow_url_fetch": self.allow_url_fetch,
+            "max_job_items": self.max_job_items,
+            "webhooks_enabled": bool(self.webhook_allow),
             "auth_required": self.auth_required,
             "rate_limit_per_min": self.rate_limit,
         }

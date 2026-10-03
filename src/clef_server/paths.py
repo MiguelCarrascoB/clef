@@ -36,6 +36,11 @@ def classifiers_dir(cfg: Any) -> Path:
     return path
 
 
+def jobs_db(cfg: Any) -> Path:
+    """SQLite file holding async jobs and their results (src/clef_server/jobs.py)."""
+    return state_dir(cfg) / "jobs.db"
+
+
 def legacy_model_dir() -> Path:
     """The v1/v2 location (~/models/clef-flash); still honoured when it holds a release."""
     return Path.home() / "models" / "clef-flash"
