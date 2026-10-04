@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -15,10 +16,12 @@ from .types import (
     Classification,
     Job,
     JobItem,
+    JobList,
     ScoreResult,
     parse_classification,
     parse_job,
     parse_job_item,
+    parse_job_list,
     parse_result,
     parse_score,
 )
@@ -168,9 +171,17 @@ class ClefClient:
         *,
         webhook: str | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> Job:
-        """Queue a job and return at once. ``webhook``: a URL, or ``{"url", "secret", "events"}``."""
-        return parse_job(self._request("POST", "/v1/jobs", json=c.job_body(kind, payload, webhook, metadata)))
+        """Queue a job and return at once. ``webhook``: a URL, or ``{"url", "secret", "events"}``.
+
+        ``idempotency_key``: submitting again with the same key (same API key) returns the job created the
+        first time instead of a duplicate, so a lost response can be retried safely.
+        """
+        body = c.job_body(kind, payload, webhook, metadata)
+        return parse_job(
+            self._request("POST", "/v1/jobs", json=body, headers=c.idem_headers(idempotency_key))
+        )
 
     def classify_job(
         self,
@@ -184,28 +195,38 @@ class ClefClient:
         model: str | None = DEFAULT_MODEL,
         webhook: str | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> Job:
         """``classify_many`` without holding a connection open: labels or a saved ``classifier`` name."""
         payload = c.classify_job_payload(
             inputs, labels, classifier, instructions, multi_label, threshold, model
         )
-        return self.submit_job("classify", payload, webhook=webhook, metadata=metadata)
+        return self.submit_job(
+            "classify", payload, webhook=webhook, metadata=metadata, idempotency_key=idempotency_key
+        )
 
     def job(self, job_id: str) -> Job:
         return parse_job(self._request("GET", c.job_path(job_id)))
 
     def jobs(
         self, *, status: str | None = None, kind: str | None = None, limit: int = 50, offset: int = 0
-    ) -> list[Job]:
-        """One page of jobs, newest first."""
+    ) -> JobList:
+        """One page of jobs, newest first: a ``list[Job]`` with ``.total`` (all matching jobs), ``.limit``,
+        ``.offset`` and ``.has_more``."""
         body = self._request("GET", "/v1/jobs", params=c.job_list_params(status, kind, limit, offset))
-        return [parse_job(j) for j in body.get("jobs", [])]
+        return parse_job_list(body)
 
     def cancel_job(self, job_id: str) -> Job:
         return parse_job(self._request("POST", c.job_path(job_id, "/cancel")))
 
     def delete_job(self, job_id: str) -> dict[str, Any]:
         return self._request("DELETE", c.job_path(job_id))
+
+    def redeliver_webhook(self, job_id: str, event: str | None = None) -> Job:
+        """Retry a webhook delivery that ended ``failed`` (same delivery id). ``event`` defaults to the
+        job's own terminal event."""
+        params = {"event": event} if event else None
+        return parse_job(self._request("POST", c.job_path(job_id, "/webhook/redeliver"), params=params))
 
     def wait_job(
         self,
@@ -228,27 +249,55 @@ class ClefClient:
                 )
             time.sleep(poll)
 
-    def job_results(self, job_id: str, *, page_size: int = 500, offset: int = 0) -> Iterator[JobItem]:
-        """Every result row currently stored, in input order, fetched page by page."""
+    def job_results(
+        self, job_id: str, *, page_size: int = 500, offset: int = 0, wait: bool = False, poll: float = 1.0
+    ) -> Iterator[JobItem]:
+        """Result rows in input order, fetched page by page.
+
+        PARTIAL while the job runs: by default the iteration ends at the rows stored right now, which is not
+        the whole result unless ``wait_job`` came first. ``wait=True`` keeps polling every ``poll`` seconds
+        until the job is finished and every row has been yielded.
+        """
         while True:
             page = self._request(
                 "GET", c.job_path(job_id, "/results"), params={"offset": offset, "limit": page_size}
             )
-            for row in page.get("items", []):
+            items = page.get("items", [])
+            for row in items:
                 yield parse_job_item(row, page.get("kind", ""))
             offset = page.get("next_offset")
-            if offset is None or not page.get("items"):
+            if offset is None:
                 return
+            if not items:
+                if not wait:
+                    return
+                time.sleep(poll)
 
-    def save_job_results(self, job_id: str, path: str | Path, format: str = "ndjson") -> Path:
-        """Stream the whole result (``ndjson`` or ``csv``) to a file without loading it in memory."""
+    def save_job_results(
+        self, job_id: str, path: str | Path, format: str = "ndjson", *, require_finished: bool = True
+    ) -> Path:
+        """Stream the whole result (``ndjson`` or ``csv``) to a file without loading it in memory.
+
+        Raises ``JobNotFinished`` while the job is queued / running (its rows are partial); pass
+        ``require_finished=False`` to export what exists so far. The file is written next to ``path`` and
+        renamed into place, so a failed download never leaves a truncated file. A ``failed`` or ``cancelled``
+        job counts as finished: its export holds the rows produced before it stopped.
+        """
         dest = Path(path)
-        with self._http.stream("GET", c.job_path(job_id, "/results"), params={"format": format}) as resp:
-            if not resp.is_success:
-                raise c.stream_error(resp)
-            with dest.open("wb") as fh:
-                for chunk in resp.iter_bytes():
-                    fh.write(chunk)
+        tmp = dest.with_name(dest.name + ".part")
+        try:
+            with self._http.stream("GET", c.job_path(job_id, "/results"), params={"format": format}) as resp:
+                if not resp.is_success:
+                    raise c.stream_error(resp)
+                if require_finished:
+                    c.check_finished(job_id, resp.headers.get("X-Clef-Job-Status"))
+                with tmp.open("wb") as fh:
+                    for chunk in resp.iter_bytes():
+                        fh.write(chunk)
+            os.replace(tmp, dest)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return dest
 
     def close(self) -> None:

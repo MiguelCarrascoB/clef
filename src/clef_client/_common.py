@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .types import Classification, ScoreResult, parse_result
+from .types import TERMINAL_STATUSES, Classification, ScoreResult, parse_result
 
 DEFAULT_URL = "http://127.0.0.1:8910"
 DEFAULT_TIMEOUT = httpx.Timeout(600.0, connect=5.0)  # cold media forwards can take a while
@@ -36,6 +36,29 @@ class ClefError(Exception):
         self.request_id = request_id
         self.retry_after = retry_after
         super().__init__(f"[{status}] {detail}" + (f" (request_id={request_id})" if request_id else ""))
+
+
+class JobNotFinished(ClefError):
+    """The job is still queued / running, so its results are partial (see ``require_finished``)."""
+
+    def __init__(self, job_id: str, status: str):
+        super().__init__(
+            409,
+            f"job {job_id} is still {status}; its results are partial"
+            " (wait_job() first, or pass require_finished=False)",
+        )
+        self.job_id = job_id
+        self.job_status = status
+
+
+def check_finished(job_id: str, status: str | None) -> None:
+    """``status`` is the X-Clef-Job-Status header of a results stream (absent on very old servers)."""
+    if status is not None and status not in TERMINAL_STATUSES:
+        raise JobNotFinished(job_id, status)
+
+
+def idem_headers(key: str | None) -> dict[str, str] | None:
+    return {"Idempotency-Key": key} if key else None
 
 
 def _data_url(raw: bytes, mime: str) -> str:

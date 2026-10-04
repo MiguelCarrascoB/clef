@@ -121,6 +121,7 @@ class Job:
     finished_at: str | None = None
     webhook: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def finished(self) -> bool:
@@ -128,7 +129,15 @@ class Job:
 
     @property
     def ok(self) -> bool:
+        """The job ran to the end (status ``succeeded``). Individual items may still have failed: check
+        ``has_errors`` / ``failed`` / ``warnings`` before trusting every row. A job whose items ALL failed
+        ends ``failed``, so ``ok`` is False for it."""
         return self.status == "succeeded"
+
+    @property
+    def has_errors(self) -> bool:
+        """At least one item failed (its row has ``error``)."""
+        return self.failed > 0
 
 
 @dataclass(frozen=True)
@@ -143,6 +152,31 @@ class JobItem:
     @property
     def ok(self) -> bool:
         return self.error is None
+
+
+class JobList(list):
+    """One page of jobs: a plain ``list[Job]`` that also carries ``total`` / ``limit`` / ``offset``."""
+
+    def __init__(
+        self, jobs: Any = (), total: int | None = None, limit: int | None = None, offset: int = 0
+    ) -> None:
+        super().__init__(jobs)
+        self.total = total
+        self.limit = limit
+        self.offset = offset
+
+    @property
+    def has_more(self) -> bool:
+        return self.total is not None and self.offset + len(self) < self.total
+
+
+def parse_job_list(body: dict[str, Any]) -> JobList:
+    return JobList(
+        [parse_job(j) for j in body.get("jobs", [])],
+        body.get("total"),
+        body.get("limit"),
+        body.get("offset", 0),
+    )
 
 
 def parse_job(body: dict[str, Any]) -> Job:
@@ -164,6 +198,7 @@ def parse_job(body: dict[str, Any]) -> Job:
         finished_at=body.get("finished_at"),
         webhook=body.get("webhook"),
         raw=body,
+        warnings=list(body.get("warnings") or []),
     )
 
 

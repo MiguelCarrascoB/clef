@@ -11,9 +11,9 @@ Multi-label results: ``labels`` = every label >= threshold (best first), ``label
 from __future__ import annotations
 
 from ._async import AsyncClassifier, AsyncClefClient
-from ._common import DEFAULT_URL, ClefError, image_to_data_url, video_to_data_url
+from ._common import DEFAULT_URL, ClefError, JobNotFinished, image_to_data_url, video_to_data_url
 from ._sync import Classifier, ClefClient
-from .types import Classification, Job, JobItem, ScoreResult
+from .types import Classification, Job, JobItem, JobList, ScoreResult
 
 __all__ = [
     "AsyncClassifier",
@@ -25,6 +25,8 @@ __all__ = [
     "ClefError",
     "Job",
     "JobItem",
+    "JobList",
+    "JobNotFinished",
     "ScoreResult",
     "image_to_data_url",
     "video_to_data_url",
