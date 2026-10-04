@@ -9,16 +9,14 @@ server, a CLI, Python and JavaScript clients and a web console.
 
 [![CI](https://github.com/MiguelCarrascoB/clef/actions/workflows/ci.yml/badge.svg)](https://github.com/MiguelCarrascoB/clef/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-miguelcarrascob.github.io%2Fclef-blue.svg)](https://miguelcarrascob.github.io/clef/)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 ![Backends](https://img.shields.io/badge/backends-CUDA%20%7C%20ROCm%20%7C%20MPS%20%7C%20CPU-555.svg)
 
 [Quick start](#quick-start) · [Usage](#usage) · [Install](#installation) · [Console](#console) ·
-[Performance](#performance) · [Docs](#documentation)
+[Performance](#performance) · [Docs](https://miguelcarrascob.github.io/clef/)
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/ops-dark.png">
-  <img alt="Clef Console, Ops screen" src="docs/screenshots/ops-light.png" width="900">
-</picture>
+<img alt="Clef Console: playground, evaluation and live ops" src="docs/screenshots/console.gif" width="900">
 
 </div>
 
@@ -39,11 +37,19 @@ ClefClient().classify("Checkout is down", ["billing", "technical"])
 
 - 🎯 **One call, every probability.** Single-label, multi-label, ordinal scores and typed multi-question batches.
 - 🖼️ **Multimodal.** Text, JSON, images and videos in the same request.
-- 💻 **Runs anywhere you have the memory.** NVIDIA (CUDA), AMD (ROCm, also under WSL2), Apple Silicon (MPS), CPU.
+- 🔌 **Drop-in compatible.** The official OpenAI SDK (structured outputs) and Hugging Face zero-shot clients work
+  against your own machine ([guide](docs/openai-compat.md)).
+- 📏 **Measure it.** Accuracy, F1, a confusion matrix and calibration for your own labelled data, plus a
+  coverage-vs-accuracy curve to pick an auto-route threshold ([guide](docs/evaluation.md)).
+- ⏱️ **Async jobs and webhooks.** Submit 100,000 rows, poll or get a signed callback, stream the results
+  ([guide](docs/jobs.md)).
+- 💻 **Runs on what you have.** NVIDIA (CUDA), AMD (ROCm, also under WSL2), Apple Silicon (MPS), CPU. A 24 GB card
+  runs it as is; **16, 12 and 8 GB GPUs** work with CPU offload or int8 ([measured options](docs/memory.md)).
 - 🧰 **Batteries included.** `clef` CLI, typed Python client (sync + async), zero-dependency JS/TS client,
   OpenAPI schema, Docker images and service files.
-- 📊 **Clef Console.** Live KPIs and charts, a playground, batch runs and history at `http://127.0.0.1:8910/`.
-- 🔒 **Local by default.** Loopback bind, named API keys, rate limiting, SSRF guard and input limits for LAN use.
+- 📊 **Clef Console.** Live KPIs and charts, a playground, batch runs, evaluation and history at
+  `http://127.0.0.1:8910/`.
+- 🔒 **Local by default.** Loopback bind, named API keys, rate limiting, SSRF guards and input limits for LAN use.
 
 > [!NOTE]
 > clef is an independent project. It is not affiliated with or endorsed by Cloudflare; it runs their openly
@@ -52,8 +58,9 @@ ClefClient().classify("Checkout is down", ["billing", "technical"])
 ## Quick start
 
 > [!IMPORTANT]
-> You need a **24 GB GPU** or a **Mac with 32 GB+ unified memory** (see [requirements](#hardware-requirements)),
-> plus ~40 GB of free disk for the first download.
+> A **24 GB GPU** or a **Mac with 32 GB+ unified memory** runs clef as is. With 16, 12 or 8 GB of GPU memory, add
+> one setting (see [hardware requirements](#hardware-requirements)). You also need ~40 GB of free disk for the first
+> download.
 
 One-line install with [uv](https://docs.astral.sh/uv/) (>= 0.8). `--torch-backend=auto` picks the right torch build;
 swap the `cuda` extra for `rocm`, `mps` or `cpu`:
@@ -69,6 +76,8 @@ Not on PyPI yet: install from git, from a clone (see [Installation](#installatio
 Releases page.
 
 ## Usage
+
+### Classify
 
 `POST /v1/classify` answers the question "which of these labels fits this input?". Full guide:
 [docs/classification.md](docs/classification.md). The schema is in [openapi.json](openapi.json) (also served at
@@ -111,13 +120,78 @@ c = ClefClient("http://127.0.0.1:8910", api_key=None)
 r = c.classify("Checkout is down", ["billing", "technical"])
 r.label, r.confidence, r.scores  # 'technical', 0.96, {...}
 
-# multi-label: every label whose P(true) >= threshold
 c.classify("Refund me, the app also crashes", ["billing", "technical", "feature"], multi_label=True).labels
-
 c.classify_many(["...", "..."], ["billing", "technical"])  # shared labels, input order
 c.score("Server has been down for two hours", ["low", "medium", "high"]).score  # expected level index
 c.classifier("support-triage").classify("My invoice is wrong")  # a saved classifier
 ```
+
+### OpenAI SDK and Hugging Face clients
+
+Point the official OpenAI SDK at clef and describe the decision as a JSON schema (structured outputs). Enums become
+choices, booleans yes/no questions, integer scales scores. The answer is JSON in `message.content`, with every
+probability in a non-standard `clef` field and as `logprobs`. clef decides, it does not write text, so a request
+without a schema gets a clear `400`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8910/v1", api_key="not-needed")  # or your CLEF_API_KEY
+schema = {
+    "type": "object",
+    "properties": {
+        "team": {"type": "string", "enum": ["billing", "technical", "account"]},
+        "outage": {"type": "boolean"},
+    },
+}
+r = client.chat.completions.create(
+    model="clef-flash",
+    messages=[{"role": "user", "content": "Checkout is down, orders blocked"}],
+    response_format={"type": "json_schema", "json_schema": {"name": "triage", "schema": schema}},
+)
+print(r.choices[0].message.content)  # {"team": "technical", "outage": true}
+```
+
+`huggingface_hub`'s `InferenceClient.zero_shot_classification` works too (`POST /hf/models/{id}`). Streaming, forced
+tool calls and schema rules: [docs/openai-compat.md](docs/openai-compat.md). LangChain is untested.
+
+### Evaluate a label set
+
+Know how well clef does on *your* data before you automate anything. Send labelled rows and get accuracy, per-label
+precision / recall / F1, a confusion matrix and calibration (does "90% sure" mean 90% right?), plus the
+coverage-vs-accuracy curve for choosing an auto-route threshold. The console's **Evaluate** tab does the same from
+a CSV; [`examples/tickets_labelled.csv`](examples/tickets_labelled.csv) is a ready sample.
+
+```bash
+curl -s http://127.0.0.1:8910/v1/evaluate -H 'Content-Type: application/json' -d '{
+  "labels": ["billing", "technical"],
+  "rows": [{"input": "I was charged twice", "gold": "billing"},
+           {"input": "API returns 502", "gold": "technical"}]}'
+# {"n":2,"accuracy":1.0,"macro_f1":1.0,"confusion_matrix":{...},"calibration":{"ece":...,"brier":...}, ...}
+```
+
+Up to `CLEF_MAX_EVAL_ROWS` (500) rows per call; larger sets run as an `evaluate` job (100,000 rows). See
+[docs/evaluation.md](docs/evaluation.md).
+
+### Large workloads: jobs and webhooks
+
+`/v1/classify/batch` keeps one connection open until every row is done. A job returns an id at once, runs in the
+background (it survives restarts and shares the GPU fairly with interactive calls) and lets you page or stream the
+results as JSON, NDJSON or CSV.
+
+```python
+from clef_client import ClefClient
+
+with ClefClient() as clef:
+    job = clef.classify_job(texts, ["billing", "technical", "account"])
+    job = clef.wait_job(job.id, on_progress=lambda j: print(j.status, j.done, j.total))
+    clef.save_job_results(job.id, "results.csv", format="csv")
+```
+
+Optional signed webhooks (`job.succeeded` and friends) are **off until `CLEF_WEBHOOK_ALLOW` lists the receivers**; see
+[docs/jobs.md](docs/jobs.md) and [SECURITY.md](SECURITY.md).
+
+### Endpoints
 
 | Endpoint | Use it for |
 | --- | --- |
@@ -126,13 +200,22 @@ c.classifier("support-triage").classify("My invoice is wrong")  # a saved classi
 | `POST /v1/score` | ordinal scales (low / medium / high) |
 | `PUT /v1/classifiers/{name}` | save labels and instructions server-side so callers send only the input |
 | `POST /v1/systemone`, `POST /v1/batch` | the original SystemOne API: typed `choice` / `score` / `noul` questions, images and videos ([ARCHITECTURE](docs/ARCHITECTURE.md)) |
+| `GET /v1/models`, `POST /v1/chat/completions` | OpenAI-compatible structured outputs |
+| `POST /hf/models/{id}` | Hugging Face zero-shot classification |
+| `POST /v1/evaluate`, `POST /v1/evaluate/metrics` | accuracy, F1, confusion matrix and calibration (metrics: from scores you already have) |
+| `POST /v1/jobs`, `GET /v1/jobs[/{id}[/results]]`, `POST /v1/jobs/{id}/cancel`, `DELETE /v1/jobs/{id}` | async jobs |
+| `GET /health`, `/v1/stats`, `/v1/log`, `/v1/events` | status and observability |
 
-More runnable examples are in [`examples/`](examples/): curl, Python, JavaScript, PowerShell and a CSV classifier.
+More runnable examples are in [`examples/`](examples/): curl, Python, JavaScript, PowerShell, a CSV classifier, the
+OpenAI and Hugging Face clients and an async job.
 
 ## Console
 
-Open `http://127.0.0.1:8910/` to get the **Clef Console**. It has four screens: **Ops** (live KPIs and time-series
-charts), **Playground** (SystemOne and Classify modes), **Batch** (CSV/JSON in, per-question charts) and **History**.
+Open `http://127.0.0.1:8910/` to get the **Clef Console**. It has five screens: **Playground** (SystemOne and
+Classify modes), **History**, **Batch** (CSV/JSON in, per-question charts), **Evaluate** (labelled CSV in: confusion
+matrix, reliability diagram, coverage curve, mistakes) and **Ops** (live KPIs and time-series charts).
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/evaluate-dark.png"><img alt="Evaluate" src="docs/screenshots/evaluate-light.png"></picture>
 
 | Playground | Classify |
 | --- | --- |
@@ -153,21 +236,28 @@ charts), **Playground** (SystemOne and Classify modes), **Batch** (CSV/JSON in, 
 | Ubuntu / Windows + WSL2, NVIDIA | CUDA | ⚠️ **untested on hardware** (code paths unit-tested with mocked backends) |
 | macOS, Apple Silicon | MPS | ⚠️ **untested on hardware** (CI macOS runners have no MPS) |
 
-A platform marked "untested on hardware" is promoted to "verified" once someone runs
-[docs/hardware-validation.md](docs/hardware-validation.md) on a real machine and adds the result to
-[docs/hardware-results.md](docs/hardware-results.md). **Have an NVIDIA card or a Mac? That is the most useful
-contribution right now.**
+"Untested on hardware" becomes "verified" once someone runs [docs/hardware-validation.md](docs/hardware-validation.md)
+and adds the result to [docs/hardware-results.md](docs/hardware-results.md). **Have an NVIDIA card or a Mac? That is
+the most useful contribution right now.**
 
 ### Hardware requirements
 
-The weights are ~19 GB in bf16. Peak device memory is ~19.5 GB (measured on ROCm).
+The weights are ~19 GB in bf16 and a default run peaks at ~19.5 GB of device memory, so out of the box you need a
+24 GB GPU or a 32 GB Mac. Three settings lower the floor ([docs/memory.md](docs/memory.md) has the details).
+`clef doctor` reads your memory and prints the matching line.
 
-| Setup | Memory | Notes |
+| You have | Use | Cost (measured on the RX 7900 XTX) |
 | --- | --- | --- |
-| NVIDIA / AMD GPU, bf16 | **24 GB VRAM** | the realistic floor |
-| Apple Silicon, bf16 | **32 GB unified memory or more** | macOS 14+ for bf16 |
-| NVIDIA 16 GB with `CLEF_QUANT=int8` or `nf4` | 16 GB VRAM | CUDA only (bitsandbytes). Accuracy and latency not yet measured |
+| 24 GB GPU, 32 GB+ Mac | nothing | none |
+| 16 GB GPU | `CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=15` | identical probabilities; p50 152 to 175 ms; ~6 GB host RAM |
+| 12 GB GPU | `CLEF_QUANT=int8 CLEF_OFFLOAD=cpu` | p50 ~206 ms; mean probability error 0.006, 2 of 399 top choices flipped |
+| 12 GB GPU, lossless | `CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=11` | identical probabilities; p50 343 ms; ~11 GB host RAM |
+| 8 GB GPU | `CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=7` | identical probabilities; p50 540 ms; ~15 GB host RAM |
+| 24 GB Mac | `CLEF_QUANT=int8` | ~12 GB; **not validated on Apple Silicon** |
 | CPU | ~40 GB RAM | works, but slow; meant for development and tests |
+
+All numbers come from one AMD card (WSL2, ROCm 7.2). The NVIDIA and Apple Silicon paths use the same code but have not
+run on real hardware. `CLEF_QUANT=nf4` also loads, but flipped ~9% of top choices in our set: not recommended.
 
 Disk: ~19 GB for the weights, and ~21 GB free while `clef download` runs.
 
@@ -210,8 +300,9 @@ clef download
 clef serve
 ```
 
-16 GB card: run `uv pip install bitsandbytes`, then `CLEF_QUANT=nf4 clef serve` (or `int8`). See
-[troubleshooting](docs/troubleshooting.md#cuda).
+Card with less than 24 GB? See [hardware requirements](#hardware-requirements): for 16 GB,
+`CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=15 clef serve` (untested on NVIDIA). More in
+[docs/memory.md](docs/memory.md) and [troubleshooting](docs/troubleshooting.md#cuda).
 
 </details>
 
@@ -281,7 +372,7 @@ Expect seconds per record and ~40 GB of RAM. Use it for development, not for ser
 
 | Command | What it does |
 | --- | --- |
-| `clef serve [--host --port --device --dtype --quant --model-path --detach --timeout]` | start the server (foreground; `--detach` writes a pidfile and waits until healthy) |
+| `clef serve [--host --port --device --dtype --quant --offload --max-device-memory-gb --model-path --detach --timeout]` | start the server (foreground; `--detach` writes a pidfile and waits until healthy) |
 | `clef stop` · `clef status [--json]` · `clef logs [-f] [-n N]` | manage a detached server |
 | `clef doctor [--no-gpu] [--smoke] [--json]` | environment checks per backend; `--smoke` loads the model and runs one record |
 | `clef download [--revision SHA] [--dir DIR] [--yes]` | pinned, resumable weight download with a disk-space check |
@@ -298,28 +389,30 @@ common ones:
 | --- | --- | --- |
 | `CLEF_DEVICE` | `auto` | `auto`, `cuda`, `rocm`, `mps`, `cpu` (`cuda:1` selects an index) |
 | `CLEF_DTYPE` | `auto` | per-backend dtype rules with fallbacks |
-| `CLEF_QUANT` | `none` | `int8` / `nf4` (bitsandbytes, CUDA only) |
+| `CLEF_QUANT` | `none` | `int8` (torchao on ROCm / MPS / CPU, bitsandbytes on CUDA) or `nf4` (bitsandbytes) |
+| `CLEF_OFFLOAD` | `none` | `cpu`: keep embeddings and layers that do not fit in host RAM (CUDA, ROCm) |
+| `CLEF_MAX_DEVICE_MEMORY_GB` | `0` (no cap) | hard limit on device memory, used with offload |
 | `CLEF_MODEL_PATH` | unset | weights dir; unset: `~/models/clef-flash`, else the pinned Hugging Face cache snapshot |
 | `CLEF_HOST` / `CLEF_PORT` | `127.0.0.1` / `8910` | bind address |
 | `CLEF_API_KEYS` | unset | `name:key,...` or a file with one `name:key` per line |
 | `CLEF_RATE_LIMIT` | `0` (off) | requests per minute per key |
-| `CLEF_STATE_DIR` | per-OS | saved classifiers, pidfile, logs |
+| `CLEF_STATE_DIR` | per-OS | saved classifiers, jobs database, pidfile, logs |
+| `CLEF_WEBHOOK_ALLOW` | empty (webhooks off) | hosts / IPs / CIDRs webhooks may be sent to |
 
-Full table: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#configuration-configpy).
+Job, evaluation and webhook limits and the rest: [docs/configuration.md](docs/configuration.md) and the full table in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#configuration-configpy).
 
 ## Remote access
 
-The server binds `127.0.0.1` by default, so only the local machine can call it. To serve other machines on your
-network:
+The server binds `127.0.0.1` by default. To serve your network, add named API keys (the OpenAI-compatible routes read
+the same keys as `Authorization: Bearer`) and a firewall rule for the LAN; binding a non-loopback host without keys
+logs a loud warning. Put anything beyond a trusted LAN behind a TLS reverse proxy (a Caddy example is included).
 
 ```bash
 CLEF_HOST=0.0.0.0 CLEF_API_KEYS=~/.config/clef/keys CLEF_RATE_LIMIT=120 clef serve
 ```
 
-Use named API keys and a firewall rule that limits the port to your LAN. If you bind a non-loopback host without
-keys, the server logs a loud warning. For anything beyond a trusted LAN, put it behind a TLS reverse proxy (a Caddy
-example is included). Details: [docs/remote-access.md](docs/remote-access.md) · threat model:
-[SECURITY.md](SECURITY.md).
+Details: [docs/remote-access.md](docs/remote-access.md) · threat model: [SECURITY.md](SECURITY.md).
 
 ## Performance
 
@@ -329,27 +422,17 @@ conditions ([details](docs/hardware-results.md)).
 
 | | v2 | v3 |
 | --- | --- | --- |
-| Single record p50 / p95 | 150.1 / 155.4 ms | **149.0 / 159.2 ms** (2nd run 149.3 / 153.6) |
+| Single record p50 / p95 | 150.1 / 155.4 ms | **149.0 / 159.2 ms** |
 | Throughput, concurrency 1 | 6.6 req/s | **6.6-6.7 req/s** |
 | Throughput, concurrency 8 | 8.3 req/s | **8.1-8.2 req/s** |
 | Throughput, concurrency 16 (micro-batching) | 8.1 req/s | **8.8-8.9 req/s** |
 | Peak VRAM | ~19.5 GB | ~19.5 GB |
 
-<details>
-<summary>Where the time goes</summary>
-
-- The model is **compute-bound**: GEMMs take ~83% of GPU kernel time at ~95 TFLOPS, so batching adds only ~30%
-  throughput.
-- About **50% of a single-record forward is host overhead**. Graph capture would remove most of it, but a device
-  sync in transformers' SDPA masking blocks it.
-- Padding text batches to a **multiple of 64** beats both raw lengths and full buckets (`CLEF_PAD_MULTIPLE`). This
-  was measured on ROCm only.
-- NVIDIA, Mac and CPU numbers will be added once someone runs them on real hardware.
-
-Tools: `clef bench` (HTTP, realistic), `bench/bench.py` (in-process, needs the GPU), `bench/profile_forward.py`
-(torch.profiler), `bench/parity.py` (probability parity across dtypes and quantization).
-
-</details>
+The model is **compute-bound** (GEMMs are ~83% of GPU kernel time), about half of a single-record forward is host
+overhead, and padding text batches to a multiple of 64 beats raw lengths (measured on ROCm only). NVIDIA, Mac and CPU
+numbers are pending real hardware. [docs/performance.md](docs/performance.md) has the analysis and the tools
+(`clef bench`, `bench/profile_forward.py`, `bench/parity.py`); the numbers for the smaller-memory modes are in
+[docs/memory.md](docs/memory.md).
 
 ## Development
 
@@ -357,37 +440,43 @@ Tools: `clef bench` (HTTP, realistic), `bench/bench.py` (in-process, needs the G
 uv venv --python 3.12 && source .venv/bin/activate
 uv pip install -r requirements/cpu.txt         # or macos.txt
 uv pip install -e ".[server,dev]"
-pytest tests/unit                              # CPU only, never loads the weights
-ruff check . && ruff format --check .
+pytest tests/unit && ruff check . && ruff format --check .   # CPU only, never loads the weights
 ```
 
-Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md). If something breaks, run `clef doctor` first, then check
+Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md). If something breaks, run `clef doctor`, then see
 [troubleshooting](docs/troubleshooting.md).
 
 <details>
 <summary>Repository layout</summary>
 
 ```
-src/clef_server/    FastAPI app, engine, backends, CLI, doctor, console (static/)
+src/clef_server/    FastAPI app, engine, backends, offload, CLI, doctor, console (static/);
+                    feature modules: evaluation, compat*, jobs, webhooks (see appctx.py)
 src/clef_client/    sync + async Python client
 clients/js/         dependency-free JavaScript/TypeScript client
-examples/           curl, Python, JavaScript, PowerShell, CSV classifier
-requirements/       per-backend lock files (rocm, cuda, cpu, macos) and dev
+examples/           curl, Python, JavaScript, PowerShell, CSV classifier, OpenAI / HF clients, jobs
+requirements/       per-backend lock files (rocm, cuda, cpu, macos), dev and docs
 docker/             Dockerfile.cuda, Dockerfile.rocm (+ docker-compose.yml at the root)
 deploy/             systemd unit, launchd plist, Windows Task Scheduler snippet, WSL samples
 scripts/            thin wrappers, WSL setup, openapi export
-bench/              benchmarks and parity check
-docs/               architecture, classification, remote access, troubleshooting, hardware validation
+bench/              benchmarks, parity check, memory-mode benchmark
+docs/               MkDocs site sources: guides, architecture, troubleshooting, hardware results
 ```
 
 </details>
 
 ## Documentation
 
+The docs site is at **<https://miguelcarrascob.github.io/clef/>** (the same pages live in [`docs/`](docs/)).
+
 | Doc | Contents |
 | --- | --- |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | package layout, engine and backend contracts, full HTTP API, configuration |
 | [classification.md](docs/classification.md) | the classification API in depth: multi-label, batch, score, saved classifiers |
+| [openai-compat.md](docs/openai-compat.md) | OpenAI structured outputs and Hugging Face zero-shot against clef |
+| [evaluation.md](docs/evaluation.md) | accuracy, F1, calibration, the Evaluate tab, choosing an auto-route threshold |
+| [jobs.md](docs/jobs.md) | async jobs, result streaming, signed webhooks, limits and retention |
+| [memory.md](docs/memory.md) | running on 16 / 12 / 8 GB GPUs: offload, int8, measured results |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | package layout, engine and backend contracts, extension point, full HTTP API, configuration |
 | [remote-access.md](docs/remote-access.md) | LAN setup, keys, rate limit, CORS, firewall, Caddy TLS |
 | [troubleshooting.md](docs/troubleshooting.md) | per-backend failure modes |
 | [hardware-validation.md](docs/hardware-validation.md) | how to verify a new GPU / platform |
