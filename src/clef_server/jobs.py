@@ -25,12 +25,13 @@ import secrets
 import sqlite3
 import threading
 import time
+import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.concurrency import run_in_threadpool
@@ -63,6 +64,13 @@ PAGE_MAX = 1000
 STREAM_BATCH = 500
 PURGE_INTERVAL_S = 600.0
 OOM_PAUSE_S = 0.5
+RUNNER_RETRY_PAUSE_S = 1.0
+RUNNER_MAX_FAILURES = 3  # consecutive runner-level failures on one job before it is failed (poison pill)
+# Circuit breaker (JobHandle.add_items): a job whose rows keep failing is systemic, not bad data.
+BREAKER_MIN_ITEMS = 16  # ... every one of the first N items of a run failed
+BREAKER_SAME_MIN = 50  # ... or, from N items on, this share failed with one and the same message
+BREAKER_SAME_SHARE = 0.9
+IDEMPOTENCY_KEY_RE = re.compile(r"^[!-~]{1,128}$")
 
 
 class JobsFull(RuntimeError):
@@ -107,7 +115,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     resumes INTEGER NOT NULL DEFAULT 0,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     error TEXT,
-    result TEXT
+    result TEXT,
+    idem_key TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, seq);
 CREATE TABLE IF NOT EXISTS items (
@@ -118,6 +127,11 @@ CREATE TABLE IF NOT EXISTS items (
 ) WITHOUT ROWID;
 """
 
+
+_IDEM_INDEX = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS jobs_idem ON jobs(COALESCE(owner, ''), idem_key)"
+    " WHERE idem_key IS NOT NULL"
+)
 
 _COLS = (
     "seq, id, kind, status, owner, metadata, webhook, deliveries, total, done, failed, created_at,"
@@ -141,6 +155,10 @@ class JobStore:
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(_SCHEMA)
+        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(jobs)")}
+        if "idem_key" not in cols:  # database created before Idempotency-Key support
+            self._db.execute("ALTER TABLE jobs ADD COLUMN idem_key TEXT")
+        self._db.execute(_IDEM_INDEX)
 
     def close(self) -> None:
         with self._lock:
@@ -164,17 +182,24 @@ class JobStore:
         metadata: dict[str, Any] | None,
         webhook: dict[str, Any] | None,
         max_active: int,
+        idem_key: str | None = None,
     ) -> dict[str, Any]:
+        """Insert a queued job. With ``idem_key``, a job this owner already submitted under it is returned
+        instead (``row["replayed"]`` is True)."""
         job_id = "job_" + secrets.token_hex(10)
         with self._lock:
+            if idem_key:
+                found = self.find_idem(owner, idem_key)
+                if found:
+                    return {**found, "replayed": True}
             (n,) = self._db.execute(
                 "SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running','interrupted')"
             ).fetchone()
             if max_active > 0 and n >= max_active:
                 raise JobsFull(f"too many queued jobs (max {max_active}); retry later or cancel some")
             self._db.execute(
-                "INSERT INTO jobs (id, kind, status, owner, payload, metadata, webhook, created_at)"
-                " VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)",
+                "INSERT INTO jobs (id, kind, status, owner, payload, metadata, webhook, created_at, idem_key)"
+                " VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     kind,
@@ -183,9 +208,19 @@ class JobStore:
                     None if metadata is None else json.dumps(metadata),
                     None if webhook is None else json.dumps(webhook),
                     time.time(),
+                    idem_key or None,
                 ),
             )
             return self.get(job_id) or {}
+
+    def find_idem(self, owner: str | None, idem_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            return self._row(
+                self._db.execute(
+                    f"SELECT {_COLS} FROM jobs WHERE COALESCE(owner, '')=? AND idem_key=?",
+                    (owner or "", idem_key),
+                ).fetchone()
+            )
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -303,14 +338,32 @@ class JobStore:
                 (job_id,),
             )
 
-    def recover(self) -> int:
-        """Startup: whatever was running when the process died is interrupted (and will be resumed)."""
+    def recover(self, max_resumes: int = 0) -> tuple[int, list[str]]:
+        """Startup: whatever was running when the process died is interrupted (and will be resumed).
+
+        A job already resumed ``max_resumes`` times (> 0) is failed instead: a poison item that kills the
+        process would otherwise be resumed forever ahead of every other job. Returns ``(resumed, given_up)``
+        where ``given_up`` are the ids that were failed.
+        """
         with self._lock:
-            cur = self._db.execute(
-                "UPDATE jobs SET status='interrupted', resumes=resumes+1, cancel_requested=0"
-                " WHERE status='running'"
-            )
-            return cur.rowcount
+            rows = self._db.execute("SELECT id, resumes FROM jobs WHERE status='running'").fetchall()
+            resumed, given_up = 0, []
+            for r in rows:
+                if max_resumes > 0 and r["resumes"] + 1 > max_resumes:
+                    self._db.execute(
+                        "UPDATE jobs SET status='failed', finished_at=?, error=?, resumes=resumes+1,"
+                        " cancel_requested=0, total=COALESCE(total, done) WHERE id=?",
+                        (time.time(), f"interrupted {r['resumes'] + 1} times, giving up", r["id"]),
+                    )
+                    given_up.append(r["id"])
+                else:
+                    self._db.execute(
+                        "UPDATE jobs SET status='interrupted', resumes=resumes+1, cancel_requested=0"
+                        " WHERE id=?",
+                        (r["id"],),
+                    )
+                    resumed += 1
+            return resumed, given_up
 
     def reset_items(self, job_id: str) -> None:
         with self._lock:
@@ -325,12 +378,24 @@ class JobStore:
             return cur.rowcount == 1
 
     def purge(self, older_than: float) -> int:
+        """Delete finished jobs older than ``older_than`` unless a webhook delivery is still pending."""
         with self._lock:
-            cur = self._db.execute(
-                "DELETE FROM jobs WHERE status IN ('succeeded','failed','cancelled') AND finished_at < ?",
+            rows = self._db.execute(
+                "SELECT id, deliveries FROM jobs WHERE status IN ('succeeded','failed','cancelled')"
+                " AND finished_at < ?",
                 (older_than,),
-            )
-            return cur.rowcount
+            ).fetchall()
+            doomed = [
+                r["id"]
+                for r in rows
+                if not any(
+                    rec.get("status") == "pending" for rec in json.loads(r["deliveries"] or "{}").values()
+                )
+            ]
+            for i in range(0, len(doomed), 500):
+                part = doomed[i : i + 500]
+                self._db.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?' * len(part))})", part)
+            return len(doomed)
 
     # ---- results
     def items(self, job_id: str, offset: int, limit: int) -> list[tuple[int, str]]:
@@ -350,6 +415,21 @@ class JobStore:
             deliveries = json.loads(row["deliveries"] or "{}")
             deliveries[event] = record
             self._db.execute("UPDATE jobs SET deliveries=? WHERE id=?", (json.dumps(deliveries), job_id))
+
+    def redeliver(self, job_id: str, event: str) -> dict[str, Any] | None:
+        """failed -> pending (same delivery id, attempts reset). None unless the record exists and failed."""
+        with self._lock:
+            row = self._db.execute("SELECT deliveries FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                return None
+            deliveries = json.loads(row["deliveries"] or "{}")
+            rec = deliveries.get(event)
+            if not rec or rec.get("status") != "failed":
+                return None
+            rec = {**rec, "status": "pending", "attempts": 0}
+            deliveries[event] = rec
+            self._db.execute("UPDATE jobs SET deliveries=? WHERE id=?", (json.dumps(deliveries), job_id))
+            return rec
 
     def pending_deliveries(self) -> list[tuple[str, str]]:
         with self._lock:
@@ -381,6 +461,16 @@ def public_job(row: dict[str, Any], now: float | None = None) -> dict[str, Any]:
                 eta = max(0.0, (total - done) / rate)
     end = row["finished_at"] or now
     hook = row["webhook"]
+    deliveries = row["deliveries"] or {}
+    bad_hooks = sorted(ev for ev, rec in deliveries.items() if rec.get("status") == "failed")
+    warnings: list[str] = []
+    if row["failed"]:
+        warnings.append(f"{row['failed']} of {done} item(s) failed; their result rows carry an 'error' field")
+    if bad_hooks:
+        warnings.append(
+            f"webhook delivery failed for {', '.join(bad_hooks)};"
+            f" retry with POST /v1/jobs/{row['id']}/webhook/redeliver"
+        )
     out: dict[str, Any] = {
         "id": row["id"],
         "kind": row["kind"],
@@ -402,6 +492,7 @@ def public_job(row: dict[str, Any], now: float | None = None) -> dict[str, Any]:
         "resumes": row["resumes"],
         "error": row["error"],
         "result": row["result"],
+        "warnings": warnings,
         "metadata": row["metadata"],
         "webhook": None
         if not hook
@@ -409,7 +500,8 @@ def public_job(row: dict[str, Any], now: float | None = None) -> dict[str, Any]:
             "url": hook["url"],
             "events": hook.get("events") or list(DEFAULT_EVENTS),
             "has_secret": bool(hook.get("secret")),
-            "deliveries": row["deliveries"] or {},
+            "failed_deliveries": len(bad_hooks),
+            "deliveries": deliveries,
         },
     }
     return out
@@ -468,6 +560,9 @@ class JobInfo(BaseModel):
     resumes: int = 0
     error: str | None = None
     result: Any = None
+    warnings: list[str] = Field(
+        default_factory=list, description="partial failure: failed items, failed webhook deliveries"
+    )
     metadata: dict[str, Any] | None = None
     webhook: dict[str, Any] | None = None
 
@@ -507,6 +602,10 @@ class JobHandle:
         self.metadata: dict[str, Any] | None = row["metadata"]
         self.done: int = row["done"]  # rows already persisted (non-zero when resuming a resumable kind)
         self.resumed: bool = row["done"] > 0
+        self.first_error: str | None = None  # first failed row's message in this run
+        self._seen = 0  # rows added in this run (circuit breaker)
+        self._bad = 0
+        self._errors: Counter[str] = Counter()
 
     @property
     def resume_from(self) -> int:
@@ -525,6 +624,26 @@ class JobHandle:
             return
         self.done = await asyncio.to_thread(self._runner.store.add_items, self.id, list(items))
         self._runner.notify_progress(self.id)
+        self._trip_breaker(items)
+
+    def _trip_breaker(self, items: list[dict[str, Any]]) -> None:
+        """Abort the job when failures look systemic (rows stay stored): every one of the first
+        BREAKER_MIN_ITEMS items failed, or >= BREAKER_SAME_SHARE of >= BREAKER_SAME_MIN failed alike."""
+        for it in items:
+            self._seen += 1
+            if isinstance(it, dict) and "error" in it:
+                msg = str(it["error"])[:200]
+                self._bad += 1
+                self._errors[msg] += 1
+                if self.first_error is None:
+                    self.first_error = msg
+        if not self._bad:
+            return
+        if self._seen >= BREAKER_MIN_ITEMS and self._bad == self._seen:
+            raise JobAborted(f"aborted: the first {self._seen} items all failed ({self.first_error})")
+        top, n = self._errors.most_common(1)[0]
+        if self._seen >= BREAKER_SAME_MIN and n >= BREAKER_SAME_SHARE * self._seen:
+            raise JobAborted(f"aborted: {n} of {self._seen} items failed with the same error ({top})")
 
     async def stored_items(self) -> list[dict[str, Any]]:
         """Every row persisted so far (used to rebuild summaries when resuming)."""
@@ -548,6 +667,8 @@ class JobRunner:
         self.wake: asyncio.Event | None = None  # created on start (needs the running loop)
         self._wants_progress = False
         self._task: asyncio.Task[None] | None = None
+        self._purge_task: asyncio.Task[None] | None = None
+        self._failures: dict[str, int] = {}  # job id -> consecutive runner-level failures
         self.current: str | None = None
 
     def kinds(self) -> dict[str, Any]:
@@ -556,18 +677,28 @@ class JobRunner:
     # ---- lifecycle
     async def start(self) -> None:
         self.wake = asyncio.Event()
-        n = await asyncio.to_thread(self.store.recover)
-        if n:
-            log.info("jobs: %d job(s) interrupted by the last shutdown will be resumed", n)
+        resumed, given_up = await asyncio.to_thread(self.store.recover, int(self.ctx.cfg.job_max_resumes))
+        if resumed:
+            log.info("jobs: %d job(s) interrupted by the last shutdown will be resumed", resumed)
+        for job_id in given_up:
+            log.warning(
+                "jobs: job %s was interrupted too many times (CLEF_JOB_MAX_RESUMES=%d); giving up",
+                job_id,
+                self.ctx.cfg.job_max_resumes,
+            )
+            # Only record the event: pending_deliveries() below picks it up (no double delivery).
+            await asyncio.to_thread(self._record_event, job_id, "failed")
         await asyncio.to_thread(self._purge)
         for job_id, event in await asyncio.to_thread(self.store.pending_deliveries):
             self.dispatcher.enqueue(job_id, event)
         self._task = asyncio.create_task(self._loop(), name="clef-jobs")
+        self._purge_task = asyncio.create_task(self._purge_loop(), name="clef-jobs-purge")
 
     async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+        tasks = [t for t in (self._task, self._purge_task) if t]
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await self.dispatcher.close()
         self.store.close()
 
@@ -582,32 +713,61 @@ class JobRunner:
             if n:
                 log.info("jobs: purged %d finished job(s) older than %g h", n, ttl)
 
+    async def _purge_loop(self) -> None:
+        """Retention runs on its own timer, whether the queue is idle or a job has been running for days."""
+        while True:
+            await asyncio.sleep(PURGE_INTERVAL_S)
+            try:
+                await asyncio.to_thread(self._purge)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("job purge failed")
+
     async def _loop(self) -> None:
         assert self.wake is not None
-        next_purge = time.monotonic() + PURGE_INTERVAL_S
         while True:
+            row = None
             try:
                 row = await asyncio.to_thread(self.store.next_runnable)
                 if row is None:
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(self.wake.wait(), timeout=PURGE_INTERVAL_S)
                     self.wake.clear()
-                    if time.monotonic() >= next_purge:
-                        next_purge = time.monotonic() + PURGE_INTERVAL_S
-                        await asyncio.to_thread(self._purge)
                     continue
                 await self._execute(row)
+                self._failures.pop(row["id"], None)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("job runner error")
-                await asyncio.sleep(1.0)
+                await self._runner_failed(row)
+
+    async def _runner_failed(self, row: dict[str, Any] | None) -> None:
+        """The runner itself (not the kind) raised: retry a few times, then fail the job (poison pill)."""
+        log.exception("job runner error")
+        if row is not None:
+            job_id = row["id"]
+            n = self._failures[job_id] = self._failures.get(job_id, 0) + 1
+            try:
+                await asyncio.to_thread(self.store.interrupt, job_id)  # left 'running'? park it again
+                if n >= RUNNER_MAX_FAILURES:
+                    self._failures.pop(job_id, None)
+                    log.error("jobs: job %s failed %d times in the runner; failing it", job_id, n)
+                    await self._finish(job_id, "failed", error="internal error: the job could not be run")
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("job runner error while failing job %s", job_id)
+        await asyncio.sleep(RUNNER_RETRY_PAUSE_S)
 
     # ---- cancel / webhooks
     async def request_cancel(self, row: dict[str, Any]) -> dict[str, Any]:
         job_id = row["id"]
-        if await asyncio.to_thread(self.store.cancel_queued, job_id):
-            await self._emit(job_id, "cancelled")
+        cancelled, event = await asyncio.to_thread(self._cancel_queued_sync, job_id)
+        if cancelled:
+            if event:
+                self.dispatcher.enqueue(job_id, event)
         else:
             current = await asyncio.to_thread(self.store.get, job_id)
             if current and current["status"] == "running":
@@ -616,23 +776,44 @@ class JobRunner:
         return await asyncio.to_thread(self.store.get, job_id) or row
 
     def _record_event(self, job_id: str, status: str) -> str | None:
-        """Mark the terminal webhook pending (if subscribed) so a restart retries it; returns the event."""
+        """Mark the terminal webhook pending (if subscribed) so a restart retries it; returns the event.
+
+        The delivery id is minted here, so every retry (also after a crash) carries the same X-Clef-Delivery.
+        """
         row = self.store.get(job_id)
         hook = row and row["webhook"]
         event = f"job.{status}"
         if not hook or event not in (hook.get("events") or DEFAULT_EVENTS):
             return None
-        self.store.set_delivery(job_id, event, {"event": event, "status": "pending", "attempts": 0})
+        self.store.set_delivery(
+            job_id, event, {"id": uuid.uuid4().hex, "event": event, "status": "pending", "attempts": 0}
+        )
         return event
 
-    async def _emit(self, job_id: str, status: str) -> None:
-        event = await asyncio.to_thread(self._record_event, job_id, status)
-        if event:
-            self.dispatcher.enqueue(job_id, event)
+    def _finish_sync(
+        self, job_id: str, status: str, error: str | None, result: Any
+    ) -> tuple[bool, str | None]:
+        """State change + pending event in ONE thread call: cancelling the awaiting task (shutdown) cannot
+        land between them, so a terminal event is never lost."""
+        if not self.store.finish(job_id, status, error, result):
+            return False, None
+        return True, self._record_event(job_id, status)
+
+    def _cancel_queued_sync(self, job_id: str) -> tuple[bool, str | None]:
+        if not self.store.cancel_queued(job_id):
+            return False, None
+        return True, self._record_event(job_id, "cancelled")
 
     def notify_progress(self, job_id: str) -> None:
         if self._wants_progress:
             self.dispatcher.progress(job_id, True)
+
+    async def redeliver(self, job_id: str, event: str) -> bool:
+        """failed -> pending -> delivered again (same delivery id). False when that event did not fail."""
+        if await asyncio.to_thread(self.store.redeliver, job_id, event) is None:
+            return False
+        self.dispatcher.enqueue(job_id, event)
+        return True
 
     # ---- execution
     async def _execute(self, row: dict[str, Any]) -> None:
@@ -651,9 +832,14 @@ class JobRunner:
         except (ValueError, ValidationError) as exc:
             await self._finish(job_id, "failed", error=f"payload is no longer valid: {_msg(exc)}")
             return
+        # Discard BEFORE mark_running: a cancel can only target the job once it is 'running', so one that
+        # arrives right after mark_running is never wiped by this line. Then re-seed from the row.
+        self.cancel_ids.discard(job_id)
         if not await asyncio.to_thread(self.store.mark_running, job_id, done):
             return  # cancelled while queued
-        self.cancel_ids.discard(job_id)
+        fresh = await asyncio.to_thread(self.store.get, job_id)
+        if fresh and fresh["cancel_requested"]:
+            self.cancel_ids.add(job_id)
         self.current = job_id
         self._wants_progress = "job.progress" in ((row["webhook"] or {}).get("events") or ())
         handle = JobHandle(self, {**row, "done": done})
@@ -666,26 +852,38 @@ class JobRunner:
         except JobCancelled:
             result = None
         except Exception as exc:
+            # map_exception logs the traceback of unexpected types; the client only sees the mapped text
             detail = str(exc) if isinstance(exc, JobAborted) else self.ctx.map_exception(exc).detail
+            log.warning("job %s (%s) failed: %s", job_id, row["kind"], detail)
             await self._finish(job_id, "failed", error=detail)
             return
         finally:
             self.current = None
         cancelled = job_id in self.cancel_ids
         self.cancel_ids.discard(job_id)
-        await self._finish(job_id, "cancelled" if cancelled else "succeeded", result=result)
+        status, error = ("cancelled" if cancelled else "succeeded"), None
+        if not cancelled:
+            now = await asyncio.to_thread(self.store.get, job_id)
+            if now and now["done"] > 0 and now["failed"] >= now["done"]:  # nothing worked: not a success
+                status = "failed"
+                error = f"all {now['done']} item(s) failed" + (
+                    f" ({handle.first_error})" if handle.first_error else ""
+                )
+                log.warning("job %s (%s) failed: %s", job_id, row["kind"], error)
+        await self._finish(job_id, status, error=error, result=result)
         log.info(
             "job %s (%s) %s: %d item(s) in %.1fs",
             job_id,
             row["kind"],
-            "cancelled" if cancelled else "done",
+            "done" if status == "succeeded" else status,
             handle.done,
             time.monotonic() - t0,
         )
 
     async def _finish(self, job_id: str, status: str, error: str | None = None, result: Any = None) -> None:
-        if await asyncio.to_thread(self.store.finish, job_id, status, error, result):
-            await self._emit(job_id, status)
+        _, event = await asyncio.to_thread(self._finish_sync, job_id, status, error, result)
+        if event:
+            self.dispatcher.enqueue(job_id, event)
 
 
 def _msg(exc: Exception) -> str:
@@ -798,6 +996,9 @@ class ClassifyJob(_Items):
     )
     multi_label: bool = False
     threshold: float | None = Field(None, ge=0.0, le=1.0)
+    snapshot_of: str | None = Field(
+        None, description="set by the server: the saved classifier whose definition was copied at submit"
+    )
 
     @field_validator("labels")
     @classmethod
@@ -808,6 +1009,9 @@ class ClassifyJob(_Items):
 class ScoreJob(_Items):
     levels: list[str] | None = None
     classifier: str | None = Field(None, description="name of a saved score classifier (instead of levels)")
+    snapshot_of: str | None = Field(
+        None, description="set by the server: the saved classifier whose definition was copied at submit"
+    )
 
 
 class SystemOneJob(_Base):
@@ -919,6 +1123,27 @@ def builtin_kinds(ctx: AppContext) -> dict[str, dict[str, Any]]:
         )  # fmt: skip
         return _summary(job, counts, "by_labels" if p.multi else "by_label")
 
+    def snapshot_classify(payload: dict[str, Any], p: _Parsed) -> dict[str, Any]:
+        """Replace ``classifier`` by the definition it resolved to, so a resumed job never mixes versions."""
+        if payload.get("classifier") is None:
+            return payload
+        snap = {k: v for k, v in payload.items() if k not in ("classifier", "labels", "snapshot_of")}
+        snap.update(labels=p.labels, multi_label=p.multi, snapshot_of=payload["classifier"])
+        if p.instructions is not None:
+            snap["instructions"] = p.instructions
+        if p.multi and p.threshold is not None:
+            snap["threshold"] = p.threshold
+        return snap
+
+    def snapshot_score(payload: dict[str, Any], p: _Parsed) -> dict[str, Any]:
+        if payload.get("classifier") is None:
+            return payload
+        snap = {k: v for k, v in payload.items() if k not in ("classifier", "levels", "snapshot_of")}
+        snap.update(levels=p.levels, snapshot_of=payload["classifier"])
+        if p.instructions is not None:
+            snap["instructions"] = p.instructions
+        return snap
+
     def validate_score(payload: dict[str, Any]) -> _Parsed:
         try:
             body = ScoreJob.model_validate(payload)
@@ -992,8 +1217,18 @@ def builtin_kinds(ctx: AppContext) -> dict[str, dict[str, Any]]:
         return {"items": job.done, "ok": job.done - errors, "errors": errors}
 
     return {
-        "classify": {"validate": validate_classify, "run": run_classify, "resumable": True},
-        "score": {"validate": validate_score, "run": run_score, "resumable": True},
+        "classify": {
+            "validate": validate_classify,
+            "run": run_classify,
+            "resumable": True,
+            "snapshot": snapshot_classify,
+        },
+        "score": {
+            "validate": validate_score,
+            "run": run_score,
+            "resumable": True,
+            "snapshot": snapshot_score,
+        },
         "systemone": {"validate": validate_systemone, "run": run_systemone, "resumable": True},
     }
 
@@ -1001,18 +1236,35 @@ def builtin_kinds(ctx: AppContext) -> dict[str, dict[str, Any]]:
 # ------------------------------------------------------------------ CSV flattening
 
 
-def flatten(value: Any, prefix: str = "") -> dict[str, str]:
-    """Nested row -> flat ``a.b`` columns (lists of scalars joined with ``|``)."""
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralise(text: str) -> str:
+    """Spreadsheet formulas (CSV injection): text starting with = + - @ gets a leading quote."""
+    return f"'{text}" if text.startswith(_FORMULA_START) else text
+
+
+def flatten(value: Any, prefix: str = "", csv_safe: bool = False) -> dict[str, str]:
+    """Nested row -> flat ``a.b`` columns (lists of scalars joined with ``|``).
+
+    ``csv_safe`` neutralises formula-looking *strings* (decided on the original type, so the number -0.5 is
+    left alone).
+    """
     out: dict[str, str] = {}
     if isinstance(value, dict):
         for k, v in value.items():
-            out.update(flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+            out.update(flatten(v, f"{prefix}.{k}" if prefix else str(k), csv_safe))
     elif isinstance(value, list) and all(not isinstance(x, (dict, list)) for x in value):
-        out[prefix] = "|".join("" if x is None else str(x) for x in value)
-    elif isinstance(value, (list,)):
+        cell = "|".join("" if x is None else str(x) for x in value)
+        out[prefix] = _neutralise(cell) if csv_safe and value and isinstance(value[0], str) else cell
+    elif isinstance(value, list):
         out[prefix] = json.dumps(value, ensure_ascii=False)
+    elif value is None:
+        out[prefix] = ""
+    elif isinstance(value, str):
+        out[prefix] = _neutralise(value) if csv_safe else value
     else:
-        out[prefix] = "" if value is None else str(value)
+        out[prefix] = str(value)
     return out
 
 
@@ -1029,7 +1281,13 @@ def router(ctx: AppContext) -> APIRouter:
         return None if row is None else {"webhook": row["webhook"], "job": public_job(row)}
 
     dispatcher = WebhookDispatcher(
-        policy, hook_view, store.set_delivery, timeout_s=cfg.webhook_timeout_s, attempts=cfg.webhook_attempts
+        policy,
+        hook_view,
+        store.set_delivery,
+        timeout_s=cfg.webhook_timeout_s,
+        attempts=cfg.webhook_attempts,
+        base_delay=cfg.webhook_backoff_s,
+        max_delay=cfg.webhook_backoff_cap_s,
     )
     runner = JobRunner(ctx, store, dispatcher)
     ctx.extra["jobs"] = runner
@@ -1062,7 +1320,24 @@ def router(ctx: AppContext) -> APIRouter:
         summary="Submit an async job",
         dependencies=ctx.limited,
     )
-    async def submit(body: JobCreate, request: Request, response: Response) -> dict[str, Any]:
+    async def submit(
+        body: JobCreate,
+        request: Request,
+        response: Response,
+        idempotency_key: str | None = Header(
+            None,
+            alias="Idempotency-Key",
+            description="same key again (same API key) returns the job created the first time",
+        ),
+    ) -> dict[str, Any]:
+        if idempotency_key is not None:
+            if not IDEMPOTENCY_KEY_RE.match(idempotency_key):
+                raise ApiError(400, "Idempotency-Key: 1-128 printable ASCII characters")
+            known = await run_in_threadpool(store.find_idem, caller(request), idempotency_key)
+            if known:
+                response.headers["Location"] = f"/v1/jobs/{known['id']}"
+                response.headers["Idempotent-Replay"] = "true"
+                return public_job(known)
         if not KIND_RE.match(body.kind) or body.kind not in kinds:
             raise ApiError(
                 400, f"kind: unknown job kind {body.kind[:64]!r} (available: {', '.join(sorted(kinds))})"
@@ -1076,17 +1351,31 @@ def router(ctx: AppContext) -> APIRouter:
             except WebhookRefused as exc:
                 raise ApiError(400, f"webhook.url: {exc}") from exc
             hook = body.webhook.model_dump(exclude_none=True)
+        spec = kinds[body.kind]
+        payload = body.payload
         try:
-            await run_in_threadpool(kinds[body.kind]["validate"], body.payload)
+            parsed = await run_in_threadpool(spec["validate"], payload)
+            if spec.get("snapshot"):  # saved classifiers are copied into the payload now (see docs/jobs.md)
+                payload = await run_in_threadpool(spec["snapshot"], payload, parsed)
         except (ValueError, ValidationError) as exc:
             raise ApiError(400, f"payload.{_msg(exc)}") from exc
         try:
             row = await run_in_threadpool(
-                store.create, body.kind, caller(request), body.payload, body.metadata, hook, cfg.max_jobs
+                store.create,
+                body.kind,
+                caller(request),
+                payload,
+                body.metadata,
+                hook,
+                cfg.max_jobs,
+                idempotency_key,
             )
         except JobsFull as exc:
             raise ApiError(409, str(exc), {"Retry-After": "30"}) from exc
-        runner.poke()
+        if row.get("replayed"):
+            response.headers["Idempotent-Replay"] = "true"
+        else:
+            runner.poke()
         response.headers["Location"] = f"/v1/jobs/{row['id']}"
         return public_job(row)
 
@@ -1114,6 +1403,38 @@ def router(ctx: AppContext) -> APIRouter:
         if row["status"] in FINISHED:
             raise ApiError(409, f"job is already {row['status']}")
         return public_job(await runner.request_cancel(row))
+
+    @api.post(
+        "/{job_id}/webhook/redeliver",
+        response_model=JobInfo,
+        summary="Retry a webhook delivery that failed",
+        dependencies=ctx.limited,
+    )
+    async def redeliver_webhook(
+        job_id: str,
+        request: Request,
+        event: Literal["job.succeeded", "job.failed", "job.cancelled", "job.progress"] | None = Query(
+            None, description="default: the job's own terminal event"
+        ),
+    ) -> dict[str, Any]:
+        row = await load(request, job_id)
+        if not row["webhook"]:
+            raise ApiError(409, "job has no webhook")
+        if row["status"] not in FINISHED:
+            raise ApiError(409, f"job is {row['status']}; wait until it has finished")
+        event = event or f"job.{row['status']}"
+        try:
+            policy.check_url(row["webhook"]["url"])
+        except WebhookRefused as exc:
+            raise ApiError(400, f"webhook.url: {exc}") from exc
+        if not await runner.redeliver(job_id, event):
+            state = ((row["deliveries"] or {}).get(event) or {}).get("status")
+            raise ApiError(
+                409,
+                f"nothing to redeliver for {event}: "
+                + (f"its delivery is {state}" if state else "no such delivery was recorded"),
+            )
+        return public_job(await run_in_threadpool(store.get, job_id) or row)
 
     @api.delete("/{job_id}", response_model=JobDeleted, summary="Delete a finished job and its results")
     async def delete_job(job_id: str, request: Request) -> dict[str, str]:
@@ -1154,6 +1475,10 @@ def router(ctx: AppContext) -> APIRouter:
                 "items": [json.loads(d) for _, d in page],
             }
         headers = {"X-Clef-Job-Status": row["status"], "Cache-Control": "no-store"}
+        # Rows keep arriving while a job runs: freeze the row count now so the two CSV passes (columns,
+        # then rows) see exactly the same rows.
+        upto = max(0, row["done"] - offset)
+        limit = upto if limit is None else min(limit, upto)
         if fmt == "ndjson":
             return StreamingResponse(
                 _ndjson(store, job_id, offset, limit), media_type="application/x-ndjson", headers=headers
@@ -1187,12 +1512,9 @@ async def _ndjson(store: JobStore, job_id: str, offset: int, limit: int | None) 
         yield "".join(d + "\n" for _, d in page)
 
 
-_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
-
-
 def _csv_safe(row: dict[str, Any]) -> dict[str, Any]:
-    """Neutralise spreadsheet formulas (CSV injection): text starting with = + - @ gets a leading quote."""
-    return {k: f"'{v}" if isinstance(v, str) and v.startswith(_FORMULA_START) else v for k, v in row.items()}
+    """Neutralise formulas in the string values of a flat row; numbers and other types are left alone."""
+    return {k: _neutralise(v) if isinstance(v, str) else v for k, v in row.items()}
 
 
 async def _csv(store: JobStore, job_id: str, offset: int, limit: int | None) -> AsyncIterator[str]:
@@ -1208,7 +1530,7 @@ async def _csv(store: JobStore, job_id: str, offset: int, limit: int | None) -> 
     async for page in _batches(store, job_id, offset, limit):  # pass 2: the rows
         buf.seek(0), buf.truncate()
         for _, d in page:
-            writer.writerow(_csv_safe(flatten(json.loads(d))))
+            writer.writerow(flatten(json.loads(d), csv_safe=True))
         yield buf.getvalue()
 
 

@@ -155,12 +155,17 @@ class Config:
     )  # 0 = keep forever
     max_jobs: int = field(default_factory=lambda: _int("CLEF_MAX_JOBS", 100))  # queued + running jobs
     job_engine_wait_s: float = field(default_factory=lambda: _float("CLEF_JOB_ENGINE_WAIT_S", 600.0))
+    # A job interrupted (crash / restart) more often than this is failed instead of resumed (0 = no limit).
+    job_max_resumes: int = field(default_factory=lambda: _int("CLEF_JOB_MAX_RESUMES", 3))
     # Hosts / IPs / CIDRs webhooks may be delivered to. Empty (default) = webhooks are OFF.
     webhook_allow: tuple[str, ...] = field(
         default_factory=lambda: _csv(os.environ.get("CLEF_WEBHOOK_ALLOW", ""))
     )
     webhook_timeout_s: float = field(default_factory=lambda: _float("CLEF_WEBHOOK_TIMEOUT_S", 10.0))
-    webhook_attempts: int = field(default_factory=lambda: _int("CLEF_WEBHOOK_ATTEMPTS", 5))
+    webhook_attempts: int = field(default_factory=lambda: _int("CLEF_WEBHOOK_ATTEMPTS", 10))
+    # Retry delays: min(cap, base * 2**(n-1)) seconds (+-25 %): 2, 4, 8, ... 120 s, about 8 minutes in all.
+    webhook_backoff_s: float = field(default_factory=lambda: _float("CLEF_WEBHOOK_BACKOFF_S", 2.0))
+    webhook_backoff_cap_s: float = field(default_factory=lambda: _float("CLEF_WEBHOOK_BACKOFF_CAP_S", 120.0))
 
     # engine / performance
     max_microbatch: int = field(default_factory=lambda: _int("CLEF_MAX_MICROBATCH", 8))

@@ -551,3 +551,315 @@ def test_csv_export_neutralises_formulas():
 
     row = _csv_safe({"input": "=HYPERLINK(1)", "a": "+1", "b": "-x", "c": "@SUM", "ok": "bill", "n": -1.5})
     assert row == {"input": "'=HYPERLINK(1)", "a": "'+1", "b": "'-x", "c": "'@SUM", "ok": "bill", "n": -1.5}
+
+
+# ------------------------------------------------------------------ review fixes: failures, breaker, warnings
+
+
+def test_all_items_failing_aborts_the_job_instead_of_succeeding():
+    client, eng, _ = make()
+    with client:
+        jid = submit(client, payload={"inputs": ["TOOLONG"] * 40, "labels": LABELS}).json()["id"]
+        job = wait(client, jid)
+        assert job["status"] == "failed", job
+        assert "first 16 items all failed" in job["error"] and "too long" in job["error"]
+        assert job["progress"]["done"] == 16 and job["progress"]["failed"] == 16  # stopped, not 40 bisections
+        assert job["warnings"] and "16 of 16" in job["warnings"][0]
+        assert len(all_rows(client, jid)) == 16  # the rows that were produced stay readable
+
+
+def test_small_job_where_every_item_failed_is_failed_not_succeeded():
+    client, _, _ = make()
+    with client:
+        payload = {"inputs": ["TOOLONG", "TOOLONG b"], "labels": LABELS}
+        job = wait(client, submit(client, payload=payload).json()["id"])
+        assert job["status"] == "failed" and job["error"].startswith("all 2 item(s) failed")
+        assert job["result"]["errors"] == 2  # the summary is still there
+
+
+def test_partial_failure_stays_succeeded_but_carries_a_warning():
+    client, _, _ = make()
+    with client:
+        payload = {"inputs": ["a", "TOOLONG", "b"], "labels": LABELS}
+        job = wait(client, submit(client, payload=payload).json()["id"])
+        assert job["status"] == "succeeded" and job["progress"]["failed"] == 1
+        assert len(job["warnings"]) == 1 and "1 of 3 item(s) failed" in job["warnings"][0]
+        clean = wait(client, submit(client).json()["id"])
+        assert clean["warnings"] == []
+
+
+def test_same_error_on_most_items_aborts_after_the_sample():
+    client, _, _ = make()
+    inputs = ["ok" if i % 20 == 0 else "TOOLONG" for i in range(120)]  # 95 % fail alike
+    with client:
+        job = wait(client, submit(client, payload={"inputs": inputs, "labels": LABELS}).json()["id"])
+        assert job["status"] == "failed" and "with the same error" in job["error"]
+        assert 50 <= job["progress"]["done"] < 120
+
+
+def test_failed_job_is_logged_with_its_id_and_error_text_stays_generic(caplog):
+    eng = SlowEngine()
+    eng.raises = RuntimeError("secret internal detail")
+    client, _, _ = make(eng)
+    with client, caplog.at_level("WARNING", logger="clef"):
+        jid = submit(client).json()["id"]
+        job = wait(client, jid)
+    assert job["error"] == "internal server error"
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(f"job {jid}" in m and "failed: internal server error" in m for m in msgs)
+    assert any(r.exc_info for r in caplog.records)  # the traceback is logged (server side only)
+
+
+# ------------------------------------------------------------------ review fixes: crash loops, poison pills
+
+
+def test_recover_gives_up_after_max_resumes():
+    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    row = store.create("classify", None, {}, None, None, 10)
+    store.mark_running(row["id"], 0)
+    assert store.recover(3) == (1, []) and store.get(row["id"])["status"] == "interrupted"
+    for _ in range(2):  # crashes 2 and 3 are still resumed
+        store.mark_running(row["id"], 0)
+        assert store.recover(3) == (1, [])
+    assert store.get(row["id"])["resumes"] == 3
+    store.mark_running(row["id"], 0)
+    assert store.recover(3) == (0, [row["id"]])  # the 4th interruption: give up
+    got = store.get(row["id"])
+    assert (
+        got["status"] == "failed" and got["error"] == "interrupted 4 times, giving up" and got["finished_at"]
+    )
+    assert store.recover(3) == (0, [])  # a finished job is left alone
+    unlimited = store.create("classify", None, {}, None, None, 10)["id"]
+    for _ in range(6):
+        store.mark_running(unlimited, 0)
+        assert store.recover(0) == (1, [])
+    store.close()
+
+
+def test_crash_looping_job_is_failed_at_startup_and_logged(caplog):
+    state = tempfile.mkdtemp(prefix="clef-jobs-")
+    store = JobStore(jobs_db(Config(state_dir=state)))
+    poison = store.create("classify", None, {"inputs": ["a"], "labels": LABELS}, None, None, 10)["id"]
+    store._db.execute("UPDATE jobs SET resumes=3 WHERE id=?", (poison,))
+    store.mark_running(poison, 0)
+    healthy = store.create("classify", None, {"inputs": ["a"], "labels": LABELS}, None, None, 10)["id"]
+    store.close()
+    client, _, _ = make(state_dir=state, job_max_resumes=3)
+    with client, caplog.at_level("WARNING", logger="clef"):
+        job = wait(client, poison)
+        assert job["status"] == "failed" and job["error"] == "interrupted 4 times, giving up"
+        assert wait(client, healthy)["status"] == "succeeded"  # not starved by the poison job
+    assert any(poison in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_poison_pill_job_is_failed_after_a_few_runner_errors(monkeypatch):
+    monkeypatch.setattr("clef_server.jobs.RUNNER_RETRY_PAUSE_S", 0.01)
+    client, _, app = make()
+    runner = app.state.ctx.extra["jobs"]
+    real = runner.store.payload
+    calls: list[str] = []
+    poison: dict[str, Any] = {}
+
+    def payload(job_id: str) -> str:
+        if job_id == poison.get("id"):
+            calls.append(job_id)
+            raise RuntimeError("disk exploded")  # not a validation error
+        return real(job_id)
+
+    monkeypatch.setattr(runner.store, "payload", payload)
+    with client:
+        poison.update(submit(client).json())
+        job = wait(client, poison["id"])
+        assert job["status"] == "failed" and "could not be run" in job["error"] and "disk" not in job["error"]
+        assert 3 <= len(calls) <= 4  # retried a few times, not forever
+        assert wait(client, submit(client).json()["id"])["status"] == "succeeded"  # the queue moves on
+
+
+def test_cancel_arriving_right_after_mark_running_is_not_lost(monkeypatch):
+    eng = SlowEngine(delay=0.05)
+    client, _, app = make(eng)
+    runner = app.state.ctx.extra["jobs"]
+    real = runner.store.mark_running
+
+    def mark_running(job_id: str, resume_done: int) -> bool:
+        ok = real(job_id, resume_done)
+        # exactly what request_cancel does for a running job, landing in the old race window
+        runner.cancel_ids.add(job_id)
+        runner.store.flag_cancel(job_id)
+        return ok
+
+    monkeypatch.setattr(runner.store, "mark_running", mark_running)
+    with client:
+        payload = {"inputs": [f"t{i}" for i in range(40)], "labels": LABELS}
+        job = wait(client, submit(client, payload=payload).json()["id"])
+        assert job["status"] == "cancelled" and job["progress"]["done"] < 40
+
+
+def test_retention_runs_on_its_own_timer_while_a_job_is_running(monkeypatch):
+    monkeypatch.setattr("clef_server.jobs.PURGE_INTERVAL_S", 0.05)
+    eng = SlowEngine(delay=0.05)
+    client, _, app = make(eng)
+    runner = app.state.ctx.extra["jobs"]
+    calls: list[float] = []
+    real = runner._purge
+    monkeypatch.setattr(runner, "_purge", lambda: (calls.append(time.monotonic()), real())[1])
+    with client:
+        jid = submit(client, payload={"inputs": [f"t{i}" for i in range(80)], "labels": LABELS}).json()["id"]
+        wait(client, jid, until=("running",))
+        before = len(calls)
+        assert wait(client, jid)["status"] == "succeeded"
+        assert len(calls) - before >= 2, calls  # purged repeatedly while the runner was busy
+
+
+def test_purge_keeps_jobs_whose_terminal_webhook_is_still_pending():
+    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    hook = {"url": "https://hooks.example.com/h"}
+    ids = {}
+    for state in ("pending", "failed", "delivered"):
+        jid = store.create("classify", None, {}, None, hook, 10)["id"]
+        store.mark_running(jid, 0)
+        store.finish(jid, "succeeded")
+        store.set_delivery(jid, "job.succeeded", {"id": "d", "status": state, "attempts": 1})
+        ids[state] = jid
+    plain = store.create("classify", None, {}, None, None, 10)["id"]
+    store.mark_running(plain, 0)
+    store.finish(plain, "succeeded")
+    assert store.purge(time.time() + 10) == 3
+    assert store.get(ids["pending"]) and not store.get(ids["failed"]) and not store.get(plain)
+    store.close()
+
+
+# ------------------------------------------------------------------ review fixes: CSV
+
+
+def test_csv_neutralises_strings_only_never_numbers():
+    from clef_server.jobs import flatten
+
+    row = {
+        "index": 3, "confidence": -0.5, "n": -2, "label": "=cmd()", "labels": ["@a", "b"], "ok": True,
+        "x": None, "scores": {"a": -0.25, "b": "+SUM"}, "neg_list": [-1, 2], "empty": "",
+    }  # fmt: skip
+    flat = flatten(row, csv_safe=True)
+    assert flat["confidence"] == "-0.5" and flat["n"] == "-2" and flat["scores.a"] == "-0.25"
+    assert flat["neg_list"] == "-1|2"
+    assert flat["label"] == "'=cmd()" and flat["scores.b"] == "'+SUM" and flat["labels"] == "'@a|b"
+    assert flat["ok"] == "True" and flat["x"] == "" and flat["empty"] == ""
+    assert flatten(row)["label"] == "=cmd()"  # plain flatten (column discovery) leaves text alone
+
+
+def test_csv_export_of_a_job_with_negative_numbers_is_not_quoted():
+    client, _, app = make()
+    store = app.state.ctx.extra["jobs"].store
+    with client:
+        jid = store.create("custom", None, {}, None, None, 10)["id"]
+        store.mark_running(jid, 0)
+        store.add_items(jid, [{"index": 0, "score": -0.5, "note": "-bad"}])
+        store.finish(jid, "succeeded")
+        table = list(csv.DictReader(io.StringIO(client.get(f"/v1/jobs/{jid}/results?format=csv").text)))
+        assert table[0]["score"] == "-0.5" and table[0]["note"] == "'-bad"
+
+
+@pytest.mark.asyncio
+async def test_csv_export_is_capped_at_the_snapshot_so_columns_match_rows():
+    from clef_server.jobs import _csv
+
+    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    jid = store.create("custom", None, {}, None, None, 10)["id"]
+    store.mark_running(jid, 0)
+    store.add_items(jid, [{"index": 0, "a": 1}, {"index": 1, "a": 2}])
+    stream = _csv(store, jid, 0, 2)  # 2 = the job's `done` when the request arrived
+    header = await anext(stream)
+    store.add_items(jid, [{"index": 2, "a": 3, "late": "x"}])  # a row lands between the two passes
+    rest = [chunk async for chunk in stream]
+    assert (header + "".join(rest)).splitlines() == ["index,a", "0,1", "1,2"]
+    store.close()
+
+
+def test_running_job_exports_stop_at_the_rows_present_when_requested():
+    client, _, app = make()
+    store = app.state.ctx.extra["jobs"].store
+    with client:
+        jid = store.create("custom", None, {}, None, None, 10)["id"]
+        store.mark_running(jid, 0)
+        store.add_items(jid, [{"index": 0}, {"index": 1}, {"index": 2}])
+        r = client.get(f"/v1/jobs/{jid}/results", params={"format": "csv", "limit": 2})
+        assert [row["index"] for row in csv.DictReader(io.StringIO(r.text))] == ["0", "1"]
+        r = client.get(f"/v1/jobs/{jid}/results", params={"format": "ndjson", "offset": 1})
+        assert len(r.text.splitlines()) == 2
+
+
+# ------------------------------------------------------------------ review fixes: snapshot, idempotency
+
+
+def test_saved_classifier_is_snapshotted_at_submit():
+    eng = SlowEngine(delay=0.2)
+    client, _, app = make(eng)
+    store = app.state.ctx.extra["jobs"].store
+    with client:
+        client.put(
+            "/v1/classifiers/triage", json={"kind": "classify", "labels": LABELS, "instructions": "v1"}
+        )
+        blocker = submit(client, payload={"inputs": [f"t{i}" for i in range(16)], "labels": LABELS})
+        jid = submit(client, payload={"inputs": ["a", "b"], "classifier": "triage"}).json()["id"]
+        client.put(
+            "/v1/classifiers/triage", json={"kind": "classify", "labels": ["x", "y", "z"]}
+        )  # edited later
+        stored = json.loads(store.payload(jid))
+        assert "classifier" not in stored and stored["labels"] == LABELS and stored["instructions"] == "v1"
+        assert stored["snapshot_of"] == "triage" and stored["multi_label"] is False
+        wait(client, blocker.json()["id"])
+        assert wait(client, jid)["status"] == "succeeded"
+        assert set(all_rows(client, jid)[0]["scores"]) == set(LABELS)  # v1 labels, not x / y / z
+        client.put("/v1/classifiers/lvl", json={"kind": "score", "levels": ["lo", "hi"]})
+        sj = submit(client, "score", {"inputs": ["a"], "classifier": "lvl"}).json()["id"]
+        stored = json.loads(store.payload(sj))
+        assert (
+            stored["levels"] == ["lo", "hi"] and "classifier" not in stored and stored["snapshot_of"] == "lvl"
+        )
+        assert wait(client, sj)["result"]["by_level"] == {"hi": 1}
+        client.delete("/v1/classifiers/lvl")  # the queued / finished job no longer depends on it
+
+
+def test_idempotency_key_returns_the_same_job():
+    client, _, _ = make(api_keys_raw="alice:ka,bob:kb")
+    a, b = {"X-API-Key": "ka"}, {"X-API-Key": "kb"}
+    with client:
+        h = {**a, "Idempotency-Key": "batch-2026-10-04"}
+        first = submit(client, headers=h)
+        again = submit(client, headers=h)
+        assert first.status_code == 202 and again.status_code == 202
+        assert again.json()["id"] == first.json()["id"] and again.headers["Idempotent-Replay"] == "true"
+        assert "Idempotent-Replay" not in first.headers
+        assert again.headers["Location"] == f"/v1/jobs/{first.json()['id']}"
+        assert client.get("/v1/jobs", headers=a).json()["total"] == 1
+        other = submit(client, headers={**b, "Idempotency-Key": "batch-2026-10-04"})  # keys are per owner
+        assert other.json()["id"] != first.json()["id"]
+        assert submit(client, headers={**a, "Idempotency-Key": "other"}).json()["id"] != first.json()["id"]
+        assert submit(client, headers={**a, "Idempotency-Key": "x" * 129}).status_code == 400
+        wait(client, first.json()["id"], headers=a)
+        assert submit(client, headers=h).json()["id"] == first.json()["id"]  # also after it finished
+
+
+def test_old_database_without_idem_key_is_migrated():
+    import sqlite3
+
+    path = jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
+    db = sqlite3.connect(str(path))
+    db.executescript(
+        "CREATE TABLE jobs (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,"
+        " kind TEXT NOT NULL,"
+        " status TEXT NOT NULL, owner TEXT, payload TEXT NOT NULL, metadata TEXT, webhook TEXT,"
+        " deliveries TEXT NOT NULL DEFAULT '{}', total INTEGER, done INTEGER NOT NULL DEFAULT 0,"
+        " failed INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, started_at REAL, finished_at REAL,"
+        " run_started_at REAL, run_base_done INTEGER NOT NULL DEFAULT 0, resumes INTEGER NOT NULL DEFAULT 0,"
+        " cancel_requested INTEGER NOT NULL DEFAULT 0, error TEXT, result TEXT);"
+        "INSERT INTO jobs (id, kind, status, payload, created_at)"
+        " VALUES ('job_old', 'classify', 'queued', '{}', 1);"
+    )
+    db.commit()
+    db.close()
+    store = JobStore(path)
+    assert store.get("job_old")["status"] == "queued"
+    assert store.create("classify", None, {}, None, None, 10, "k")["id"] != "job_old"
+    assert store.create("classify", None, {}, None, None, 10, "k").get("replayed")
+    store.close()
