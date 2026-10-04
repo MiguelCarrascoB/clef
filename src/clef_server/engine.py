@@ -133,8 +133,13 @@ class LoadInfo:
     n_layers: int = 0
     host_weights_gb: float = 0.0
     device_weights_gb: float = 0.0
-    notes: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # informational, logged at INFO
+    warnings: list[str] = field(default_factory=list)  # things the operator should fix; shown in /health
     streamer: Any = None
+
+    def warn(self, message: str) -> None:
+        if message not in self.warnings:
+            self.warnings.append(message)
 
 
 def _file_gb(path: Path) -> float:
@@ -147,14 +152,24 @@ def _file_gb(path: Path) -> float:
 def device_budget_gb(backend: Backend, cfg: Any) -> float | None:
     """Device memory for the weights: the explicit cap, else what is free now, minus activation headroom."""
     cap = float(getattr(cfg, "max_device_memory_gb", 0.0) or 0.0)
+    free = backend.memory().get("free_gb")
     if cap > 0:
-        total = cap
+        # a cap above what is free cannot be honoured: plan with the smaller number (preflight warns)
+        total = cap if free is None else min(cap, float(free))
     else:
-        free = backend.memory().get("free_gb")
         if free is None:
             return None
         total = float(free)
     return max(total - backend_mod.ACTIVATION_RESERVE_GB, 0.0)
+
+
+def _is_device_map_refusal(exc: BaseException) -> bool:
+    """transformers' ValueError when a quantizer refuses host entries in the device_map (the one failure the
+    fallback load can fix). Anything else (corrupt checkpoint, host OOM, a bug) must surface."""
+    if not isinstance(exc, ValueError):
+        return False
+    text = str(exc).lower()
+    return any(k in text for k in ("device_map", "dispatched on the cpu", "cpu_offload", "offload"))
 
 
 def load_model(mod: Any, path: Any, backend: Backend, dtype: Any, cfg: Any) -> tuple[Any, Any, LoadInfo]:
@@ -169,26 +184,36 @@ def load_model(mod: Any, path: Any, backend: Backend, dtype: Any, cfg: Any) -> t
     quant = getattr(cfg, "quant", "none")
     offload = getattr(cfg, "offload", "none")
     cap = float(getattr(cfg, "max_device_memory_gb", 0.0) or 0.0)
-    if cap > 0 and backend.apply_memory_cap(cap):
-        info.notes.append(f"device memory capped at {cap:g} GB")
+    getattr(backend, "reset_load_state", lambda: None)()
+    if cap > 0:
+        if backend.apply_memory_cap(cap):
+            info.notes.append(f"device memory capped at {cap:g} GB")
+        else:
+            why = getattr(backend, "cap_failure", lambda: None)() or "it could not be applied"
+            info.warn(f"CLEF_MAX_DEVICE_MEMORY_GB={cap:g} is not enforced: {why}")
     if offload == "cpu" and not backend.has_discrete_memory:
-        info.notes.append(
-            f"CLEF_OFFLOAD=cpu has no effect on {backend.name} (device and host share one memory pool)"
-        )
+        info.warn(f"CLEF_OFFLOAD=cpu has no effect on {backend.name} (device and host share one memory pool)")
         offload = "none"
     qc = backend_mod.quantization_config(backend, quant, dtype, getattr(cfg, "quant_backend", "auto"))
+    caveat = backend_mod.quant_caveat(backend, quant, getattr(cfg, "quant_backend", "auto"))
+    if caveat:
+        info.warn(caveat)
     if offload == "cpu":
         try:
             return _load_offloaded(mod, path, backend, dtype, cfg, info, qc)
         except (PreflightError, BackendError):
             raise
         except Exception as exc:
-            if qc is None:
+            if qc is None or not _is_device_map_refusal(exc):
                 raise
             # transformers refused host entries in the device_map for this quantizer: load, then move them
-            log.warning(
-                "direct host placement failed with %s (%s); moving the embeddings after load", quant, exc
+            msg = (
+                f"CLEF_OFFLOAD=cpu with CLEF_QUANT={quant}: direct host placement was refused ({exc}); "
+                "loaded the quantized model on the device and moved the embeddings afterwards (peak memory "
+                "during the load is higher)"
             )
+            log.warning("%s", " ".join(msg.split()))
+            info.warn(" ".join(msg.split()))
             backend.empty_cache()
     kwargs: dict[str, Any] = {}
     if qc is not None:
@@ -199,6 +224,32 @@ def load_model(mod: Any, path: Any, backend: Backend, dtype: Any, cfg: Any) -> t
     if offload == "cpu":
         _embeddings_to_host(model, backend, info)
     return model, processor, info
+
+
+def _plan_budget_gb(backend: Backend, cfg: Any, qc: Any, info: LoadInfo) -> float:
+    """Device budget for the layer plan; 1e9 (stream nothing, only the vocabulary moves) warns."""
+    budget = device_budget_gb(backend, cfg)
+    cap = float(getattr(cfg, "max_device_memory_gb", 0.0) or 0.0)
+    free = backend.memory().get("free_gb")
+    if cap > 0 and free is not None and cap > float(free):
+        info.warn(
+            f"CLEF_MAX_DEVICE_MEMORY_GB={cap:g} is above the {float(free):.1f} GB free; "
+            "the layer plan uses the free memory"
+        )
+    if qc is not None:
+        if cap > 0:
+            info.warn(
+                f"CLEF_MAX_DEVICE_MEMORY_GB={cap:g} does not shape the offload plan with CLEF_QUANT: "
+                "quantized layers stay on the device and only the embeddings move to the host"
+            )
+        return 1e9
+    if budget is None:
+        info.warn(
+            "device memory is unknown, so no decoder layers are streamed (only the embeddings move to the "
+            "host); set CLEF_MAX_DEVICE_MEMORY_GB to plan a split"
+        )
+        return 1e9
+    return budget
 
 
 def _load_offloaded(
@@ -215,9 +266,7 @@ def _load_offloaded(
     sizes = off.checkpoint_sizes(root)
     layer_bytes, embed_bytes, other_bytes, _ = off.split_sizes(sizes, _bytes_scale(dtype))
     head_bytes = int(_file_gb(root / "joint_head.safetensors") * 1024**3 * _bytes_scale(dtype))
-    budget_gb = device_budget_gb(backend, cfg)
-    if budget_gb is None or qc is not None:  # unknown memory, or quantized layers: only the vocabulary moves
-        budget_gb = 1e9
+    budget_gb = _plan_budget_gb(backend, cfg, qc, info)
     plan = off.plan_layers(
         layer_bytes, embed_bytes, other_bytes, int(budget_gb * 1024**3), head_bytes=head_bytes
     )
@@ -250,6 +299,12 @@ def _load_offloaded(
             list(lm.layers), plan.streamed, backend.host_copier(), lookahead=2, pin=backend.pin_host
         )
         streamer.install()
+        pin_err = getattr(backend, "pin_failure", lambda: None)()
+        if pin_err:
+            info.warn(
+                f"pinned host memory is unavailable ({pin_err}); streamed layers use pageable copies, which "
+                "is much slower"
+            )
     head = mod.JointSchemaHead(**json.loads((root / "joint_head_config.json").read_text(encoding="utf-8")))
     head.load_state_dict(load_file(root / "joint_head.safetensors"), strict=True)
     head = head.to(device=backend.device, dtype=dtype)
@@ -296,7 +351,7 @@ def _strip_accelerate_hooks(model: Any) -> None:
 
     remove_hook_from_module(model, recurse=True)
     if hasattr(model, "hf_device_map"):
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(AttributeError):
             del model.hf_device_map
 
 
@@ -623,8 +678,10 @@ class Engine:
             self._load_info = load_info
             for note in load_info.notes:
                 log.info("%s", note)
-                if "no effect" in note:
-                    self._warnings.append(note)
+            for warning in load_info.warnings:
+                log.warning("%s", warning)
+                if warning not in self._warnings:
+                    self._warnings.append(warning)
             model.eval()
             self._model, self._processor = model, processor
             pad = getattr(processor.tokenizer, "pad_token_id", None)

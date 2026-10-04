@@ -255,3 +255,14 @@ def test_preflight_skipped_when_server_holds_the_gpu(monkeypatch):
     doctor.check_backend(r, Config(device="cpu"), server_up=True)
     by_name = {i["name"]: i for i in r.items}
     assert by_name["memory preflight"]["level"] == doctor.SKIP and r.ok
+
+
+def test_doctor_warns_on_lossy_quant_combo(monkeypatch):
+    b = bk.Backend("rocm", torch.device("cpu"))
+    monkeypatch.setattr(doctor.backend_mod, "detect", lambda d: b)
+    monkeypatch.setattr(doctor.backend_mod, "quantization_config", lambda *a, **k: None)
+    monkeypatch.setattr(doctor.backend_mod, "quant_method", lambda *a, **k: "bnb")
+    r = doctor.Report(echo=False)
+    doctor.check_backend(r, Config(device="rocm", quant="nf4"), server_up=True)
+    q = next(i for i in r.items if i["name"] == "quantization")
+    assert q["level"] == doctor.WARN and "lossy" in q["detail"]

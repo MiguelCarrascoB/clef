@@ -643,6 +643,7 @@ def test_offload_on_unified_memory_is_a_warning_not_an_error():
     eng.start()
     assert wait_for(lambda: eng.status in ("ready", "warming"))
     assert any("no effect" in w for w in eng.info()["warnings"])
+    assert any("no effect" in w for w in eng._load_info.warnings)
     eng.shutdown()
 
 
@@ -669,3 +670,81 @@ def test_sample_skips_gpu_telemetry_while_the_model_loads():
     eng = Engine(make_cfg(), FakeStats(), loader=make_loader(FakeModel()), backend=fake)
     assert eng.status == "loading"
     assert eng.sample()["mem_used_gb"] is None and fake.telemetry_calls == 0
+
+
+def test_unenforced_cap_is_a_health_warning():
+    backend = FakeBackend(name="mps")
+    backend.apply_memory_cap = lambda cap: False
+    backend.cap_failure = lambda: "shares one memory pool"
+    eng = Engine(
+        make_cfg(max_device_memory_gb=8.0), FakeStats(), loader=make_loader(FakeModel()), backend=backend
+    )
+    eng.start()
+    assert wait_for(lambda: eng.status in ("ready", "warming"))
+    assert any("not enforced" in w and "shares one memory pool" in w for w in eng.info()["warnings"])
+    eng.shutdown()
+
+
+def test_quant_caveat_is_a_health_warning(monkeypatch):
+    monkeypatch.setattr("clef_server.engine.backend_mod.quantization_config", lambda *a, **k: None)
+    eng = Engine(
+        make_cfg(quant="nf4"), FakeStats(), loader=make_loader(FakeModel()), backend=FakeBackend(name="rocm")
+    )
+    eng.start()
+    assert wait_for(lambda: eng.status in ("ready", "warming"))
+    assert any("lossy" in w for w in eng.info()["warnings"])
+    eng.shutdown()
+
+
+def test_device_budget_plans_with_free_when_cap_exceeds_it():
+    from clef_server.engine import device_budget_gb
+
+    cfg = make_cfg(max_device_memory_gb=20.0)
+    assert device_budget_gb(FakeBackend(free_gb=10.0), cfg) == pytest.approx(7.5)
+    assert device_budget_gb(FakeBackend(free_gb=30.0), cfg) == pytest.approx(17.5)
+
+
+def test_plan_budget_warnings():
+    from clef_server.engine import LoadInfo, _plan_budget_gb
+
+    info = LoadInfo()
+    assert _plan_budget_gb(FakeBackend(free_gb=10.0), make_cfg(max_device_memory_gb=20.0), None, info) == 7.5
+    assert any("above the 10.0 GB free" in w for w in info.warnings)
+    info = LoadInfo()
+    assert _plan_budget_gb(FakeBackend(), make_cfg(max_device_memory_gb=12.0), object(), info) == 1e9
+    assert any("does not shape the offload plan" in w for w in info.warnings)
+    info = LoadInfo()
+    be = FakeBackend()
+    be.memory = lambda: {"free_gb": None}
+    assert _plan_budget_gb(be, make_cfg(), None, info) == 1e9
+    assert any("memory is unknown" in w for w in info.warnings)
+
+
+def _offload_fallback_setup(monkeypatch, exc):
+    from clef_server import engine as eng_mod
+
+    monkeypatch.setattr(eng_mod.backend_mod, "quantization_config", lambda *a, **k: object())
+
+    def fail(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(eng_mod, "_load_offloaded", fail)
+    monkeypatch.setattr(eng_mod, "_embeddings_to_host", lambda model, backend, info: None)
+    mod = SimpleNamespace(load_release_model=lambda path, device, dtype, **kw: ("model", "proc"))
+    return eng_mod, mod
+
+
+def test_offload_quant_fallback_only_on_device_map_refusal(monkeypatch):
+    eng_mod, mod = _offload_fallback_setup(
+        monkeypatch, ValueError("Some modules are dispatched on the CPU or the disk")
+    )
+    cfg = make_cfg(offload="cpu", quant="int8")
+    model, _, info = eng_mod.load_model(mod, "/x", FakeBackend(), torch.float32, cfg)
+    assert model == "model" and any("direct host placement was refused" in w for w in info.warnings)
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("corrupt checkpoint"), ValueError("bad safetensors header")])
+def test_offload_quant_other_failures_are_not_swallowed(monkeypatch, exc):
+    eng_mod, mod = _offload_fallback_setup(monkeypatch, exc)
+    with pytest.raises(type(exc)):
+        eng_mod.load_model(mod, "/x", FakeBackend(), torch.float32, make_cfg(offload="cpu", quant="int8"))

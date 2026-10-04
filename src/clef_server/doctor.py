@@ -276,7 +276,13 @@ def check_backend(r: Report, cfg: Config, server_up: bool = False) -> backend_mo
         backend_mod.quantization_config(b, cfg.quant, dtype, cfg.quant_backend)
         if cfg.quant != "none":
             method = backend_mod.quant_method(b, cfg.quant, cfg.quant_backend)
-            r.add(OK, "quantization", f"{cfg.quant} ({'bitsandbytes' if method == 'bnb' else 'torchao'})")
+            lib = "bitsandbytes" if method == "bnb" else "torchao"
+            caveat = backend_mod.quant_caveat(b, cfg.quant, cfg.quant_backend)
+            r.add(
+                WARN if caveat else OK,
+                "quantization",
+                f"{cfg.quant} ({lib})" + (f": {caveat}" if caveat else ""),
+            )
     except backend_mod.BackendError as exc:
         r.add(FAIL, "quantization", str(exc))
 

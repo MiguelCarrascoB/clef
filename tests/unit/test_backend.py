@@ -311,8 +311,9 @@ def test_preflight_cap_limits_available_memory():
 
 def test_preflight_offload_defers_to_the_planner():
     b = with_memory(Backend("rocm", torch.device("cuda", 0)), free=8.0, total=24.0)
-    assert bk.preflight(b, torch.bfloat16, "none", 19.0, cap_gb=6.0, offload="cpu") == []
-    assert "only 8.0 GB" in bk.preflight(b, torch.bfloat16, "none", 19.0, cap_gb=12.0, offload="cpu")[0]
+    assert bk.preflight(b, torch.bfloat16, "none", 19.0, cap_gb=7.0, offload="cpu") == []
+    warn = bk.preflight(b, torch.bfloat16, "none", 19.0, cap_gb=12.0, offload="cpu")[0]
+    assert "only 8.0 GB" in warn and "plan uses the 8.0 GB" in warn
     # offload is meaningless on unified memory: the normal check applies
     m = with_memory(Backend("mps", torch.device("mps")), free=8.0, total=16.0, kind="unified")
     with pytest.raises(PreflightError):
@@ -573,3 +574,72 @@ def test_telemetry_off_for_good_without_amdsmi_on_wsl(monkeypatch):
     b = Backend("rocm", torch.device("cuda", 0))
     b.telemetry()
     assert b._cache["tel_off_until"] == float("inf")
+
+
+def test_offload_cap_below_floor_refused_on_wsl_warned_elsewhere(monkeypatch):
+    b = with_memory(Backend("rocm", torch.device("cuda", 0)), free=24.0, total=24.0)
+    monkeypatch.setattr(bk, "_is_wsl", lambda: True)
+    with pytest.raises(PreflightError, match="segfaulted"):
+        bk.preflight(b, torch.bfloat16, "none", 19.0, cap_gb=6.0, offload="cpu")
+    monkeypatch.setattr(bk, "_is_wsl", lambda: False)
+    assert "floor" in bk.preflight(b, torch.bfloat16, "none", 19.0, cap_gb=6.0, offload="cpu")[0]
+    assert bk.preflight(b, torch.bfloat16, "int8", 19.0, cap_gb=6.0, offload="cpu") == []
+
+
+def test_apply_memory_cap_failure_reasons(monkeypatch):
+    cpu = Backend("mps", torch.device("mps"))
+    assert cpu.apply_memory_cap(8.0) is False and "shares one memory pool" in cpu.cap_failure()
+    b = Backend("cuda", torch.device("cuda", 0))
+
+    def boom(*a, **k):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", boom)
+    assert b.apply_memory_cap(8.0) is False and "nope" in b.cap_failure()
+    b.reset_load_state()
+    assert b.cap_failure() is None
+
+
+def test_pin_failure_is_recorded_and_warned_once(caplog):
+    b = Backend("cuda", torch.device("cuda", 0))
+
+    class T:
+        def pin_memory(self):
+            raise RuntimeError("cannot pin")
+
+    t = T()
+    with caplog.at_level("WARNING", logger="clef.backend"):
+        assert b.pin_host(t) is t and b.pin_host(t) is t
+    assert len([r for r in caplog.records if "pin_memory failed" in r.message]) == 1
+    assert "cannot pin" in b.pin_failure()
+    b.reset_load_state()
+    assert b.pin_failure() is None
+
+
+def test_quant_caveats():
+    rocm, mps, cuda = (Backend(n, torch.device("cpu")) for n in ("rocm", "mps", "cuda"))
+    assert "lossy" in bk.quant_caveat(rocm, "nf4")
+    assert "not validated" in bk.quant_caveat(mps, "int8")
+    assert bk.quant_caveat(cuda, "nf4") is None and bk.quant_caveat(rocm, "int8") is None
+    assert bk.quant_caveat(rocm, "none") is None
+
+
+def test_recommend_int8_says_12_gb():
+    mac = with_memory(Backend("mps", torch.device("mps")), free=18.0, total=24.0, kind="unified")
+    assert "about 12 GB" in bk.recommend_memory_setting(mac)
+    cpu = with_memory(Backend("cpu", torch.device("cpu")), free=8.0, total=16.0, kind="system")
+    assert "about 12 GB" in bk.recommend_memory_setting(cpu)
+
+
+def test_memory_bench_sampler_failure_is_unavailable_not_zero():
+    path = Path(__file__).resolve().parents[2] / "bench" / "memory_bench.py"
+    sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location("clef_memory_bench", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    s = types.SimpleNamespace(samples=0, peak_used=0.0, baseline=None, error="RuntimeError: no cuda")
+    m = mod.sampler_metrics(s)
+    assert m["peak_device_used_gb"] is None and m["device_baseline_gb"] is None
+    assert "no cuda" in m["device_sampler_error"]
+    s = types.SimpleNamespace(samples=3, peak_used=9.123, baseline=1.0, error=None)
+    assert mod.sampler_metrics(s) == {"peak_device_used_gb": 9.12, "device_baseline_gb": 1.0}

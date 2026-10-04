@@ -42,6 +42,22 @@ the size of what was moved off the GPU (listed in the table) plus a couple of GB
 
 macOS and CPU: device and host share one memory pool, so offload does nothing there (a warning is logged).
 
+### Warnings you may see
+
+Settings that cannot take full effect no longer fail silently. They are logged at WARNING and listed in
+`/health` `warnings` (and by `clef doctor`):
+
+- `CLEF_MAX_DEVICE_MEMORY_GB` is not enforced (macOS / CPU share one pool, or the allocator refused the limit), or is
+  above the free memory (the layer plan then uses the free memory), or does not shape the plan because `CLEF_QUANT`
+  keeps the quantized layers on the device.
+- Pinned host memory is unavailable: streamed layers fall back to pageable copies, which is much slower.
+- `CLEF_OFFLOAD=cpu` with `CLEF_QUANT`: the direct host placement was refused by transformers and the embeddings were
+  moved after the load. Only that specific refusal falls back; a corrupt checkpoint, host out-of-memory or any other
+  error fails the load with its own message.
+- `CLEF_QUANT=nf4` on ROCm (lossy) and `CLEF_QUANT=int8` on MPS (not validated): doctor shows WARN, not OK.
+- `CLEF_OFFLOAD=cpu` with a cap below 7 GB: a 6 GB cap segfaulted at load on WSL2, so the preflight (and doctor)
+  refuses it there and warns elsewhere. `CLEF_PREFLIGHT=0` skips the check.
+
 ### `CLEF_QUANT=int8` (weight-only, all backends)
 
 | Backend | Library | Notes |

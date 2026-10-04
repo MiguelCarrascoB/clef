@@ -40,6 +40,7 @@ _INT8_OFFLOAD_GB = 10  # int8 + host embeddings: 9.7 GB incl. context (bf16 offl
 _OFFLOAD_MIN_GB = (
     7  # smallest cap measured to work (3.5x slower); 6 GB segfaulted at load on WSL2 (pinned memory)
 )
+_INT8_UNIFIED_GB = 12  # measured peak allocated for int8 on the 7900 XTX: 12.0 GB (12.9 reserved)
 ACTIVATION_RESERVE_GB = 2.5  # device memory kept free for activations when planning an offload split
 _HEADROOM_GB = 3.0  # activations + CUDA context + allocator slack; below need+headroom is a warning only
 
@@ -238,24 +239,49 @@ class Backend:
         try:
             return tensor.pin_memory()
         except Exception as exc:
-            log.debug("pin_memory failed: %s", exc)
+            if "pin_error" not in self._cache:  # once per load: this is a big slowdown, not a detail
+                log.warning(
+                    "pin_memory failed (%s): streamed layers use pageable host copies and copy much slower",
+                    exc,
+                )
+            self._cache["pin_error"] = str(exc) or type(exc).__name__
             return tensor
+
+    def pin_failure(self) -> str | None:
+        """Why pinning host memory failed during this load (None when it worked or was never attempted)."""
+        return self._cache.get("pin_error")
+
+    def reset_load_state(self) -> None:
+        """Forget per-load findings (pin / cap failures) before a new load."""
+        self._cache.pop("pin_error", None)
+        self._cache.pop("cap_error", None)
 
     def host_copier(self) -> HostCopier:
         return HostCopier(self)
 
     def apply_memory_cap(self, cap_gb: float) -> bool:
         """Hard-limit this process's allocator to cap_gb of device memory. Returns whether a limit was set."""
-        if cap_gb <= 0 or not self.has_discrete_memory:
+        if cap_gb <= 0:
+            return False
+        if not self.has_discrete_memory:
+            self._cache["cap_error"] = (
+                f"{self.name} shares one memory pool with the host, so a device memory cap cannot be enforced"
+            )
             return False
         try:
             torch = _torch()
             total = torch.cuda.get_device_properties(self.device).total_memory
             torch.cuda.set_per_process_memory_fraction(min(1.0, cap_gb * GB / total), self.device)
+            self._cache.pop("cap_error", None)
             return True
         except Exception as exc:
             log.warning("could not apply CLEF_MAX_DEVICE_MEMORY_GB=%s: %s", cap_gb, exc)
+            self._cache["cap_error"] = f"the allocator refused it ({exc})"
             return False
+
+    def cap_failure(self) -> str | None:
+        """Why the last apply_memory_cap returned False (None when it was applied or not attempted)."""
+        return self._cache.get("cap_error")
 
     # ---- identity
     def device_name(self) -> str:
@@ -726,6 +752,19 @@ def quant_method(backend: Backend, quant: str, choice: str = "auto") -> str:
     return "bnb" if backend.name == "cuda" else "torchao"
 
 
+def quant_caveat(backend: Backend, quant: str, choice: str = "auto") -> str | None:
+    """Known accuracy / validation caveat of this quantization on this backend (None when there is none)."""
+    quant = (quant or "none").lower()
+    if quant == "nf4" and backend.name == "rocm":
+        return (
+            "CLEF_QUANT=nf4 on ROCm is lossy (it flipped the top choice on ~10% of questions in our set, "
+            "docs/memory.md); prefer CLEF_QUANT=int8"
+        )
+    if quant == "int8" and backend.name == "mps":
+        return "CLEF_QUANT=int8 on MPS (torchao) is not validated on Apple Silicon; check bench/parity.py"
+    return None
+
+
 def required_gb(dtype: Any, quant: str, weights_gb: float) -> float:
     """Resident memory the weights need for this dtype / quantization (weights_gb is the bf16 size)."""
     if quant in _QUANT_FACTOR:
@@ -752,9 +791,22 @@ def preflight(
         return []
     label = {"vram": "GPU memory", "unified": "unified memory", "system": "system memory"}.get(kind, "memory")
     if offload == "cpu" and backend.has_discrete_memory:
+        out: list[str] = []
+        if 0.0 < cap_gb < _OFFLOAD_MIN_GB and quant == "none":
+            msg = (
+                f"CLEF_MAX_DEVICE_MEMORY_GB={cap_gb:g} is below the {_OFFLOAD_MIN_GB} GB floor for "
+                "CLEF_OFFLOAD=cpu (a 6 GB cap segfaulted at load on WSL2); raise it to "
+                f"{_OFFLOAD_MIN_GB} or more"
+            )
+            if _is_wsl():
+                raise PreflightError(msg + ". Set CLEF_PREFLIGHT=0 to skip this check.")
+            out.append(msg)
         if cap_gb > free:
-            return [f"CLEF_MAX_DEVICE_MEMORY_GB={cap_gb:g} but only {free:.1f} GB of {label} is free"]
-        return []
+            out.append(
+                f"CLEF_MAX_DEVICE_MEMORY_GB={cap_gb:g} but only {free:.1f} GB of {label} is free; "
+                f"the layer plan uses the {free:.1f} GB that is free"
+            )
+        return out
     need = required_gb(dtype, quant, weights_gb)
     capped = 0.0 < cap_gb < free
     avail = cap_gb if capped else free
@@ -853,7 +905,7 @@ def recommend_memory_setting(backend: Backend, weights_gb: float = 19.0) -> str 
         return f"{gb}: below the ~{_OFFLOAD_MIN_GB} GB the smallest supported setting needs"
     if backend.name == "mps":
         return (
-            f"{gb}: use CLEF_QUANT=int8 (torchao, about 11 GB; "
+            f"{gb}: use CLEF_QUANT=int8 (torchao, about {_INT8_UNIFIED_GB} GB; "
             "not validated on Apple Silicon, see docs/memory.md)"
         )
-    return f"{gb}: use CLEF_QUANT=int8 (torchao, about 11 GB) or more RAM"
+    return f"{gb}: use CLEF_QUANT=int8 (torchao, about {_INT8_UNIFIED_GB} GB) or more RAM"
