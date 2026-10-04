@@ -5,7 +5,8 @@
     python scripts/screenshots.py --out docs/screenshots
 
 The script drives the UI like a user: runs the SystemOne example twice (so the previous-run overlay shows),
-classifies a ticket twice, runs a small batch, then captures Playground, Classify, Batch, History and Ops.
+classifies a ticket twice, runs a small batch and the labelled-example evaluation, then captures Playground,
+Classify, Batch, History, Evaluate and Ops.
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ TICKETS = """id,text
 7,"Is there a discount for annual plans?"
 8,"API returns 500 on every request"
 """
+
+LABELLED = Path(__file__).resolve().parent.parent / "examples" / "tickets_labelled.csv"
+EVAL_HEIGHT = 1750
 
 STATES = (
     "Customer asks whether the invoice for September can be sent to a different email address.",
@@ -91,6 +95,19 @@ def capture(page, url: str, out: Path, theme: str, run_timeout_ms: int) -> None:
     page.goto(f"{url}/#history")
     page.wait_for_timeout(800)
     shot("history")
+
+    # Evaluate: upload the labelled example, run it, wait for the charts. The results pane is a sticky,
+    # internally scrolling column, so the viewport is made tall enough that nothing is clipped.
+    page.goto(f"{url}/#evaluate")
+    page.set_viewport_size({"width": page.viewport_size["width"], "height": EVAL_HEIGHT})
+    page.locator("input[type=file]").set_input_files(str(LABELLED))
+    page.get_by_role("button", name="Run evaluation").click()
+    page.wait_for_function("() => document.body.innerText.includes('Confusion matrix')", timeout=run_timeout_ms)
+    page.wait_for_timeout(1500)
+    page.evaluate("window.scrollTo(0, 0)")
+    page.wait_for_timeout(400)
+    shot("evaluate")
+    page.set_viewport_size({"width": page.viewport_size["width"], "height": 1000})
 
     page.goto(f"{url}/#ops")
     page.wait_for_timeout(6000)  # SSE connect + a couple of live points
