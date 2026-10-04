@@ -14,8 +14,10 @@ The same job in four languages: triage a support ticket ("Checkout is down, orde
 | `openai_sdk.py` | `pip install openai`; the official OpenAI SDK against clef ([guide](../docs/openai-compat.md)) |
 | `hf_zero_shot.py` | `pip install huggingface_hub`; `InferenceClient.zero_shot_classification` against clef |
 | `jobs.py` | same as `classify.py`; classifies a CSV column as an async job (submit, poll, page results), see [docs/jobs.md](../docs/jobs.md) |
+| `tickets.csv` | a few unlabelled support tickets for `classify_csv.py` and `jobs.py` |
+| `tickets_labelled.csv` | 47 tickets with a `department` gold label, some deliberately ambiguous: upload it in the console's **Evaluate** tab or send it to `POST /v1/evaluate` ([guide](../docs/evaluation.md)) |
 
-All read two environment variables:
+The scripts read two environment variables:
 
 - `CLEF_URL` - server address, default `http://127.0.0.1:8910`
 - `CLEF_API_KEY` - sent as `X-API-Key`; only needed when the server has auth on

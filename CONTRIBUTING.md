@@ -42,6 +42,16 @@ node --test clients/js/test/client.test.js           # JS client
 shellcheck scripts/*.sh
 ```
 
+If you touch the docs, build the site the way CI does (strict: any broken link or warning fails). Python code blocks in
+Markdown are formatted by `ruff format`, so keep them formatted and free of aligned trailing comments:
+
+```bash
+python -m venv .venv-docs && .venv-docs/bin/pip install -r requirements/docs.txt   # Windows: .venv-docs\Scripts\pip
+NO_MKDOCS_2_WARNING=true .venv-docs/bin/mkdocs build --strict
+```
+
+The site is deployed to <https://miguelcarrascob.github.io/clef/> from `main` by `.github/workflows/docs.yml`.
+
 Run `ruff format` only on files you changed; a repo-wide format in a multi-person change touches everyone's files.
 Python line length is 110.
 
@@ -59,7 +69,13 @@ Nothing is published; a `v*` tag builds a GitHub Release with the wheel, sdist a
 
 ## Rules of the code
 
-- `backend.py` is the only place with device-specific code. No `torch.cuda.*` elsewhere.
+- `backend.py` is the only place with device-specific code. No `torch.cuda.*` elsewhere (`offload.py` is device-agnostic
+  and gets its stream and pinned-memory helpers from `backend.py`).
+- New endpoints are **feature modules**: a file in `src/clef_server/` exposing `router(ctx: AppContext) -> APIRouter`,
+  added to `main.FEATURES` (see `appctx.py` and the "Feature modules" section of
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)). Call the model through `ctx.infer` / `ctx.decide`, put `ctx.auth` on
+  the router and `ctx.limited` on routes that run inference, and add pydantic models so `openapi.json` covers the
+  route.
 - One uvicorn worker, one GPU worker thread.
 - Never edit the model directory; wrap or re-implement in the engine.
 - No hardcoded user paths (`/home/<name>`, `C:\Users\<name>`); use `~`, `%LOCALAPPDATA%` or the state directory helpers.
@@ -74,4 +90,5 @@ before/after numbers from `clef bench`; a regression of more than 5% on the veri
 
 ## Pull requests
 
-Small, focused PRs with the checklist in the template filled in. Update the CHANGELOG for user-visible changes.
+Small, focused PRs with the checklist in the template filled in. Update the CHANGELOG (`## Unreleased`) for
+user-visible changes, and the guide in `docs/` when you change behaviour it describes.
