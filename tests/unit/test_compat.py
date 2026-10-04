@@ -154,6 +154,13 @@ def test_chat_ignores_generation_params(api):
     assert r.status_code == 200
 
 
+def test_chat_reports_ignored_fields(api):
+    client, _, _ = api
+    r = post(client, chat(model="gpt-4o", temperature=0.2, max_tokens=5, seed=None, stop=["x"], n=1))
+    assert r.json()["clef"]["ignored"] == ["model", "temperature", "max_tokens", "stop"]
+    assert post(client, chat()).json()["clef"]["ignored"] == []
+
+
 def test_chat_array_multilabel(api):
     client, eng, _ = api
     eng.noul.update({"tags:bug": 0.9, "tags:ui": 0.1, "tags:perf": 0.7})

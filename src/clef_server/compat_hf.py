@@ -65,6 +65,7 @@ def router(ctx: AppContext) -> APIRouter:
     r = APIRouter(dependencies=ctx.auth, route_class=route_class(ctx, hf_error))
 
     async def zero_shot(model_id: str, request: Request) -> Any:
+        # model_id is deliberately ignored: any id is served by clef-flash (documented in openai-compat.md)
         body = await read_json_object(request)
         inputs = body.get("inputs")
         many = isinstance(inputs, list)

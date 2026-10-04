@@ -202,6 +202,11 @@ Validation errors still come back as a normal JSON error response, before any ch
 | `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, `stop`, `seed`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `user`, `metadata`, `store`, `parallel_tool_calls`, `reasoning_effort`, `service_tier`, ... | accepted and ignored |
 | `functions`, `function_call` (legacy) | not supported; use `tools` |
 
+Ignored fields are not silent: a chat response (and the final stream chunk) carries the non-standard
+`clef.ignored` list naming each ignored field the request sent, e.g. `["model", "temperature", "max_tokens"]`
+(`model` appears only when it is not `clef-flash`; the list is `[]` when nothing was ignored). The same list is
+logged at DEBUG. Clients that send a fixed model name keep working, and you can see that the name was not used.
+
 `GET /v1/models` lists `clef-flash`; `GET /v1/models/clef-flash` returns it and any other id gives a `404`
 (`model_not_found`).
 
@@ -221,8 +226,8 @@ The native `/v1/*` routes keep `{detail, request_id}`.
 
 ## Hugging Face zero-shot classification
 
-`POST /hf/models/{model_id}` (also `POST /models/{model_id}`) takes the Inference API body. `model_id` is ignored and
-may contain slashes (`facebook/bart-large-mnli`).
+`POST /hf/models/{model_id}` (also `POST /models/{model_id}`) takes the Inference API body. `model_id` is ignored: any value, even an
+unknown one, is served by `clef-flash` (no error, no warning), and it may contain slashes (`facebook/bart-large-mnli`).
 
 ```bash
 curl -s http://127.0.0.1:8910/hf/models/clef-flash -H 'Content-Type: application/json' -d '{

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from collections.abc import Iterator
@@ -17,6 +18,7 @@ from .compat_errors import openai_error, read_json_object, route_class
 from .compat_schema import Decoded, Plan, SchemaError, build_plan, decode, messages_to_state
 from .schemas import DEFAULT_MODEL, Question, SystemOneRequest
 
+log = logging.getLogger("clef.compat")
 OWNER = "cloudflare"
 MAX_TOP_LOGPROBS = 64
 NO_SCHEMA = (
@@ -29,6 +31,37 @@ NO_SCHEMA = (
 
 def _model_obj(created: int) -> dict[str, Any]:
     return {"id": DEFAULT_MODEL, "object": "model", "created": created, "owned_by": OWNER}
+
+
+# Request fields that are accepted but have no effect on a single deterministic forward pass.
+IGNORED_FIELDS = (
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "max_completion_tokens",
+    "stop",
+    "seed",
+    "presence_penalty",
+    "frequency_penalty",
+    "logit_bias",
+    "user",
+    "metadata",
+    "store",
+    "parallel_tool_calls",
+    "reasoning_effort",
+    "service_tier",
+    "modalities",
+    "prediction",
+)
+
+
+def ignored_fields(body: dict[str, Any]) -> list[str]:
+    """Names of request fields clef accepted but did not use (reported as `clef.ignored`)."""
+    out = [k for k in IGNORED_FIELDS if body.get(k) is not None]
+    model = body.get("model")
+    if model is not None and model != DEFAULT_MODEL:
+        out.insert(0, "model")
+    return out
 
 
 def _int_param(body: dict[str, Any], key: str) -> int | None:
@@ -173,7 +206,11 @@ def router(ctx: AppContext) -> APIRouter:
         message, finish = _message(out, tool_name, named)
         logprobs = out.logprobs(plan, top or 0) if body.get("logprobs") is True else None
         usage = _usage(res)
+        ignored = ignored_fields(body)
+        if ignored:
+            log.debug("chat/completions ignored request fields: %s", ", ".join(ignored))
         extra = {
+            "ignored": ignored,
             "questions": out.detail,
             "timing": {**(res.get("timing") or {}), "total_ms": round((time.perf_counter() - t0) * 1000, 1)},
             "request_id": request.state.request_id,
