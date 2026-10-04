@@ -102,7 +102,9 @@ def capture(page, url: str, out: Path, theme: str, run_timeout_ms: int) -> None:
     page.set_viewport_size({"width": page.viewport_size["width"], "height": EVAL_HEIGHT})
     page.locator("input[type=file]").set_input_files(str(LABELLED))
     page.get_by_role("button", name="Run evaluation").click()
-    page.wait_for_function("() => document.body.innerText.includes('Confusion matrix')", timeout=run_timeout_ms)
+    page.wait_for_function(
+        "() => document.body.innerText.includes('Confusion matrix')", timeout=run_timeout_ms
+    )
     page.wait_for_timeout(1500)
     page.evaluate("window.scrollTo(0, 0)")
     page.wait_for_timeout(400)
