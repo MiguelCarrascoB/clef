@@ -1,5 +1,85 @@
 # Changelog
 
+## Unreleased
+
+Four features on top of 3.0.0, plus the public-release sweep. Only the Windows + WSL2 + ROCm setup has been run on
+real hardware; the compat, evaluation and jobs routes were tested against a fake engine (and, for compat, the
+official `openai` 3.24 and `huggingface_hub` 1.33 SDKs), and the memory modes were measured on the RX 7900 XTX only.
+
+### Added
+- **OpenAI and Hugging Face compatibility** ([guide](docs/openai-compat.md)): `GET /v1/models[/{id}]` and
+  `POST /v1/chat/completions` turn a JSON schema (`response_format` or one forced tool) into decisions: string
+  enum -> choice, boolean -> yes/no, integer enum / bounded integer / `x-clef-ordinal` string enum -> score, array
+  of string enums -> multi-label. Answers are argmax JSON in `message.content`, with `logprobs` (log of the
+  calibrated probability), a non-standard `clef` field with every probability, streaming (SSE) and OpenAI-shaped
+  errors. A request without a usable schema is a `400 missing_schema`. `POST /hf/models/{id}` is the Hugging Face
+  zero-shot endpoint (classic `{sequence, labels, scores}` or the `[{label, score}]` list that `huggingface_hub`
+  1.x expects). LangChain is not tested.
+- **Evaluation** ([guide](docs/evaluation.md)): `POST /v1/evaluate` (labelled rows, optionally a saved classifier;
+  up to `CLEF_MAX_EVAL_ROWS`, default 500) and `POST /v1/evaluate/metrics` (scores you already have, no
+  inference). Accuracy, top-2, macro / micro / weighted F1, per-label precision / recall / F1, confusion matrix,
+  reliability bins, ECE, MCE, Brier, log-loss, a coverage-vs-accuracy curve and `auto_route` thresholds;
+  multi-label reports exact match and Hamming loss. An `evaluate` job kind handles up to
+  `CLEF_MAX_JOB_EVAL_ROWS` (100000) rows. `examples/tickets_labelled.csv` is a 47-ticket sample.
+- **Console: Evaluate tab**: upload CSV / JSON / JSONL, pick the input and gold columns, run with progress and
+  cancel, then read the confusion heatmap, reliability diagram, coverage curve with a threshold readout, per-label
+  table and mistakes list; export predictions or metrics.
+- **Async jobs and webhooks** ([guide](docs/jobs.md)): `POST /v1/jobs` (kinds `classify`, `score`, `systemone`,
+  `evaluate`; `202` with `Location`), `GET /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/results` (JSON pages,
+  or `?format=ndjson|csv`), `POST /v1/jobs/{id}/cancel`, `DELETE /v1/jobs/{id}`. Jobs live in SQLite
+  (`<state dir>/jobs.db`), run FIFO with one micro-batch in flight so interactive calls interleave, resume after a
+  restart, and belong to the API key that submitted them. Webhooks (`job.succeeded`, `job.failed`, `job.cancelled`,
+  opt-in `job.progress`) are signed with `X-Clef-Signature: sha256=HMAC(secret, "<timestamp>.<body>")` and are off
+  until `CLEF_WEBHOOK_ALLOW` lists the receivers. New settings: `CLEF_MAX_JOB_ITEMS`, `CLEF_MAX_JOBS`,
+  `CLEF_JOB_TTL_HOURS`, `CLEF_JOB_ENGINE_WAIT_S`, `CLEF_WEBHOOK_ALLOW`, `CLEF_WEBHOOK_TIMEOUT_S`,
+  `CLEF_WEBHOOK_ATTEMPTS`.
+- **Clients**: Python (`submit_job`, `classify_job`, `job`, `jobs`, `cancel_job`, `delete_job`, `wait_job`,
+  `job_results`, `save_job_results`; sync and async) and JavaScript (`submitJob`, `classifyJob`, `job`, `jobs`,
+  `cancelJob`, `deleteJob`, `waitJob`, `jobResults`). Examples: `openai_sdk.py`, `hf_zero_shot.py`, `jobs.py`.
+- **Smaller GPUs** ([guide](docs/memory.md)): `CLEF_OFFLOAD=cpu` (`--offload`) keeps the embeddings and any layers
+  that do not fit in host RAM and streams them in per forward; `CLEF_MAX_DEVICE_MEMORY_GB`
+  (`--max-device-memory-gb`) caps device memory as a hard allocator limit. `CLEF_QUANT=int8` now works on ROCm,
+  Apple Silicon and CPU through torchao (CUDA keeps bitsandbytes); `CLEF_QUANT_BACKEND=auto|bnb|torchao` picks the
+  library. `clef doctor` prints a recommended memory setting. torchao is part of the `rocm`, `mps`, `cpu` and new
+  `quant` extras. `bench/memory_bench.py` reproduces the measurements.
+- **Extension point**: `clef_server/appctx.py` defines `AppContext`. A feature module exposes
+  `router(ctx) -> APIRouter` and is listed in `main.FEATURES` (`evaluation`, `compat`, `jobs`); the context carries
+  config, stats, engine, auth and rate-limit dependencies, the inference helpers and startup / shutdown hooks.
+  Evaluation, compat and jobs are built on it.
+- **Docs site** (MkDocs Material, deployed to GitHub Pages by `.github/workflows/docs.yml`, built with `--strict`
+  on pull requests): <https://miguelcarrascob.github.io/clef/>, with the interactive API reference generated from
+  `openapi.json`.
+
+### Changed
+- Measured on the RX 7900 XTX (see [docs/memory.md](docs/memory.md)): offload is bit-identical to bf16. A 16 GB
+  card runs with `CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=15` (p50 152 -> 175 ms), a 12 GB card with
+  `CLEF_QUANT=int8 CLEF_OFFLOAD=cpu` (about 206 ms, mean probability error 0.006, 2 of 399 top choices flipped) and
+  an 8 GB card with a cap of 7 (about 540 ms, ~15 GB of host RAM). The old advice for 16 GB cards
+  (`CLEF_QUANT=nf4` with bitsandbytes) is replaced: nf4 flipped about 9% of top choices on ROCm and is not
+  recommended. CUDA and Apple Silicon are untested on hardware.
+- `CLEF_QUANT=int8` is no longer CUDA only (see above). `pip install "clef-local[quant]"` adds torchao anywhere.
+- API keys also protect the new `/hf/models/*` routes (they live outside `/v1`). `/health` `limits` gains
+  `max_job_items` and `webhooks_enabled`.
+- README restructured for the public release (hero GIF, usage sections for the OpenAI SDK, evaluation and jobs,
+  measured memory options); the docs site gains pages for the four features.
+
+### Security
+- Webhook deliveries are an SSRF surface, so they are off by default and gated by `CLEF_WEBHOOK_ALLOW`. The
+  allow-list is checked at submit and again on every attempt, the host is resolved right then and the request is
+  pinned to the checked address (no DNS rebinding), link-local (cloud metadata), multicast, unspecified and
+  reserved addresses are always refused, redirects and environment proxies are ignored and API keys are never
+  sent. Webhook secrets are stored in clear text in `jobs.db` (HMAC needs them).
+- Job results exported as CSV neutralise spreadsheet formulas (cells starting with `=`, `+`, `-` or `@`).
+- Jobs are owned by the API key name that submitted them; other keys get `404`. Job payloads and results are kept on
+  disk until deleted or until `CLEF_JOB_TTL_HOURS` expires.
+- `THIRD_PARTY_NOTICES` for the vendored Preact, htm and uPlot console libraries
+  (`src/clef_server/static/vendor/THIRD_PARTY_NOTICES.md`).
+
+### Known gaps
+- Jobs are not counted in `/v1/stats` or the request log; the webhook TLS path was not tested against a real TLS
+  server; LangChain was not tested against the compat routes; offload, torchao int8 and the device cap are untested
+  on NVIDIA and Apple Silicon.
+
 ## 3.0.0
 
 Cross-platform release: the model now runs on NVIDIA (CUDA), AMD (ROCm), Apple Silicon (MPS) and CPU. Only the
