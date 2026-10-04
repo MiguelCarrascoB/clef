@@ -1627,12 +1627,12 @@ videos, runs on NVIDIA (CUDA), AMD (ROCm, also under WSL2), Apple Silicon (MPS) 
 <tr>
 <td>macOS, Apple Silicon</td>
 <td>MPS</td>
-<td><strong>untested on hardware</strong> (CI macOS runners have no MPS)</td>
+<td><strong>untested on hardware</strong> (no Apple Silicon machine has run it yet)</td>
 </tr>
 <tr>
 <td>Any OS, no GPU</td>
 <td>CPU</td>
-<td><strong>verified in CI</strong> (unit tests on Ubuntu, macOS, Windows; the model is not loaded in CI)</td>
+<td><strong>unit-tested</strong> on Ubuntu, macOS and Windows (the tests never load the model)</td>
 </tr>
 </tbody>
 </table>

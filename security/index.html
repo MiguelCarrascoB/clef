@@ -1511,7 +1511,7 @@ most, trusted callers on a local network.</p>
   <a href="https://github.com/MiguelCarrascoB/clef/blob/main/src/clef_server/static/vendor/THIRD_PARTY_NOTICES.md"><code>THIRD_PARTY_NOTICES.md</code></a>.</li>
 <li><strong>Model and dependencies.</strong> Weights come from the pinned Hugging Face revision; <code>CLEF_MODEL_PATH</code> should point only
   at files you trust (the model code in the release directory is imported and executed). Dependencies are pinned in
-  <code>requirements/</code>; Dependabot updates the GitHub Actions.</li>
+  <code>requirements/</code>.</li>
 </ul>
 <p>Out of scope / not provided: TLS (use a reverse proxy, see <a href="../remote-access/">docs/remote-access.md</a>), per-user
 authorization (all keys have the same access to the model; job ownership only scopes job visibility), multi-tenant isolation, protection against a malicious model directory.</p>

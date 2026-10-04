@@ -1269,10 +1269,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#checks-ci-runs-the-same" class="md-nav__link">
+  <a href="#checks-run-them-before-a-pr" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Checks (CI runs the same)
+        Checks (run them before a PR)
       
     </span>
   </a>
@@ -1461,10 +1461,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#checks-ci-runs-the-same" class="md-nav__link">
+  <a href="#checks-run-them-before-a-pr" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Checks (CI runs the same)
+        Checks (run them before a PR)
       
     </span>
   </a>
@@ -1561,7 +1561,7 @@ need only CPU torch; they never load the model weights. <a href="https://docs.as
 <p><strong>Windows + WSL2 / AMD ROCm (the maintainer's setup)</strong>: see the README quick start, install <code>requirements/rocm.txt</code>
 inside WSL, then <code>pip install -e ".[server,dev]"</code>. Use <code>.\clef.ps1</code> from Windows.</p>
 <p><strong>Node</strong> (JS client only): Node 18+, no install step.</p>
-<h2 id="checks-ci-runs-the-same">Checks (CI runs the same)<a class="headerlink" href="#checks-ci-runs-the-same" title="Permanent link">&para;</a></h2>
+<h2 id="checks-run-them-before-a-pr">Checks (run them before a PR)<a class="headerlink" href="#checks-run-them-before-a-pr" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>ruff<span class="w"> </span>check<span class="w"> </span>.
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>ruff<span class="w"> </span>format<span class="w"> </span>--check<span class="w"> </span>.
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>pytest<span class="w"> </span>tests/unit<span class="w">                       </span><span class="c1"># CPU, no weights</span>
@@ -1569,7 +1569,7 @@ inside WSL, then <code>pip install -e ".[server,dev]"</code>. Use <code>.\clef.p
 <a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>node<span class="w"> </span>--test<span class="w"> </span>clients/js/test/client.test.js<span class="w">           </span><span class="c1"># JS client</span>
 <a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>shellcheck<span class="w"> </span>scripts/*.sh
 </code></pre></div>
-<p>If you touch the docs, build the site the way CI does (strict: any broken link or warning fails). Python code blocks in
+<p>If you touch the docs, build the site strictly ( any broken link or warning fails). Python code blocks in
 Markdown are formatted by <code>ruff format</code>, so keep them formatted and free of aligned trailing comments:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>python<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv-docs<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>.venv-docs/bin/pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements/docs.txt<span class="w">   </span><span class="c1"># Windows: .venv-docs\Scripts\pip</span>
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nv">NO_MKDOCS_2_WARNING</span><span class="o">=</span><span class="nb">true</span><span class="w"> </span>.venv-docs/bin/mkdocs<span class="w"> </span>build<span class="w"> </span>--strict
@@ -1579,10 +1579,8 @@ Actions is disabled for this repository, so publish by hand after committing doc
 <code>bash scripts/publish_docs.sh</code> (strict build, then one commit on <code>gh-pages</code>).</p>
 <p>Run <code>ruff format</code> only on files you changed; a repo-wide format in a multi-person change touches everyone's files.
 Python line length is 110.</p>
-<p>CI (<code>.github/workflows/ci.yml</code>) runs on Ubuntu (Python 3.10 and 3.12), macOS 14 and Windows (3.12): ruff, unit tests,
-OpenAPI check, wheel build and a CLI smoke test from the built wheel (<code>clef --help</code>, <code>clef version</code>,
-<code>clef doctor --no-gpu</code>), plus the JS tests, shellcheck and a build-only Docker job for the CUDA and ROCm images.
-Nothing is published; a <code>v*</code> tag builds a GitHub Release with the wheel, sdist and <code>openapi.json</code>.</p>
+<p>The repository has no CI (GitHub Actions is disabled), so these checks are the gate: run all of them before opening
+a PR, on Python 3.10 if you can (the oldest supported version). Nothing is published to PyPI, npm or a registry.</p>
 <h2 id="tests">Tests<a class="headerlink" href="#tests" title="Permanent link">&para;</a></h2>
 <ul>
 <li><code>tests/unit</code>: CPU, no weights, no GPU, mocked backends and engine. Add tests with every change; backend-specific
@@ -1605,7 +1603,7 @@ Nothing is published; a <code>v*</code> tag builds a GitHub Release with the whe
 <li>Do not log request contents or keys.</li>
 </ul>
 <h2 id="hardware-checklist">Hardware checklist<a class="headerlink" href="#hardware-checklist" title="Permanent link">&para;</a></h2>
-<p>CI cannot exercise GPUs, and macOS runners have no MPS. If your change touches a backend (dtype, memory, fast paths,
+<p>The unit tests cannot exercise GPUs. If your change touches a backend (dtype, memory, fast paths,
 quantization, telemetry), say in the PR which hardware you ran it on. Maintainers with a real NVIDIA or Mac machine:
 follow <a href="../hardware-validation/">docs/hardware-validation.md</a> and paste the results. Performance changes need
 before/after numbers from <code>clef bench</code>; a regression of more than 5% on the verified ROCm setup blocks a change.</p>

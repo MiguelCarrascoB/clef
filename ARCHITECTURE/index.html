@@ -2734,7 +2734,7 @@ state transition), 413 too large, 429 rate limited (+ <code>Retry-After</code>),
 message; traceback only in the server log). The OpenAI and Hugging Face routes use their clients' error shapes (see
 Compat).</p>
 <h3 id="openapi">OpenAPI<a class="headerlink" href="#openapi" title="Permanent link">&para;</a></h3>
-<p><code>openapi.json</code> at the repo root is exported from <code>create_app()</code> by <code>scripts/export_openapi.py</code> (CI checks it is up to
+<p><code>openapi.json</code> at the repo root is exported from <code>create_app()</code> by <code>scripts/export_openapi.py</code> (<code>--check</code> verifies it is up to
 date). All routes, including the feature modules', have pydantic request/response models so <code>/docs</code> shows them.</p>
 <h2 id="cli-clef-clipy">CLI (<code>clef</code>, <code>cli.py</code>)<a class="headerlink" href="#cli-clef-clipy" title="Permanent link">&para;</a></h2>
 <p><div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>clef serve [--host H] [--port P] [--device D] [--dtype T] [--quant Q] [--offload none|cpu]
@@ -2754,7 +2754,7 @@ date). All routes, including the feature modules', have pydantic request/respons
   when something already answers on the port.
 - <code>stop</code>: SIGTERM (Windows: <code>taskkill /PID /T</code>), wait 30 s, then kill; removes the pidfile.
 - <code>status</code>: process + <code>/health</code> summary (backend, device, status); exit 0 when healthy.
-- <code>doctor --no-gpu</code>: skips everything that needs a GPU or the weights (CI smoke). On a GPU, <code>doctor</code> also prints a
+- <code>doctor --no-gpu</code>: skips everything that needs a GPU or the weights (smoke check). On a GPU, <code>doctor</code> also prints a
   <code>memory setting</code> line (from <code>recommend_memory_setting</code>) when bf16 would not fit comfortably. <code>--smoke</code>: loads the model on
   the detected backend, runs one fixed record, checks probabilities sum to 1 and prints latency.
 - <code>download</code>: <code>huggingface_hub.snapshot_download(MODEL_REPO, revision=MODEL_REVISION)</code> into the HF cache (or

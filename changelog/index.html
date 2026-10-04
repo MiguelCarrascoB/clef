@@ -1843,9 +1843,9 @@ memory mode. CUDA and Apple Silicon remain untested on hardware.</p>
   <code>router(ctx) -&gt; APIRouter</code> and is listed in <code>main.FEATURES</code> (<code>evaluation</code>, <code>compat</code>, <code>jobs</code>); the context carries
   config, stats, engine, auth and rate-limit dependencies, the inference helpers and startup / shutdown hooks.
   Evaluation, compat and jobs are built on it.</li>
-<li><strong>Docs site</strong> (MkDocs Material, deployed to GitHub Pages by <code>.github/workflows/docs.yml</code>, built with <code>--strict</code>
-  on pull requests): <a href="https://miguelcarrascob.github.io/clef/">https://miguelcarrascob.github.io/clef/</a>, with the interactive API reference generated from
-  <code>openapi.json</code>.</li>
+<li><strong>Docs site</strong> (MkDocs Material, built with <code>--strict</code> and published to the <code>gh-pages</code> branch by
+  <code>scripts/publish_docs.sh</code>): <a href="https://miguelcarrascob.github.io/clef/">https://miguelcarrascob.github.io/clef/</a>, with the interactive API reference
+  generated from <code>openapi.json</code>.</li>
 </ul>
 <h3 id="changed">Changed<a class="headerlink" href="#changed" title="Permanent link">&para;</a></h3>
 <ul>
@@ -1878,6 +1878,8 @@ memory mode. CUDA and Apple Silicon remain untested on hardware.</p>
 <li>Compat chat responses list ignored request fields in <code>clef.ignored</code>.</li>
 <li>Python and JS clients: <code>save_job_results(require_finished=True)</code> writes atomically; <code>jobs()</code> exposes <code>total</code>;
   the JS client no longer retries a job submission after it was sent (unless an idempotency key is given).</li>
+<li>GitHub Actions workflows (CI, release, docs) and Dependabot are removed; GitHub Actions is disabled for the
+  repository. The checks in CONTRIBUTING.md are run locally before a PR, and the docs are published by hand.</li>
 </ul>
 <h3 id="fixed">Fixed<a class="headerlink" href="#fixed" title="Permanent link">&para;</a></h3>
 <ul>
