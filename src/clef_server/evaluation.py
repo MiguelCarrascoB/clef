@@ -7,17 +7,18 @@ Three layers:
   math; the web console posts its collected scores to ``POST /v1/evaluate/metrics`` rather than redoing it.
 * ``POST /v1/evaluate`` runs inference (chunks of ``max_batch`` through the normal inference path) and then
   the metrics.
-* an ``evaluate`` job kind (``ctx.extra["job_kinds"]``) for datasets too big for one request.
+* an ``evaluate`` job kind (``ctx.extra["job_kinds"]``) for datasets too big for one request: micro-batches
+  through ``jobs.decide_resilient`` (engine-not-ready wait, per-row error isolation), resumable.
 
 See docs/evaluation.md.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,14 +52,62 @@ def _prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
     return p, r, (2 * p * r / (p + r) if p + r else 0.0)
 
 
-def _clip01(x: Any) -> float:
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return 0.0
-    if math.isnan(v):
-        return 0.0
-    return min(1.0, max(0.0, v))
+@dataclass
+class _Quality:
+    """Counts of scores that were repaired rather than rejected (reported as ``degenerate_rows`` etc.)."""
+
+    rows: int = 0  # rows with at least one defaulted / clipped score (or an all-zero single-label row)
+    defaulted: int = 0  # label keys missing from ``scores`` (taken as 0.0)
+    clipped: int = 0  # values outside [0, 1] (clamped)
+
+    def row(self, defaulted: int, clipped: int, all_zero: bool = False) -> None:
+        self.defaulted += defaulted
+        self.clipped += clipped
+        if defaulted or clipped or all_zero:
+            self.rows += 1
+
+    def fields(self) -> dict[str, int]:
+        return {
+            "degenerate_rows": self.rows,
+            "defaulted_scores": self.defaulted,
+            "clipped_scores": self.clipped,
+        }
+
+
+def _row_scores(scores: Any, names: list[str], idx: int) -> tuple[list[float], int, int]:
+    """(value per label, n defaulted, n clipped). Raises ValueError naming the row for unusable scores.
+
+    Missing label keys count as 0.0 but a row with NO label key at all (e.g. ``Billing`` vs ``billing``), a
+    non-numeric value or a NaN / infinite value is rejected instead of silently becoming a uniform guess.
+    """
+    where = f"rows[{idx}].scores"
+    if not isinstance(scores, dict) or not any(n in scores for n in names):
+        got = list(scores)[:5] if isinstance(scores, dict) else type(scores).__name__
+        raise ValueError(
+            f"{where}: none of the labels {names[:5]} appear as keys (got {got}); "
+            "label keys are case-sensitive"
+        )
+    vals: list[float] = []
+    defaulted = clipped = 0
+    for name in names:
+        if name not in scores:
+            vals.append(0.0)
+            defaulted += 1
+            continue
+        raw = scores[name]
+        try:
+            if isinstance(raw, bool):
+                raise TypeError
+            v = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"{where}[{name!r}]: not a number ({raw!r})") from None
+        if not math.isfinite(v):
+            raise ValueError(f"{where}[{name!r}]: not a finite number ({raw!r})")
+        if v < 0.0 or v > 1.0:
+            clipped += 1
+            v = min(1.0, max(0.0, v))
+        vals.append(v)
+    return vals, defaulted, clipped
 
 
 def _gold_list(gold: Any, multi_label: bool, names: list[str], idx: int) -> list[str]:
@@ -163,10 +212,9 @@ def _averages(per_label: list[dict[str, Any]]) -> tuple[float, float]:
     return macro, weighted
 
 
-def _single_probs(scores: dict[str, Any], names: list[str]) -> list[float]:
-    raw = [_clip01(scores.get(name, 0.0)) for name in names]
+def _single_probs(raw: list[float]) -> list[float]:
     s = sum(raw)
-    return [v / s for v in raw] if s > 0 else [1.0 / len(names)] * len(names)
+    return [v / s for v in raw] if s > 0 else [1.0 / len(raw)] * len(raw)
 
 
 def _single(
@@ -174,6 +222,7 @@ def _single(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     pos = {n: i for i, n in enumerate(names)}
     k = len(names)
+    quality = _Quality()
     cm = [[0] * k for _ in range(k)]
     pairs: list[tuple[float, bool]] = []
     preds: list[dict[str, Any]] = []
@@ -181,7 +230,9 @@ def _single(
     brier = nll = 0.0
     for i, row in enumerate(rows):
         gold = _gold_list(row.get("gold"), False, names, i)[0]
-        probs = _single_probs(row.get("scores") or {}, names)
+        raw, defaulted, clipped = _row_scores(row.get("scores"), names, i)
+        quality.row(defaulted, clipped, all_zero=sum(raw) <= 0)
+        probs = _single_probs(raw)
         order = sorted(range(k), key=lambda j: (-probs[j], j))  # ties: first label wins
         p_idx, g_idx = order[0], pos[gold]
         cm[g_idx][p_idx] += 1
@@ -219,6 +270,7 @@ def _single(
         "auto_route": _auto_route(curve),
         "exact_match": None,
         "hamming_loss": None,
+        **quality.fields(),
     }
     return metrics, preds
 
@@ -227,6 +279,7 @@ def _multi(
     names: list[str], rows: list[dict[str, Any]], bins: int, threshold: float
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     k = len(names)
+    quality = _Quality()
     tp = [0] * k
     fp = [0] * k
     fn = [0] * k
@@ -236,11 +289,12 @@ def _multi(
     brier = nll = 0.0
     for i, row in enumerate(rows):
         gold = set(_gold_list(row.get("gold"), True, names, i))
-        scores = row.get("scores") or {}
+        vals, defaulted, clipped = _row_scores(row.get("scores"), names, i)
+        quality.row(defaulted, clipped)
         picked = []
         row_ok = True
         for j, name in enumerate(names):
-            p = _clip01(scores.get(name, 0.0))
+            p = vals[j]
             pred, y = p >= threshold, name in gold
             if pred:
                 picked.append((p, name))
@@ -257,7 +311,7 @@ def _multi(
             nll -= math.log(max(p if y else 1.0 - p, EPS))
         exact += row_ok
         picked.sort(key=lambda t: -t[0])
-        confs = {name: _clip01(scores.get(name, 0.0)) for name in names}
+        confs = dict(zip(names, vals, strict=True))
         preds.append(
             {
                 "index": i,
@@ -307,6 +361,7 @@ def _multi(
         "auto_route": None,
         "exact_match": exact / n,
         "hamming_loss": (sum(fp) + sum(fn)) / (n * k),
+        **quality.fields(),
     }
     return metrics, preds
 
@@ -414,6 +469,11 @@ class MetricsResponse(BaseModel):
     weighted_f1: float
     per_label: list[dict[str, Any]]
     calibration: dict[str, Any]
+    degenerate_rows: int = Field(
+        0, description="rows with a missing label key (taken as 0), a clipped score or all-zero scores"
+    )
+    defaulted_scores: int = Field(0, description="label keys missing from `scores`, counted as 0.0")
+    clipped_scores: int = Field(0, description="scores outside [0, 1] that were clamped")
 
 
 class EvaluateResponse(MetricsResponse):
@@ -460,11 +520,14 @@ def router(ctx: AppContext) -> APIRouter:
     cfg = ctx.cfg
     r = APIRouter(prefix="/v1", tags=["evaluation"], dependencies=ctx.auth, responses=ctx.errors)
 
-    async def resolve(body: EvaluateRequest) -> Spec:
-        """Request -> Spec: load the saved classifier, enforce label/row/gold validity. Raises ValueError."""
+    def resolve_sync(body: EvaluateRequest) -> Spec:
+        """Request -> Spec: load the saved classifier, enforce label/row/gold validity.
+
+        Raises ValueError (bad input) or LookupError (unknown classifier). Blocking: run it in a thread.
+        """
         labels, instructions, multi, thr = body.labels, body.instructions, body.multi_label, body.threshold
         if body.classifier is not None:
-            doc = await run_in_threadpool(ctx.store.get, body.classifier)
+            doc = ctx.store.get(body.classifier)
             if doc is None:
                 raise LookupError(f"classifier {body.classifier!r} not found")
             if doc.get("kind") != "classify":
@@ -481,45 +544,34 @@ def router(ctx: AppContext) -> APIRouter:
             labels, instructions, multi, thr, body.rows, body.bins, body.include_predictions, body.classifier
         )
 
-    async def classify_chunks(
-        spec: Spec,
-        request: Request | None,
-        on_chunk: Callable[[int, list[dict[str, float]]], Any] | None = None,
-        cancelled: Callable[[], bool] | None = None,
-    ) -> list[dict[str, float]]:
-        """Scores per row, inferring max_batch rows per forward through ctx.infer (request) or ctx.decide."""
+    async def resolve(body: EvaluateRequest) -> Spec:
+        return await run_in_threadpool(resolve_sync, body)
+
+    def build_requests(spec: Spec, rows: list[EvalRow]) -> list[Any]:
+        return [
+            classify_to_systemone(x.input, spec.labels, spec.instructions, spec.multi_label, DEFAULT_MODEL)
+            for x in rows
+        ]
+
+    def to_scores(spec: Spec, res: dict[str, Any], thr: float | None) -> dict[str, float]:
+        return classify_result(res["answers"], spec.labels, spec.multi_label, thr, DEFAULT_MODEL)["scores"]
+
+    async def classify_chunks(spec: Spec, request: Request) -> list[dict[str, float]]:
+        """Scores per row (request path): max_batch rows per forward through ctx.infer; any error fails it."""
         thr = resolve_threshold(spec.threshold, cfg) if spec.multi_label else None
         size = max(1, cfg.max_batch)
         out: list[dict[str, float]] = []
         tokens = 0
         for start in range(0, len(spec.rows), size):
-            if cancelled is not None and cancelled():
-                break
-            chunk = spec.rows[start : start + size]
-            sreqs = [
-                classify_to_systemone(
-                    x.input, spec.labels, spec.instructions, spec.multi_label, DEFAULT_MODEL
-                )
-                for x in chunk
-            ]
-            if request is not None:
-                results = await ctx.infer(request, sreqs, batch=True, label="rows")
-            else:
-                results = await ctx.decide(sreqs, batch=True, label="rows")
+            sreqs = build_requests(spec, spec.rows[start : start + size])
+            results = await ctx.infer(request, sreqs, batch=True, label="rows")
             tokens += sum(int(res.get("usage", {}).get("input_tokens", 0)) for res in results)
-            scores = [
-                classify_result(res["answers"], spec.labels, spec.multi_label, thr, DEFAULT_MODEL)["scores"]
-                for res in results
-            ]
-            out.extend(scores)
-            if on_chunk is not None:
-                await on_chunk(start, scores)
-        if request is not None:  # infer() records the LAST chunk only; report the whole run
-            rec = getattr(request.state, "rec", None)
-            if isinstance(rec, dict):
-                rec["n_records"] = len(out)
-                rec["n_questions"] = len(out) * (len(label_names(spec.labels)) if spec.multi_label else 1)
-                rec["input_tokens"] = tokens
+            out.extend(to_scores(spec, res, thr) for res in results)
+        rec = getattr(request.state, "rec", None)
+        if isinstance(rec, dict):  # infer() records the LAST chunk only; report the whole run
+            rec["n_records"] = len(out)
+            rec["n_questions"] = len(out) * (len(label_names(spec.labels)) if spec.multi_label else 1)
+            rec["input_tokens"] = tokens
         return out
 
     @r.post(
@@ -579,7 +631,12 @@ def router(ctx: AppContext) -> APIRouter:
         return out
 
     # ---- async job kind (plugs into the jobs API through ctx.extra; neither module imports the other)
-    def validate_job(payload: dict[str, Any]) -> EvaluateRequest:
+    def validate_job(payload: dict[str, Any]) -> Spec:
+        """Payload -> resolved Spec (saved classifier loaded, labels and gold checked). Raises ValueError.
+
+        Runs at submit (400) and again when the job starts, so a classifier deleted in between fails the job
+        with a clear message. Blocking: the jobs API calls it in a thread.
+        """
         from pydantic import ValidationError
 
         try:
@@ -590,43 +647,113 @@ def router(ctx: AppContext) -> APIRouter:
             raise ValueError(format_errors(exc.errors())) from exc
         if len(body.rows) > cfg.max_job_eval_rows:
             raise ValueError(f"rows: too many rows (max {cfg.max_job_eval_rows})")
-        if body.labels is not None:
-            check_label_count(body.labels, body.multi_label, cfg.max_labels)
-            names = label_names(body.labels)
-            for i, row in enumerate(body.rows):
-                _gold_list(row.gold, body.multi_label, names, i)
-        return body
+        try:
+            return resolve_sync(body)
+        except LookupError as exc:
+            raise ValueError(str(exc)) from exc
 
-    async def run_job(_ctx: AppContext, parsed: EvaluateRequest, job: Any) -> dict[str, Any]:
-        spec = await resolve(parsed)  # saved classifiers resolve at run time; ValueError fails the job
-        job.set_total(len(spec.rows))
+    async def run_job(_ctx: AppContext, spec: Spec, job: Any) -> dict[str, Any]:
+        """Classify ``spec.rows`` micro-batch by micro-batch through the jobs runner's resilient engine call.
+
+        Rows the engine rejects (too long, OOM) become ``{"index", "error"}`` items and are left out of the
+        metrics (``n_errors``). Resumable: items already stored are replayed into the metrics and skipped.
+        """
+        from .jobs import ItemError, JobCancelled, decide_resilient
+
+        if spec.classifier is not None:  # snapshot is in `spec`; this only catches a deletion since validate
+            try:
+                await run_in_threadpool(_require_classifier, spec.classifier)
+            except LookupError as exc:
+                raise ValueError(str(exc)) from exc
+        total = len(spec.rows)
+        job.set_total(total)
         thr = resolve_threshold(spec.threshold, cfg) if spec.multi_label else None
         names = label_names(spec.labels)
-        done: list[dict[str, float]] = []
-
-        async def on_chunk(start: int, scores: list[dict[str, float]]) -> None:
-            rows = _row_dicts(spec.rows[start : start + len(scores)], scores)
-            _, preds = compute_metrics(spec.labels, rows, spec.multi_label, thr, 2)
-            items = _attach_inputs(preds, spec.rows, offset=start)
-            for item, sc in zip(items, scores, strict=True):
-                item["scores"] = {k: sc.get(k, 0.0) for k in names}
-            await job.add_items(items)
-            done.extend(scores)
-
-        await classify_chunks(spec, None, on_chunk, lambda: bool(job.cancelled))
-        if not done:
-            return {"n": 0, "cancelled": bool(job.cancelled)}
-        metrics, _ = compute_metrics(
-            spec.labels, _row_dicts(spec.rows[: len(done)], done), spec.multi_label, thr, spec.bins
+        scored: list[tuple[int, dict[str, float]]] = []  # (row index, scores) of every row that has scores
+        n_errors = 0
+        start = int(job.resume_from)
+        if start:  # resuming: rebuild the collected scores from what is already persisted
+            for item in await job.stored_items():
+                if not 0 <= item.get("index", -1) < start:
+                    continue
+                if "error" in item:
+                    n_errors += 1
+                elif "scores" in item:
+                    scored.append((item["index"], item["scores"]))
+        size = max(1, int(cfg.max_microbatch))  # job mode shares the engine: keep each forward short
+        cancelled = False
+        try:
+            for lo in range(start, total, size):
+                if job.cancelled:
+                    cancelled = True
+                    break
+                hi = min(total, lo + size)
+                built: list[tuple[int, Any]] = []
+                for i in range(lo, hi):
+                    try:
+                        built.append((i, build_requests(spec, [spec.rows[i]])[0]))
+                    except ValueError as exc:
+                        built.append((i, ItemError(str(exc))))
+                good = [r for _, r in built if not isinstance(r, ItemError)]
+                results = iter(await decide_resilient(_ctx, job, good) if good else [])
+                ok_idx: list[int] = []
+                ok_scores: list[dict[str, float]] = []
+                items: list[dict[str, Any]] = []
+                for i, r in built:
+                    out = r if isinstance(r, ItemError) else next(results)
+                    if isinstance(out, ItemError):
+                        n_errors += 1
+                        row = spec.rows[i]
+                        items.append(
+                            {"index": i, "input": preview(row.input), "gold": row.gold, "error": out.message}
+                        )
+                    else:
+                        ok_idx.append(i)
+                        ok_scores.append(to_scores(spec, out, thr))
+                if ok_idx:
+                    pairs = zip(ok_idx, ok_scores, strict=True)
+                    rows = [{"gold": spec.rows[i].gold, "scores": s} for i, s in pairs]
+                    _, preds = await asyncio.to_thread(
+                        compute_metrics, spec.labels, rows, spec.multi_label, thr, 2
+                    )
+                    by_index = {}
+                    for i, p, sc in zip(ok_idx, preds, ok_scores, strict=True):
+                        p["index"] = i
+                        p["input"] = preview(spec.rows[i].input)
+                        p["scores"] = {k: sc.get(k, 0.0) for k in names}
+                        by_index[i] = p
+                    scored.extend(zip(ok_idx, ok_scores, strict=True))
+                    items.extend(by_index.values())
+                items.sort(key=lambda it: it["index"])
+                await job.add_items(items)
+                await asyncio.sleep(0)  # let interactive requests reach the engine queue
+        except JobCancelled:
+            cancelled = True
+        cancelled = cancelled or bool(job.cancelled)
+        if not scored:
+            return {"n": 0, "n_errors": n_errors, "cancelled": cancelled}
+        scored.sort(key=lambda t: t[0])
+        rows = [{"gold": spec.rows[i].gold, "scores": s} for i, s in scored]
+        metrics, _ = await asyncio.to_thread(
+            compute_metrics, spec.labels, rows, spec.multi_label, thr, spec.bins
         )
-        if job.cancelled:
+        metrics["n_errors"] = n_errors
+        if cancelled:
             metrics["cancelled"] = True
             metrics["partial"] = True
         if spec.classifier:
             metrics["classifier"] = spec.classifier
         return metrics
 
-    ctx.extra.setdefault("job_kinds", {})["evaluate"] = {"validate": validate_job, "run": run_job}
+    def _require_classifier(name: str) -> None:
+        if ctx.store.get(name) is None:
+            raise LookupError(f"classifier {name!r} not found (deleted since the job was submitted)")
+
+    ctx.extra.setdefault("job_kinds", {})["evaluate"] = {
+        "validate": validate_job,
+        "run": run_job,
+        "resumable": True,
+    }
     return r
 
 

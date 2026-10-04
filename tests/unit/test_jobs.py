@@ -546,6 +546,27 @@ def test_evaluate_job_kind_runs_through_the_jobs_runner():
         assert [x["correct"] for x in items] == [True, True, True, False]
 
 
+def test_evaluate_job_isolates_bad_rows_and_validates_classifier_at_submit():
+    client, _eng, _ = make()
+    rows = [{"input": f"t{i}", "gold": "technical"} for i in range(5)]
+    rows[3]["input"] = "TOOLONG"
+    with client:
+        missing = submit(client, kind="evaluate", payload={"classifier": "nope", "rows": rows})
+        assert missing.status_code == 400 and "nope" in missing.json()["detail"]
+        client.put("/v1/classifiers/dept", json={"labels": LABELS})
+        bad = {"classifier": "dept", "rows": [{"input": "x", "gold": "q"}]}
+        bad_gold = submit(client, kind="evaluate", payload=bad)
+        assert bad_gold.status_code == 400 and "rows[0].gold" in bad_gold.json()["detail"]
+        r = submit(client, kind="evaluate", payload={"classifier": "dept", "rows": rows})
+        assert r.status_code == 202, r.text
+        done = wait(client, r.json()["id"])
+        assert done["status"] == "succeeded", done
+        assert done["result"]["n"] == 4 and done["result"]["n_errors"] == 1
+        assert done["result"]["classifier"] == "dept"
+        items = all_rows(client, done["id"])
+        assert [("error" in x) for x in items] == [False, False, False, True, False]
+
+
 def test_csv_export_neutralises_formulas():
     from clef_server.jobs import _csv_safe
 

@@ -188,10 +188,14 @@ def test_evaluate_saved_classifier_and_multi_label(api) -> None:
 
 
 class FakeJob:
-    def __init__(self, cancel_after: int | None = None) -> None:
+    def __init__(self, cancel_after: int | None = None, stored: list[dict] | None = None) -> None:
         self.total = 0
-        self.items: list[dict] = []
+        self.items: list[dict] = list(stored or [])
+        self.resume_from = len(self.items)
         self.cancel_after = cancel_after
+
+    async def stored_items(self) -> list[dict]:
+        return list(self.items[: self.resume_from])
 
     def set_total(self, n: int) -> None:
         self.total = n
@@ -230,7 +234,7 @@ def test_job_row_cap() -> None:
 
 
 def test_job_run_persists_items_and_returns_metrics() -> None:
-    client, eng, app = make(max_batch=3)
+    client, eng, app = make(max_batch=64, max_microbatch=3)
     kind = _kind(app)
     parsed = kind["validate"]({"labels": DEPT, "rows": _rows(7)})
     job = FakeJob()
@@ -245,7 +249,7 @@ def test_job_run_persists_items_and_returns_metrics() -> None:
 
 
 def test_job_run_cancel_returns_partial() -> None:
-    client, _, app = make(max_batch=2)
+    client, _, app = make(max_batch=64, max_microbatch=2)
     kind = _kind(app)
     parsed = kind["validate"]({"labels": DEPT, "rows": _rows(8)})
     job = FakeJob(cancel_after=2)
@@ -253,3 +257,164 @@ def test_job_run_cancel_returns_partial() -> None:
         result = asyncio.run(kind["run"](app.state.ctx, parsed, job))
     assert result["cancelled"] is True and result["partial"] is True and result["n"] == 2
     assert len(job.items) == 2
+
+
+def test_job_chunks_use_microbatch_not_max_batch() -> None:
+    client, eng, app = make()  # defaults: max_batch 64, max_microbatch 8
+    kind = _kind(app)
+    parsed = kind["validate"]({"labels": DEPT, "rows": _rows(20)})
+    with client:
+        asyncio.run(kind["run"](app.state.ctx, parsed, FakeJob()))
+    assert [len(c) for c in eng.calls] == [8, 8, 4]
+
+
+def test_job_row_error_is_isolated_and_excluded_from_metrics() -> None:
+    from tests.unit.test_jobs import SlowEngine
+
+    client, _, app = make(SlowEngine(), max_microbatch=4)
+    kind = _kind(app)
+    rows = _rows(8)
+    rows[2]["input"] = "TOOLONG"
+    parsed = kind["validate"]({"labels": DEPT, "rows": rows})
+    job = FakeJob()
+    with client:
+        result = asyncio.run(kind["run"](app.state.ctx, parsed, job))
+    assert [it["index"] for it in job.items] == list(range(8))
+    bad = job.items[2]
+    assert "too long" in bad["error"] and "predicted" not in bad
+    assert result["n"] == 7 and result["n_errors"] == 1
+    assert sum(r["support"] for r in result["per_label"]) == 7
+
+
+def test_job_waits_for_engine_loading() -> None:
+    from clef_server.engine import EngineNotReady
+
+    client, eng, app = make(job_engine_wait_s=30)
+    kind = _kind(app)
+    parsed = kind["validate"]({"labels": DEPT, "rows": _rows(3)})
+    eng.raises = EngineNotReady("loading")
+
+    async def go():
+        task = asyncio.create_task(kind["run"](app.state.ctx, parsed, FakeJob()))
+        await asyncio.sleep(0.2)
+        assert not task.done()  # backing off, not failed
+        eng.raises = None
+        return await task
+
+    with client:
+        result = asyncio.run(go())
+    assert result["n"] == 3 and result["n_errors"] == 0
+
+
+def test_job_resume_continues_from_stored_items() -> None:
+    client, eng, app = make(max_microbatch=2)
+    kind = _kind(app)
+    parsed = kind["validate"]({"labels": DEPT, "rows": _rows(6)})
+    first = FakeJob()
+    with client:
+        full = asyncio.run(kind["run"](app.state.ctx, parsed, first))
+        eng.calls.clear()
+        resumed = FakeJob(stored=first.items[:4])
+        result = asyncio.run(kind["run"](app.state.ctx, parsed, resumed))
+    assert sum(len(c) for c in eng.calls) == 2  # only rows 4 and 5 were classified again
+    assert [it["index"] for it in resumed.items] == list(range(6))
+    assert result["n"] == 6 and result["accuracy"] == full["accuracy"]
+    assert result["per_label"] == full["per_label"]
+
+
+def test_job_metrics_run_off_the_event_loop() -> None:
+    import threading
+
+    import clef_server.evaluation as ev
+
+    client, _, app = make()
+    kind = _kind(app)
+    parsed = kind["validate"]({"labels": DEPT, "rows": _rows(3)})
+    seen: list[bool] = []
+    real = ev.compute_metrics
+
+    def spy(*a, **k):
+        seen.append(threading.current_thread() is threading.main_thread())
+        return real(*a, **k)
+
+    ev.compute_metrics = spy
+    try:
+        with client:
+            asyncio.run(kind["run"](app.state.ctx, parsed, FakeJob()))
+    finally:
+        ev.compute_metrics = real
+    assert seen and not any(seen)
+
+
+def test_job_validate_resolves_saved_classifier(api) -> None:
+    client, _, app = api
+    kind = _kind(app)
+    with pytest.raises(ValueError, match="classifier 'nope' not found"):
+        kind["validate"]({"classifier": "nope", "rows": _rows(1)})
+    client.put("/v1/classifiers/dept", json={"labels": DEPT, "instructions": "Team?"})
+    spec = kind["validate"]({"classifier": "dept", "rows": _rows(2)})
+    assert spec.labels == DEPT and spec.instructions == "Team?" and spec.classifier == "dept"
+    with pytest.raises(ValueError, match=r"rows\[0\]\.gold"):  # gold is checked against the saved labels
+        kind["validate"]({"classifier": "dept", "rows": [{"input": "x", "gold": "zzz"}]})
+
+
+def test_job_run_turns_missing_classifier_into_clear_error(api) -> None:
+    _, _, app = api
+    kind = _kind(app)
+    spec = kind["validate"]({"labels": DEPT, "rows": _rows(1)})
+    spec.classifier = "gone"  # deleted after validation
+    app.state.ctx.store.get = lambda name: None
+    with pytest.raises(ValueError, match="not found"):
+        asyncio.run(kind["run"](app.state.ctx, spec, FakeJob()))
+
+
+# ------------------------------------------------------------------ garbage scores
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "x", None])
+def test_metrics_reject_non_finite_or_non_numeric_scores(bad) -> None:
+    rows = [ROWS[0], {"gold": "a", "scores": {"a": bad, "b": 0.1}}]
+    with pytest.raises(ValueError, match=r"rows\[1\]\.scores"):
+        compute_metrics(LABELS, rows)
+    multi = [{**r, "gold": [r["gold"]]} for r in rows]
+    with pytest.raises(ValueError, match=r"rows\[1\]\.scores"):
+        compute_metrics(LABELS, multi, multi_label=True)
+
+
+def test_metrics_reject_rows_without_any_label_key() -> None:
+    rows = [ROWS[0], {"gold": "a", "scores": {"A": 0.9, "B": 0.1}}]
+    with pytest.raises(ValueError, match=r"rows\[1\]\.scores.*none of the labels"):
+        compute_metrics(LABELS, rows)
+    with pytest.raises(ValueError, match=r"rows\[0\]\.scores"):
+        compute_metrics(LABELS, [{"gold": "a", "scores": {}}])
+
+
+def test_metrics_report_defaulted_and_clipped_scores() -> None:
+    clean, _ = compute_metrics(LABELS, ROWS)
+    assert clean["degenerate_rows"] == 0 and clean["defaulted_scores"] == 0 and clean["clipped_scores"] == 0
+    rows = [*ROWS, {"gold": "a", "scores": {"a": 0.9}}, {"gold": "b", "scores": {"a": 1.5, "b": -0.2}}]
+    for multi in (False, True):
+        data = [{**r, "gold": [r["gold"]] if multi else r["gold"]} for r in rows]
+        m, _ = compute_metrics(LABELS, data, multi)
+        assert m["degenerate_rows"] == 2 and m["defaulted_scores"] == 1 and m["clipped_scores"] == 2
+
+
+def test_metrics_endpoint_400_names_the_row(api) -> None:
+    client, _, _ = api
+    rows = [ROWS[0], {"gold": "a", "scores": {"A": 1.0}}]
+    r = client.post("/v1/evaluate/metrics", json={"labels": LABELS, "rows": rows})
+    assert r.status_code == 400 and "rows[1].scores" in r.json()["detail"]
+
+
+# ------------------------------------------------------------------ tracking
+
+
+def test_evaluate_is_tracked_in_stats_and_log() -> None:
+    client, _, _ = make(log_state=True)
+    with client:
+        assert client.post("/v1/evaluate", json={"labels": DEPT, "rows": _rows(4)}).status_code == 200
+        assert client.post("/v1/evaluate/metrics", json={"labels": LABELS, "rows": ROWS}).status_code == 200
+        entries = client.get("/v1/log").json()["entries"]
+        assert [e["endpoint"] for e in entries] == ["/v1/evaluate"]
+        assert entries[0]["status"] == 200 and entries[0]["n_records"] == 4
+        assert client.get("/v1/stats").json()["total"] == 1
