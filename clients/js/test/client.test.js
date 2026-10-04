@@ -309,3 +309,95 @@ test('jobResults types score rows and errors surface as ClefError', async () => 
   const bad = client(mock(json(404, { detail: "job 'x' not found", request_id: 'r' })));
   await assert.rejects(bad.job('x'), (e) => e instanceof ClefError && e.status === 404);
 });
+
+// --- review fixes: duplicate submits, totals, warnings, partial results ---
+
+const reset = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+const refused = () => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }) });
+
+test('submitJob does not retry a connection reset after the request was sent', async () => {
+  const m = mock((_c, n) => (n < 2 ? reset() : json(202, jobBody('queued'))));
+  await assert.rejects(client(m).submitJob('classify', { inputs: ['a'] }), (e) => e instanceof ClefError && e.status === null);
+  assert.equal(m.calls.length, 1); // a retry could have queued the job twice
+  const m2 = mock((_c, n) => (n < 2 ? new TypeError('fetch failed') : json(202, jobBody('queued'))));
+  await assert.rejects(client(m2).classifyJob(['a'], ['x', 'y']));
+  assert.equal(m2.calls.length, 1);
+});
+
+test('submitJob retries connect errors, 503 and 429 (the server never accepted the job)', async () => {
+  const m = mock((_c, n) => (n < 2 ? refused() : json(202, jobBody('queued'))));
+  assert.equal((await client(m).submitJob('classify', {})).id, 'job_1');
+  assert.equal(m.calls.length, 2);
+  const m2 = mock((_c, n) => (n < 3 ? json(n === 1 ? 503 : 429, { detail: 'busy' }, { 'Retry-After': '0' }) : json(202, jobBody('queued'))));
+  assert.equal((await client(m2).submitJob('classify', {})).id, 'job_1');
+  assert.equal(m2.calls.length, 3);
+});
+
+test('with an idempotencyKey the key is sent and a reset is safely retried', async () => {
+  const m = mock((_c, n) => (n < 2 ? reset() : json(202, jobBody('queued'))));
+  const job = await client(m).submitJob('classify', { inputs: ['a'] }, { idempotencyKey: 'batch-1' });
+  assert.equal(job.id, 'job_1');
+  assert.equal(m.calls.length, 2);
+  assert.deepEqual(m.calls.map((c) => c.headers['Idempotency-Key']), ['batch-1', 'batch-1']);
+  const m2 = mock(() => json(202, jobBody('queued')));
+  await client(m2).classifyJob(['a'], ['x', 'y'], { idempotencyKey: 'k2' });
+  assert.equal(m2.calls[0].headers['Idempotency-Key'], 'k2');
+  await client(m2).submitJob('classify', {});
+  assert.equal('Idempotency-Key' in m2.calls[1].headers, false);
+});
+
+test('reads and other calls still retry network errors', async () => {
+  const m = mock((_c, n) => (n < 2 ? reset() : json(200, jobBody('running', 1, 3))));
+  assert.equal((await client(m).job('job_1')).done, 1);
+  assert.equal(m.calls.length, 2);
+});
+
+test('jobs() returns an array that also carries total / limit / offset', async () => {
+  const m = mock(json(200, { jobs: [jobBody(), jobBody('succeeded')], total: 7, limit: 2, offset: 4 }));
+  const page = await client(m).jobs({ limit: 2, offset: 4 });
+  assert.equal(Array.isArray(page), true);
+  assert.deepEqual(page.map((j) => j.status), ['queued', 'succeeded']);
+  assert.deepEqual([page.total, page.limit, page.offset, page.hasMore], [7, 2, 4, true]);
+});
+
+test('Job exposes warnings and hasErrors; ok keeps meaning "ran to its end"', async () => {
+  const body = jobBody('succeeded', 3, 3, { warnings: ['1 of 3 item(s) failed'] });
+  body.progress.failed = 1;
+  const job = await client(mock(json(200, body))).job('job_1');
+  assert.deepEqual([job.ok, job.hasErrors, job.failed, job.warnings], [true, true, 1, ['1 of 3 item(s) failed']]);
+  const clean = await client(mock(json(200, jobBody('succeeded', 3, 3)))).job('job_1');
+  assert.deepEqual([clean.ok, clean.hasErrors, clean.warnings], [true, false, []]);
+});
+
+test('jobResults wait:true polls through empty pages until the job is finished', async () => {
+  const pages = [
+    { kind: 'classify', items: [{ index: 0, error: 'x' }], next_offset: 1 },
+    { kind: 'classify', items: [], next_offset: 1 }, // running, nothing new yet
+    { kind: 'classify', items: [{ index: 1, error: 'y' }], next_offset: 2 },
+    { kind: 'classify', items: [], next_offset: null },
+  ];
+  const m = mock(() => json(200, pages.shift()));
+  const c = client(m);
+  const naps = [];
+  c._sleep = async (ms) => naps.push(ms);
+  const got = [];
+  for await (const it of c.jobResults('job_1', { wait: true, pollMs: 250 })) got.push(it.index);
+  assert.deepEqual(got, [0, 1]);
+  assert.deepEqual(naps, [250]);
+
+  const partial = [{ kind: 'classify', items: [{ index: 0, error: 'x' }], next_offset: 1 }, { kind: 'classify', items: [], next_offset: 1 }];
+  const m2 = mock(() => json(200, partial.shift()));
+  const seen = [];
+  for await (const it of client(m2).jobResults('job_1')) seen.push(it.index); // default: what is stored now
+  assert.deepEqual(seen, [0]);
+});
+
+test('redeliverWebhook posts to the redeliver endpoint', async () => {
+  const m = mock(() => json(200, jobBody('succeeded')));
+  const c = client(m);
+  assert.equal((await c.redeliverWebhook('job_1')).status, 'succeeded');
+  await c.redeliverWebhook('job_1', { event: 'job.failed' });
+  assert.equal(m.calls[0].method, 'POST');
+  assert.equal(m.calls[0].url, 'http://127.0.0.1:8910/v1/jobs/job_1/webhook/redeliver');
+  assert.equal(m.calls[1].url, 'http://127.0.0.1:8910/v1/jobs/job_1/webhook/redeliver?event=job.failed');
+});

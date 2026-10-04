@@ -24,6 +24,13 @@ const clean = (o) => {
   return out;
 };
 
+// Errors raised before a single byte of the request could have reached the server: always safe to retry.
+const CONNECT_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT']);
+const isConnectError = (e) => {
+  for (let c = e; c; c = c.cause) if (c.code && CONNECT_CODES.has(c.code)) return true;
+  return false;
+};
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const enc = encodeURIComponent;
 
@@ -103,7 +110,10 @@ export function parseJob(body) {
     finishedAt: body.finished_at ?? null,
     webhook: body.webhook ?? null,
     finished: TERMINAL.has(body.status),
+    // `ok`: the job ran to its end. Items may still have failed: check `hasErrors` / `failed` / `warnings`.
     ok: body.status === 'succeeded',
+    hasErrors: (p.failed ?? 0) > 0,
+    warnings: body.warnings ?? [],
     raw: body,
   };
 }
@@ -145,8 +155,8 @@ export class ClefClient {
     this._sleep = sleep;
   }
 
-  async _once(method, path, body) {
-    const headers = { Accept: 'application/json' };
+  async _once(method, path, body, extraHeaders) {
+    const headers = { Accept: 'application/json', ...extraHeaders };
     if (this.apiKey) headers['X-API-Key'] = this.apiKey;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     const init = { method, headers };
@@ -165,6 +175,7 @@ export class ClefClient {
       const err = new ClefError(null, timedOut ? `timeout after ${this.timeoutMs} ms` : `network error: ${e && e.message}`);
       err.cause = e;
       err.retryable = !timedOut;
+      err.connectError = !timedOut && isConnectError(e); // nothing was sent: safe to retry any request
       throw err;
     } finally {
       if (timer) clearTimeout(timer);
@@ -192,12 +203,18 @@ export class ClefClient {
     throw err;
   }
 
-  async _request(method, path, body) {
+  /**
+   * `retryNetwork: false` marks a request that must not be repeated once it may have reached the server (a
+   * connection reset after `POST /v1/jobs` could otherwise queue the job twice): only 429 / 503 answers (the
+   * server refused it) and connect errors are retried.
+   */
+  async _request(method, path, body, { headers, retryNetwork = true } = {}) {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this._once(method, path, body);
+        return await this._once(method, path, body, headers);
       } catch (err) {
         if (!(err instanceof ClefError) || !err.retryable || attempt >= this.retries) throw err;
+        if (err.status === null && !retryNetwork && !err.connectError) throw err;
         const wait =
           err.retryAfter != null
             ? Math.min(err.retryAfter * 1000, MAX_RETRY_AFTER_MS)
@@ -258,14 +275,19 @@ export class ClefClient {
   }
 
   // --- async jobs (large batches; see docs/jobs.md) ---
-  /** Queue a job and return at once. `webhook`: a URL string or { url, secret, events }. */
-  async submitJob(kind, payload, { webhook, metadata } = {}) {
+  /**
+   * Queue a job and return at once. `webhook`: a URL string or { url, secret, events }.
+   * Without `idempotencyKey` a network error after the request was sent is NOT retried (it could duplicate the
+   * job). With one, the server returns the job created the first time, so retrying is safe and happens.
+   */
+  async submitJob(kind, payload, { webhook, metadata, idempotencyKey } = {}) {
     const hook = typeof webhook === 'string' ? { url: webhook } : webhook;
-    return parseJob(await this._request('POST', '/v1/jobs', clean({ kind, payload, webhook: hook, metadata })));
+    const opts = idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : { retryNetwork: false };
+    return parseJob(await this._request('POST', '/v1/jobs', clean({ kind, payload, webhook: hook, metadata }), opts));
   }
 
   /** classifyMany without holding a connection open: `labels` or a saved `classifier` name. */
-  classifyJob(inputs, labels, { classifier, instructions, multiLabel = false, threshold, model = 'clef-flash', webhook, metadata } = {}) {
+  classifyJob(inputs, labels, { classifier, instructions, multiLabel = false, threshold, model = 'clef-flash', webhook, metadata, idempotencyKey } = {}) {
     const payload = clean({
       labels,
       classifier,
@@ -275,17 +297,29 @@ export class ClefClient {
       model,
     });
     payload.inputs = inputs;
-    return this.submitJob('classify', payload, { webhook, metadata });
+    return this.submitJob('classify', payload, { webhook, metadata, idempotencyKey });
   }
 
   async job(id) {
     return parseJob(await this._request('GET', `/v1/jobs/${enc(id)}`));
   }
 
-  /** One page of jobs, newest first. */
+  /** One page of jobs, newest first: an array of Jobs that also has `total`, `limit`, `offset` and `hasMore`. */
   async jobs({ status, kind, limit = 50, offset = 0 } = {}) {
     const q = new URLSearchParams(clean({ status, kind, limit, offset: offset || undefined }));
-    return ((await this._request('GET', `/v1/jobs?${q}`)).jobs || []).map(parseJob);
+    const body = await this._request('GET', `/v1/jobs?${q}`);
+    const page = (body.jobs || []).map(parseJob);
+    page.total = body.total ?? null;
+    page.limit = body.limit ?? limit;
+    page.offset = body.offset ?? offset;
+    page.hasMore = page.total !== null && page.offset + page.length < page.total;
+    return page;
+  }
+
+  /** Retry a webhook delivery that ended `failed` (same delivery id). `event` defaults to the job's terminal event. */
+  async redeliverWebhook(id, { event } = {}) {
+    const q = event ? `?${new URLSearchParams({ event })}` : '';
+    return parseJob(await this._request('POST', `/v1/jobs/${enc(id)}/webhook/redeliver${q}`));
   }
 
   async cancelJob(id) {
@@ -310,14 +344,23 @@ export class ClefClient {
     }
   }
 
-  /** Async iterator over every result row currently stored, in input order, page by page. */
-  async *jobResults(id, { pageSize = 500, offset = 0 } = {}) {
+  /**
+   * Async iterator over result rows in input order, page by page.
+   * PARTIAL while the job runs: by default it ends at the rows stored right now (call `waitJob` first for the
+   * whole result). `wait: true` keeps polling every `pollMs` until the job is finished and every row was yielded.
+   */
+  async *jobResults(id, { pageSize = 500, offset = 0, wait = false, pollMs = 1000 } = {}) {
     for (;;) {
       const q = new URLSearchParams({ offset, limit: pageSize });
       const page = await this._request('GET', `/v1/jobs/${enc(id)}/results?${q}`);
-      for (const row of page.items || []) yield parseJobItem(row, page.kind);
-      if (page.next_offset == null || !(page.items || []).length) return;
+      const items = page.items || [];
+      for (const row of items) yield parseJobItem(row, page.kind);
+      if (page.next_offset == null) return;
       offset = page.next_offset;
+      if (!items.length) {
+        if (!wait) return;
+        await this._sleep(pollMs);
+      }
     }
   }
 

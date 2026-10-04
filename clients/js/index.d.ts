@@ -96,6 +96,11 @@ export interface WebhookSpec {
 export interface JobOptions {
   webhook?: string | WebhookSpec;
   metadata?: Record<string, unknown>;
+  /**
+   * Resubmitting with the same key (same API key) returns the job created the first time. Without one, a
+   * network error after the request was sent is not retried (it could create a duplicate job).
+   */
+  idempotencyKey?: string;
 }
 
 export interface ClassifyJobOptions extends JobOptions {
@@ -127,8 +132,22 @@ export interface Job {
   webhook: Record<string, any> | null;
   /** succeeded, failed or cancelled. */
   finished: boolean;
+  /** The job ran to its end (status `succeeded`). Items may still have failed: see `hasErrors`. */
   ok: boolean;
+  /** At least one item failed (its row has `error`). */
+  hasErrors: boolean;
+  /** e.g. "3 of 100 item(s) failed ...", failed webhook deliveries. */
+  warnings: string[];
   raw: Record<string, any>;
+}
+
+/** An array of Jobs plus the server's paging info. */
+export interface JobPage extends Array<Job> {
+  /** All jobs matching the filter, not just this page. */
+  total: number | null;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface JobItem {
@@ -176,11 +195,16 @@ export class ClefClient {
   submitJob(kind: string, payload: Record<string, any>, opts?: JobOptions): Promise<Job>;
   classifyJob(inputs: unknown[], labels?: Labels | null, opts?: ClassifyJobOptions): Promise<Job>;
   job(id: string): Promise<Job>;
-  jobs(opts?: { status?: JobStatus; kind?: string; limit?: number; offset?: number }): Promise<Job[]>;
+  jobs(opts?: { status?: JobStatus; kind?: string; limit?: number; offset?: number }): Promise<JobPage>;
+  redeliverWebhook(id: string, opts?: { event?: JobEvent }): Promise<Job>;
   cancelJob(id: string): Promise<Job>;
   deleteJob(id: string): Promise<{ deleted: string }>;
   waitJob(id: string, opts?: WaitJobOptions): Promise<Job>;
-  jobResults(id: string, opts?: { pageSize?: number; offset?: number }): AsyncGenerator<JobItem, void, undefined>;
+  /** Partial while the job runs unless `wait: true` (polls every `pollMs` until the job is finished). */
+  jobResults(
+    id: string,
+    opts?: { pageSize?: number; offset?: number; wait?: boolean; pollMs?: number },
+  ): AsyncGenerator<JobItem, void, undefined>;
   classifier(name: string): Classifier;
   listClassifiers(): Promise<Array<Record<string, any>>>;
   saveClassifier(name: string, def?: ClassifierDefinition): Promise<Record<string, any>>;
