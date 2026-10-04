@@ -48,6 +48,8 @@ class _Sampler(threading.Thread):
         self.torch, self.device, self.period = torch_mod, device, period
         self.stop_evt = threading.Event()
         self.peak_used = 0.0
+        self.samples = 0  # successful device-memory samples
+        self.error: str | None = None  # last sampling failure
         self.peak_rss = 0.0
         self.baseline = None
 
@@ -62,10 +64,23 @@ class _Sampler(threading.Thread):
                 if self.baseline is None:
                     self.baseline = used
                 self.peak_used = max(self.peak_used, used)
-            except Exception:
-                pass
+                self.samples += 1
+            except Exception as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
             self.peak_rss = max(self.peak_rss, proc.memory_info().rss / GB)
             self.stop_evt.wait(self.period)
+
+
+def sampler_metrics(sampler) -> dict:
+    """Device-wide peak / baseline, or None (never a bogus 0.0) when no sample succeeded."""
+    ok = sampler.samples > 0
+    out = {
+        "peak_device_used_gb": round(sampler.peak_used, 2) if ok else None,
+        "device_baseline_gb": round(sampler.baseline, 2) if ok and sampler.baseline is not None else None,
+    }
+    if sampler.error:
+        out["device_sampler_error"] = sampler.error
+    return out
 
 
 def pct(values: list[float], q: int) -> float:
@@ -122,6 +137,8 @@ async def run(args) -> dict:
     )
     for note in load_info.notes if load_info else []:
         print(f"[{args.label}] {note}", flush=True)
+    for warning in load_info.warnings if load_info else []:
+        print(f"[{args.label}] WARNING {warning}", flush=True)
     import psutil
 
     after_load_alloc = torch.cuda.memory_allocated() / GB
@@ -151,6 +168,7 @@ async def run(args) -> dict:
         "weights_on_device_gb": round(after_load_alloc, 2),
         "host_rss_after_load_gb": round(steady_rss, 2),
         "records": len(records),
+        "load_warnings": list(load_info.warnings) if load_info else [],
     }
     if args.save_reference:
         Path(args.save_reference).parent.mkdir(parents=True, exist_ok=True)
@@ -186,8 +204,7 @@ async def run(args) -> dict:
     sampler.join(2)
     result["peak_allocated_gb"] = round(torch.cuda.max_memory_allocated() / GB, 2)
     result["peak_reserved_gb"] = round(torch.cuda.max_memory_reserved() / GB, 2)
-    result["peak_device_used_gb"] = round(sampler.peak_used, 2)
-    result["device_baseline_gb"] = round(sampler.baseline or 0.0, 2)
+    result.update(sampler_metrics(sampler))
     result["peak_host_rss_gb"] = round(
         max(sampler.peak_rss, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6), 2
     )
