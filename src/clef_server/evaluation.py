@@ -442,6 +442,9 @@ class EvaluateRequest(_Base):
     rows: list[EvalRow] = Field(min_length=1)
     bins: int = Field(10, ge=2, le=100)
     include_predictions: bool = Field(False, description="return one prediction object per row")
+    snapshot_of: str | None = Field(
+        None, description="set by the jobs API: the saved classifier whose definition was copied at submit"
+    )
 
     @field_validator("labels")
     @classmethod
@@ -540,9 +543,8 @@ def router(ctx: AppContext) -> APIRouter:
         names = label_names(labels)
         for i, row in enumerate(body.rows):  # fail before spending GPU time
             _gold_list(row.gold, multi, names, i)
-        return Spec(
-            labels, instructions, multi, thr, body.rows, body.bins, body.include_predictions, body.classifier
-        )
+        name = body.classifier or body.snapshot_of
+        return Spec(labels, instructions, multi, thr, body.rows, body.bins, body.include_predictions, name)
 
     async def resolve(body: EvaluateRequest) -> Spec:
         return await run_in_threadpool(resolve_sync, body)
@@ -634,8 +636,9 @@ def router(ctx: AppContext) -> APIRouter:
     def validate_job(payload: dict[str, Any]) -> Spec:
         """Payload -> resolved Spec (saved classifier loaded, labels and gold checked). Raises ValueError.
 
-        Runs at submit (400) and again when the job starts, so a classifier deleted in between fails the job
-        with a clear message. Blocking: the jobs API calls it in a thread.
+        Runs at submit (400) and again when the job starts. At submit the jobs API replaces a saved
+        ``classifier`` by its definition (``snapshot_job``), so later edits or deletes never affect the job.
+        Blocking: the jobs API calls it in a thread.
         """
         from pydantic import ValidationError
 
@@ -660,11 +663,6 @@ def router(ctx: AppContext) -> APIRouter:
         """
         from .jobs import ItemError, JobCancelled, decide_resilient
 
-        if spec.classifier is not None:  # snapshot is in `spec`; this only catches a deletion since validate
-            try:
-                await run_in_threadpool(_require_classifier, spec.classifier)
-            except LookupError as exc:
-                raise ValueError(str(exc)) from exc
         total = len(spec.rows)
         job.set_total(total)
         thr = resolve_threshold(spec.threshold, cfg) if spec.multi_label else None
@@ -745,13 +743,23 @@ def router(ctx: AppContext) -> APIRouter:
             metrics["classifier"] = spec.classifier
         return metrics
 
-    def _require_classifier(name: str) -> None:
-        if ctx.store.get(name) is None:
-            raise LookupError(f"classifier {name!r} not found (deleted since the job was submitted)")
+    def snapshot_job(payload: dict[str, Any], spec: Spec) -> dict[str, Any]:
+        """Replace ``classifier`` by the definition it resolved to, like the built-in kinds (docs/jobs.md)."""
+        if payload.get("classifier") is None:
+            return payload
+        drop = ("classifier", "labels", "instructions", "multi_label", "threshold", "snapshot_of")
+        snap = {k: v for k, v in payload.items() if k not in drop}
+        snap.update(labels=spec.labels, multi_label=spec.multi_label, snapshot_of=payload["classifier"])
+        if spec.instructions is not None:
+            snap["instructions"] = spec.instructions
+        if spec.multi_label and spec.threshold is not None:
+            snap["threshold"] = spec.threshold
+        return snap
 
     ctx.extra.setdefault("job_kinds", {})["evaluate"] = {
         "validate": validate_job,
         "run": run_job,
+        "snapshot": snapshot_job,
         "resumable": True,
     }
     return r

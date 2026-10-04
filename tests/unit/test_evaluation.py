@@ -358,14 +358,16 @@ def test_job_validate_resolves_saved_classifier(api) -> None:
         kind["validate"]({"classifier": "dept", "rows": [{"input": "x", "gold": "zzz"}]})
 
 
-def test_job_run_turns_missing_classifier_into_clear_error(api) -> None:
+def test_job_snapshot_replaces_classifier_with_its_definition(api) -> None:
     _, _, app = api
     kind = _kind(app)
-    spec = kind["validate"]({"labels": DEPT, "rows": _rows(1)})
-    spec.classifier = "gone"  # deleted after validation
-    app.state.ctx.store.get = lambda name: None
-    with pytest.raises(ValueError, match="not found"):
-        asyncio.run(kind["run"](app.state.ctx, spec, FakeJob()))
+    app.state.ctx.store.get = lambda name: {"kind": "classify", "labels": DEPT, "instructions": "Route it."}
+    payload = {"classifier": "tri", "rows": _rows(1)}
+    snap = kind["snapshot"](payload, kind["validate"](payload))
+    assert "classifier" not in snap and snap["snapshot_of"] == "tri"
+    assert snap["labels"] == DEPT and snap["instructions"] == "Route it."
+    app.state.ctx.store.get = lambda name: None  # deleted after submit: the snapshot still validates
+    assert kind["validate"](snap).classifier == "tri"
 
 
 # ------------------------------------------------------------------ garbage scores

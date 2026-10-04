@@ -76,9 +76,9 @@ curl -s http://127.0.0.1:8910/v1/jobs -H 'Content-Type: application/json' \
 
 Invalid payloads are rejected at submit (400): unknown fields, too many rows, a gold label outside the label set and,
 with `classifier`, a classifier that does not exist (the saved labels are loaded at submit and the gold labels are
-checked against them). The classifier is looked up again when the job starts, so deleting it while the job is queued
-fails the job with a clear message; editing it in between means the job uses the version current at start (and, on a
-resume, at the resume).
+checked against them). The classifier's definition is **copied into the job at submit** (`snapshot_of` names it), the
+same as for the `classify` and `score` kinds, so editing or deleting it afterwards does not affect the job, even
+across a resume.
 
 Every classified row is stored as a job item (`index`, `input`, `gold`, `predicted`, `confidence`, `correct`,
 `scores`), progress counts rows, and the job result is the metrics object above plus `n_errors`.

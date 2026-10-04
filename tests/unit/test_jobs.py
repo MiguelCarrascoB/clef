@@ -884,3 +884,19 @@ def test_old_database_without_idem_key_is_migrated():
     assert store.create("classify", None, {}, None, None, 10, "k")["id"] != "job_old"
     assert store.create("classify", None, {}, None, None, 10, "k").get("replayed")
     store.close()
+
+
+def test_evaluate_job_snapshots_the_saved_classifier_at_submit():
+    client, _eng, _ = make()
+    with client:
+        assert client.put("/v1/classifiers/tri", json={"kind": "classify", "labels": LABELS}).status_code in (
+            200,
+            201,
+        )
+        rows = [{"input": "a", "gold": "technical"}, {"input": "b", "gold": "billing"}]
+        r = submit(client, kind="evaluate", payload={"classifier": "tri", "rows": rows})
+        assert r.status_code == 202, r.text
+        assert client.delete("/v1/classifiers/tri").status_code == 200  # gone before/while the job runs
+        done = wait(client, r.json()["id"])
+        assert done["status"] == "succeeded", done
+        assert done["result"]["n"] == 2 and done["result"]["classifier"] == "tri"

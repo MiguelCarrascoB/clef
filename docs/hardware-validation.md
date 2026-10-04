@@ -61,8 +61,10 @@ clef stop
 python bench/parity.py               # dtype / quantization parity vs bf16 (needs the GPU, server stopped)
 ```
 
-NVIDIA with 16 GB: also run `CLEF_QUANT=int8` and `CLEF_QUANT=nf4` (`pip install bitsandbytes`) through `clef serve`,
-`pytest -m gpu` and `bench/parity.py`.
+Smaller-memory modes ([memory.md](memory.md)): run `bench/memory_bench.py` for bf16, `--offload cpu --max-device-gb 15`
+(16 GB cards), `--quant int8 --offload cpu` (12 GB cards) and, on NVIDIA, `--quant int8 --quant-backend bnb` and
+`--quant nf4` (`pip install bitsandbytes`). Save the bf16 run with `--save-reference` and pass it to the others with
+`--reference` (commands in memory.md), then paste the JSON results.
 
 Optionally compare padding: `CLEF_PAD_MULTIPLE=64` (default) vs `8` vs `128`, since the best value was only measured on ROCm.
 
