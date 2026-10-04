@@ -884,6 +884,18 @@
             "title": "Rows",
             "type": "array"
           },
+          "snapshot_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "set by the jobs API: the saved classifier whose definition was copied at submit",
+            "title": "Snapshot Of"
+          },
           "threshold": {
             "anyOf": [
               {
@@ -933,6 +945,24 @@
               }
             ],
             "title": "Classifier"
+          },
+          "clipped_scores": {
+            "default": 0,
+            "description": "scores outside [0, 1] that were clamped",
+            "title": "Clipped Scores",
+            "type": "integer"
+          },
+          "defaulted_scores": {
+            "default": 0,
+            "description": "label keys missing from `scores`, counted as 0.0",
+            "title": "Defaulted Scores",
+            "type": "integer"
+          },
+          "degenerate_rows": {
+            "default": 0,
+            "description": "rows with a missing label key (taken as 0), a clipped score or all-zero scores",
+            "title": "Degenerate Rows",
+            "type": "integer"
           },
           "labels": {
             "items": {
@@ -1206,6 +1236,14 @@
             "title": "Status",
             "type": "string"
           },
+          "warnings": {
+            "description": "partial failure: failed items, failed webhook deliveries",
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          },
           "webhook": {
             "anyOf": [
               {
@@ -1446,6 +1484,24 @@
             "additionalProperties": true,
             "title": "Calibration",
             "type": "object"
+          },
+          "clipped_scores": {
+            "default": 0,
+            "description": "scores outside [0, 1] that were clamped",
+            "title": "Clipped Scores",
+            "type": "integer"
+          },
+          "defaulted_scores": {
+            "default": 0,
+            "description": "label keys missing from `scores`, counted as 0.0",
+            "title": "Defaulted Scores",
+            "type": "integer"
+          },
+          "degenerate_rows": {
+            "default": 0,
+            "description": "rows with a missing label key (taken as 0), a clipped score or all-zero scores",
+            "title": "Degenerate Rows",
+            "type": "integer"
           },
           "labels": {
             "items": {
@@ -3807,6 +3863,26 @@
       },
       "post": {
         "operationId": "submit_v1_jobs_post",
+        "parameters": [
+          {
+            "description": "same key again (same API key) returns the job created the first time",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "same key again (same API key) returns the job created the first time",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -4451,6 +4527,152 @@
           }
         },
         "summary": "Result rows: JSON page, or a full ndjson / csv stream",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
+    "/v1/jobs/{job_id}/webhook/redeliver": {
+      "post": {
+        "operationId": "redeliver_webhook_v1_jobs__job_id__webhook_redeliver_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "default: the job's own terminal event",
+            "in": "query",
+            "name": "event",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "job.succeeded",
+                    "job.failed",
+                    "job.cancelled",
+                    "job.progress"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "default: the job's own terminal event",
+              "title": "Event"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing/invalid API key"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unknown classifier"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many saved classifiers"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limit exceeded (see Retry-After)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Model not ready or GPU out of memory"
+          }
+        },
+        "summary": "Retry a webhook delivery that failed",
         "tags": [
           "jobs"
         ]
