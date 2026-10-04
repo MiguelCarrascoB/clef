@@ -459,3 +459,238 @@ def test_pending_delivery_is_retried_after_restart():
         d = delivery(client, row["id"], "job.succeeded")
         assert d["status"] == "delivered" and d["id"] == "dlv_1" and d["attempts"] == 1
         assert rec.requests[0].headers["X-Clef-Delivery"] == "dlv_1"
+
+
+# ------------------------------------------------------------------ review fixes: SSRF via embedded IPv4
+
+
+@pytest.mark.parametrize(
+    "addr",
+    [
+        "64:ff9b::a00:5",  # NAT64 -> 10.0.0.5
+        "64:ff9b::7f00:1",  # NAT64 -> 127.0.0.1
+        "64:ff9b::a9fe:a9fe",  # NAT64 -> 169.254.169.254 (metadata)
+        "64:ff9b:1:a00:0:500:0:0",  # RFC 8215 local-use NAT64 /48 -> 10.0.0.5
+        "2002:a00:5::1",  # 6to4 -> 10.0.0.5
+        "2002:7f00:1::",  # 6to4 -> 127.0.0.1
+        "2001:0:4136:e378:8000:63bf:f5ff:fffa",  # Teredo, embedded client 10.0.0.5
+        "::ffff:10.0.0.5",
+        "fec0::1",  # site-local
+        "100::1",  # reserved (discard prefix)
+    ],
+)
+def test_embedded_ipv4_and_reserved_v6_are_refused(addr):
+    p = policy("hooks.example.com", "10.1.0.0/16")
+    t = p.check_url("https://hooks.example.com/")
+    with pytest.raises(WebhookRefused):
+        p.check_addresses(t, [addr])
+
+
+def test_embedded_ipv4_is_judged_by_the_ipv4_policy():
+    p = policy("hooks.example.com", "10.1.0.0/16")
+    t = p.check_url("https://hooks.example.com/")
+    assert p.check_addresses(t, ["64:ff9b::5db8:d822"])  # NAT64 -> 93.184.216.34 (public): fine
+    assert p.check_addresses(t, ["64:ff9b::a01:203"])  # NAT64 -> 10.1.2.3, explicitly listed
+    assert p.check_addresses(t, ["2002:5db8:d822::1"])  # 6to4 -> public
+    with pytest.raises(WebhookRefused):  # link-local is refused even when a CIDR would cover it
+        policy("hooks.example.com", "0.0.0.0/0").check_addresses(t, ["64:ff9b::a9fe:a9fe"])
+    with pytest.raises(WebhookRefused):  # a literal NAT64 URL needs the embedded address listed
+        p.check_url("http://[64:ff9b::a00:5]/x")
+    assert p.check_url("http://[64:ff9b::a01:203]/x").literal
+
+
+def test_loopback_v6_stays_allow_listable():
+    assert policy("::1").check_url("http://[::1]:9/x").host == "::1"
+    with pytest.raises(WebhookRefused):
+        policy("hooks.example.com").check_url("http://[::1]/x")
+
+
+# ------------------------------------------------------------------ review fixes: dispatcher bookkeeping
+
+
+def raw_dispatcher(**kw):
+    records: dict[str, dict] = {}
+    job = {"id": "job_1", "status": "succeeded", "webhook": {"deliveries": {}}}
+    hook = {"url": "https://hooks.example.com/clef"}
+
+    async def resolve(host: str, port: int) -> list[str]:
+        return [PUBLIC]
+
+    async def nosleep(_: float) -> None:
+        return None
+
+    args: dict[str, Any] = {
+        "transport": httpx.MockTransport(Recorder(200)),
+        "resolver": resolve,
+        "sleep": nosleep,
+    }
+    args.update(kw)
+    get_job = args.pop("get_job", lambda jid: {"webhook": hook, "job": job})
+    set_delivery = args.pop("set_delivery", lambda jid, ev, rec_: records.__setitem__(ev, dict(rec_)))
+    return WebhookDispatcher(policy("hooks.example.com"), get_job, set_delivery, **args), records
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_marks_the_delivery_failed_instead_of_pending():
+    async def boom(host: str, port: int) -> list[str]:
+        raise RuntimeError("resolver bug")
+
+    d, records = raw_dispatcher(resolver=boom)
+    await d.deliver("job_1", "job.succeeded")
+    r = records["job.succeeded"]
+    assert r["status"] == "failed" and "RuntimeError" in r["last_error"] and r["attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_still_propagates_out_of_deliver():
+    import asyncio
+
+    gate = asyncio.Event()
+
+    async def slow_sleep(_: float) -> None:
+        await gate.wait()
+
+    d, _ = raw_dispatcher(transport=httpx.MockTransport(Recorder(500)), sleep=slow_sleep)
+    task = asyncio.ensure_future(d.deliver("job_1", "job.succeeded"))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_set_delivery_failure_is_logged_not_swallowed_silently(caplog):
+    def broken(jid, ev, rec_):
+        raise RuntimeError("database is locked")
+
+    d, _ = raw_dispatcher(set_delivery=broken)
+    with caplog.at_level("WARNING", logger="clef"):
+        await d.deliver("job_1", "job.succeeded")
+    assert any(
+        "cannot persist delivery state" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_calls_run_off_the_event_loop():
+    import threading
+
+    main = threading.get_ident()
+    threads: dict[str, int] = {}
+    hook = {"url": "https://hooks.example.com/clef"}
+    job = {"id": "job_1", "status": "succeeded", "webhook": {"deliveries": {}}}
+
+    def get_job(jid):
+        threads["get"] = threading.get_ident()
+        return {"webhook": hook, "job": job}
+
+    def set_delivery(jid, ev, rec_):
+        threads["set"] = threading.get_ident()
+
+    d, _ = raw_dispatcher(get_job=get_job, set_delivery=set_delivery)
+    await d.deliver("job_1", "job.succeeded")
+    assert threads["get"] != main and threads["set"] != main
+
+
+@pytest.mark.asyncio
+async def test_progress_throttle_entry_is_dropped_on_the_terminal_event():
+    d, _ = raw_dispatcher()
+    d.progress("job_1", True)
+    assert "job_1" in d._last_progress
+    d.enqueue("job_1", "job.succeeded")
+    assert "job_1" not in d._last_progress
+    await d.drain()
+
+
+@pytest.mark.asyncio
+async def test_default_retry_schedule_spans_minutes_and_is_capped():
+    sleeps: list[float] = []
+
+    async def record_sleep(s: float) -> None:
+        sleeps.append(s)
+
+    d, records = raw_dispatcher(
+        transport=httpx.MockTransport(Recorder(503)),
+        sleep=record_sleep,
+        attempts=10,
+        base_delay=2.0,
+        max_delay=120.0,
+    )
+    await d.deliver("job_1", "job.succeeded")
+    assert records["job.succeeded"]["status"] == "failed" and len(sleeps) == 9
+    assert max(sleeps) <= 120 * 1.25 and sleeps[6] >= 120 * 0.75  # capped at 120 s
+    assert 300 < sum(sleeps) < 700  # about eight minutes in all, not the old 30 seconds
+    cfg = Config()
+    assert (cfg.webhook_attempts, cfg.webhook_backoff_s, cfg.webhook_backoff_cap_s) == (10, 2.0, 120.0)
+
+
+# ------------------------------------------------------------------ review fixes: through the API
+
+
+def test_delivery_id_is_minted_with_the_pending_record_and_survives_to_the_receiver():
+    client, _, app = make(**hook_cfg())
+    rec = Recorder(200)
+    runner = app.state.ctx.extra["jobs"]
+    seen: dict[str, Any] = {}
+    real_enqueue = runner.dispatcher.enqueue
+
+    def spy(job_id: str, event: str) -> None:
+        seen["record"] = runner.store.get(job_id)["deliveries"][event]  # persisted BEFORE anything is sent
+        real_enqueue(job_id, event)
+
+    with client:
+        with_receiver(app, rec)
+        runner.dispatcher.enqueue = spy
+        jid = submit(client, webhook={"url": "https://hooks.example.com/clef"}).json()["id"]
+        d = delivery(client, jid, "job.succeeded")
+    assert seen["record"]["status"] == "pending" and seen["record"]["attempts"] == 0
+    assert seen["record"]["id"] == d["id"] == rec.requests[0].headers["X-Clef-Delivery"]
+
+
+def test_failed_delivery_is_visible_and_can_be_redelivered():
+    client, _, app = make(**hook_cfg(), api_keys_raw="alice:ka,bob:kb")
+    rec = Recorder(404)
+    hdr = {"X-API-Key": "ka"}
+    with client:
+        with_receiver(app, rec)
+        jid = submit(client, headers=hdr, webhook={"url": "https://hooks.example.com/clef"}).json()["id"]
+        wait(client, jid, headers=hdr)
+        failed = delivery_auth(client, jid, "job.succeeded", hdr)
+        assert failed["status"] == "failed"
+        job = client.get(f"/v1/jobs/{jid}", headers=hdr).json()
+        assert job["webhook"]["failed_deliveries"] == 1
+        assert any("failed for job.succeeded" in w and "redeliver" in w for w in job["warnings"])
+        assert (
+            client.post(f"/v1/jobs/{jid}/webhook/redeliver", headers={"X-API-Key": "kb"}).status_code == 404
+        )
+        rec.statuses = [200]  # the receiver is fixed
+        r = client.post(f"/v1/jobs/{jid}/webhook/redeliver", headers=hdr)
+        assert r.status_code == 200, r.text
+        again = delivery_auth(client, jid, "job.succeeded", hdr)
+        assert again["status"] == "delivered" and again["id"] == failed["id"]  # same id: de-duplicates
+        assert rec.requests[-1].headers["X-Clef-Delivery"] == failed["id"]
+        assert client.get(f"/v1/jobs/{jid}", headers=hdr).json()["webhook"]["failed_deliveries"] == 0
+        done = client.post(f"/v1/jobs/{jid}/webhook/redeliver", headers=hdr)  # nothing failed any more
+        assert done.status_code == 409 and "delivered" in done.json()["detail"]
+        other = client.post(f"/v1/jobs/{jid}/webhook/redeliver?event=job.failed", headers=hdr)
+        assert other.status_code == 409
+
+
+def test_redeliver_rules():
+    eng = SlowEngine(delay=0.2)
+    client, _, app = make(eng, **hook_cfg())
+    with client:
+        with_receiver(app, Recorder(200))
+        nohook = submit(client).json()["id"]
+        assert client.post(f"/v1/jobs/{nohook}/webhook/redeliver").status_code == 409
+        running = submit(
+            client,
+            payload={"inputs": [f"t{i}" for i in range(40)], "labels": LABELS},
+            webhook={"url": "https://hooks.example.com/clef"},
+        ).json()["id"]
+        r = client.post(f"/v1/jobs/{running}/webhook/redeliver")
+        assert r.status_code == 409 and "wait until it has finished" in r.json()["detail"]
+        client.post(f"/v1/jobs/{running}/cancel")
+        wait(client, running)
+        assert client.post("/v1/jobs/nope/webhook/redeliver").status_code == 404
+        assert client.post(f"/v1/jobs/{running}/webhook/redeliver?event=bogus").status_code == 400

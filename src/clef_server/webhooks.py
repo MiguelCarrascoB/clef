@@ -6,6 +6,9 @@ SSRF is the whole risk here, so the policy is strict and enforced on EVERY attem
 * A hostname must be listed (``hooks.example.com`` or ``*.example.com``); an IP-literal URL must fall in a
   listed IP / CIDR. Resolved addresses must be public, or inside a listed IP / CIDR. Link-local (cloud
   metadata), multicast, unspecified and reserved addresses are refused even when listed.
+* IPv6 forms that embed an IPv4 address (IPv4-mapped, NAT64 ``64:ff9b::/96`` and ``64:ff9b:1::/48``, 6to4,
+  Teredo) are judged by the embedded IPv4 address, so ``64:ff9b::a00:5`` cannot reach 10.0.0.5. Site-local and
+  reserved IPv6 ranges are refused too.
 * The hostname is resolved right before each attempt and the request is sent to the address that was
   checked (pinned; Host header and TLS SNI keep the hostname), so DNS rebinding cannot swap it afterwards.
 * No redirects, no proxy environment, a hard timeout, and no ``X-API-Key`` / ``Authorization`` is ever sent.
@@ -16,7 +19,6 @@ The body is signed with HMAC-SHA256 over ``"<timestamp>.<body>"`` when the job's
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import hmac
 import ipaddress
@@ -42,7 +44,11 @@ EVENTS = ("job.succeeded", "job.failed", "job.cancelled", "job.progress")
 DEFAULT_EVENTS = ("job.succeeded", "job.failed", "job.cancelled")
 PROGRESS_INTERVAL_S = 10.0
 MAX_CONCURRENT = 4
-BASE_DELAY_S = 2.0  # attempt n waits BASE_DELAY_S * 2**(n-1) (+-25 %) before attempt n+1
+BASE_DELAY_S = 2.0  # attempt n waits min(MAX_DELAY_S, BASE_DELAY_S * 2**(n-1)) (+-25 %) before attempt n+1
+MAX_DELAY_S = 120.0  # with 10 attempts: 2, 4, 8, 16, 32, 64, 120, 120, 120 s (about 8 minutes in all)
+
+_NAT64_WKP = ipaddress.IPv6Network("64:ff9b::/96")
+_NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
 
 Resolver = Callable[[str, int], Awaitable[list[str]]]
 
@@ -53,6 +59,23 @@ class WebhookRefused(ValueError):
 
 def _unmap(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> Any:
     return ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped else ip
+
+
+def _embedded_v4(ip: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
+    """IPv4 addresses a v6 address translates to / tunnels through (empty for ordinary v6)."""
+    out: list[ipaddress.IPv4Address] = []
+    if ip.ipv4_mapped:
+        out.append(ip.ipv4_mapped)
+    if ip.sixtofour:
+        out.append(ip.sixtofour)
+    if ip.teredo:
+        out.extend(ip.teredo)  # (server, client)
+    raw = ip.packed
+    if ip in _NAT64_WKP:  # RFC 6052 /96: the last 32 bits
+        out.append(ipaddress.IPv4Address(raw[12:16]))
+    elif ip in _NAT64_LOCAL:  # RFC 8215 64:ff9b:1::/48: bits 48-63 and 72-87 (bits 64-71 are reserved)
+        out.append(ipaddress.IPv4Address(raw[6:8] + raw[9:11]))
+    return out
 
 
 def sign(secret: str, timestamp: str, body: bytes) -> str:
@@ -129,7 +152,19 @@ class WebhookPolicy:
         return Target(parts.scheme, str(ip), port, path, True)
 
     def _check_ip(self, ip: Any, literal: bool) -> None:
-        if ip.is_link_local or ip.is_multicast or ip.is_unspecified or (ip.version == 4 and ip.is_reserved):
+        if ip.version == 6:
+            embedded = _embedded_v4(ip)
+            if embedded:  # a translated / tunnelled address is exactly as safe as the IPv4 inside it
+                for v4 in embedded:
+                    self._check_ip(v4, literal)
+                return
+        if (
+            ip.is_link_local
+            or ip.is_multicast
+            or ip.is_unspecified
+            or (ip.version == 4 and ip.is_reserved)
+            or (ip.version == 6 and (ip.is_site_local or (ip.is_reserved and not ip.is_loopback)))
+        ):
             raise WebhookRefused("address is link-local, multicast or reserved; refusing to deliver")
         if self._net_allows(ip):
             return
@@ -176,10 +211,12 @@ class WebhookDispatcher:
         resolver: Resolver = system_resolver,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         base_delay: float = BASE_DELAY_S,
+        max_delay: float = MAX_DELAY_S,
     ):
         self.policy, self.get_job, self.set_delivery = policy, get_job, set_delivery
         self.timeout_s, self.attempts = timeout_s, max(1, attempts)
         self.transport, self.resolver, self._sleep, self.base_delay = transport, resolver, sleep, base_delay
+        self.max_delay = max_delay
         self._tasks: set[asyncio.Task[None]] = set()
         self._sem: asyncio.Semaphore | None = None
         self._last_progress: dict[str, float] = {}
@@ -189,6 +226,8 @@ class WebhookDispatcher:
     def enqueue(self, job_id: str, event: str) -> None:
         if self._closed:
             return
+        if event != "job.progress":
+            self._last_progress.pop(job_id, None)  # the job is over; do not keep its throttle entry forever
         task = asyncio.get_running_loop().create_task(self.deliver(job_id, event))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -221,7 +260,7 @@ class WebhookDispatcher:
             log.exception("webhook delivery crashed (job=%s event=%s)", job_id, event)
 
     async def _deliver(self, job_id: str, event: str) -> None:
-        found = self.get_job(job_id)
+        found = await asyncio.to_thread(self.get_job, job_id)  # sqlite: keep it off the event loop
         if not found:
             return
         hook, job = found["webhook"], found["job"]
@@ -256,13 +295,21 @@ class WebhookDispatcher:
             except (httpx.HTTPError, OSError, asyncio.TimeoutError) as exc:
                 rec["last_status"], rec["last_error"] = None, f"{type(exc).__name__}: {str(exc)[:200]}"
                 retry = True
+            except Exception as exc:  # a bug must not leave the record pending (and retried at every start)
+                log.exception("webhook delivery attempt crashed (job=%s event=%s)", job_id, event)
+                rec["last_status"], rec["last_error"] = None, f"internal error: {type(exc).__name__}"
             if rec["status"] != "delivered" and (not retry or attempt >= attempts):
                 rec["status"] = "failed"
-            with contextlib.suppress(Exception):
-                self.set_delivery(job_id, event, rec)
+            try:
+                await asyncio.to_thread(self.set_delivery, job_id, event, rec)
+            except Exception:
+                log.warning(
+                    "webhook: cannot persist delivery state (job=%s event=%s)", job_id, event, exc_info=True
+                )
             if rec["status"] != "pending":
                 break
-            await self._sleep(self.base_delay * 2 ** (attempt - 1) * (0.75 + random.random() / 2))
+            delay = min(self.max_delay, self.base_delay * 2 ** (attempt - 1))
+            await self._sleep(delay * (0.75 + random.random() / 2))
         if rec["status"] == "failed":
             log.warning("webhook %s for job %s failed: %s", event, job_id, rec.get("last_error"))
 
