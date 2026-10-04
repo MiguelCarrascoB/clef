@@ -12,19 +12,24 @@ tests. Change it first, then the code.
 | `clef_server/__init__.py` | `__version__`; calls `backend.prepare_environment()` once (torch-free, before any torch import) |
 | `clef_server/config.py` | `Config` dataclass from `CLEF_*` env vars, `VERSION`, `MODEL_REPO`/`MODEL_REVISION`, `parse_api_keys` |
 | `clef_server/paths.py` | state dir, log/pid files, classifiers dir, `resolve_model_path(cfg)` (never downloads) |
-| `clef_server/backend.py` | **the only place with device-specific code**: detection, dtype, sync, OOM, memory, telemetry, preflight, quant |
-| `clef_server/engine.py` | background model load, single GPU worker thread, micro-batching, length bucketing, warmup |
+| `clef_server/backend.py` | **the only place with device-specific code**: detection, dtype, sync, OOM, memory, telemetry, preflight, quantization config (bitsandbytes / torchao), device memory cap, pinned host copies (`HostCopier`) |
+| `clef_server/offload.py` | CPU offload: `plan_layers` (which decoder layers stay on the host) and `LayerStreamer` (async copy-in per forward); pure logic plus a `copier` supplied by `backend.py` |
+| `clef_server/engine.py` | background model load (`load_model`: standard, quantized or offloaded), single GPU worker thread, micro-batching, length bucketing, warmup |
 | `clef_server/schemas.py` | pydantic v2 SystemOne request/response models + strict validation |
 | `clef_server/classify.py` | classification API models + translation classify/score <-> SystemOne records/answers |
 | `clef_server/classifiers.py` | saved-classifier store (JSON files under `<state_dir>/classifiers/`) |
 | `clef_server/security.py` | multi-key auth, per-key rate limiting, CORS setup |
 | `clef_server/media.py` | data-URL / (optional) URL fetching with SSRF guard + caps, image/video decode |
 | `clef_server/stats.py` | request log ring buffer, latency histogram, counters, forward stats, **time series ring buffer** |
-| `clef_server/main.py` | FastAPI app factory `create_app(cfg, engine)`, routes, middleware, error mapping, `run(cfg)` |
+| `clef_server/appctx.py` | `AppContext`: what a feature module gets from `create_app()` (config, stats, engine, auth / rate-limit dependencies, inference helpers, lifecycle hooks) |
+| `clef_server/main.py` | FastAPI app factory `create_app(cfg, engine)`, core routes, middleware, error mapping, `FEATURES` (feature modules mounted on the context), `run(cfg)` |
+| `clef_server/compat.py`, `compat_openai.py`, `compat_hf.py`, `compat_schema.py`, `compat_errors.py` | OpenAI (`/v1/models`, `/v1/chat/completions`) and Hugging Face zero-shot (`/hf/models/{id}`) routes; JSON-schema -> questions translation; client-shaped errors |
+| `clef_server/evaluation.py` | metric math (`compute_metrics`), `POST /v1/evaluate` and `/v1/evaluate/metrics`, the `evaluate` job kind |
+| `clef_server/jobs.py`, `clef_server/webhooks.py` | async jobs (SQLite store, FIFO runner, `/v1/jobs*` routes, built-in kinds) and signed, SSRF-guarded webhook delivery |
 | `clef_server/cli.py` | the `clef` command (serve/stop/status/logs/doctor/download/bench/open/version); `download` is a pinned, resumable `snapshot_download` with a disk-space check |
-| `clef_server/doctor.py` | environment checks per backend; `main(argv) -> int` |
+| `clef_server/doctor.py` | environment checks per backend, including a recommended memory setting; `main(argv) -> int` |
 | `clef_server/httpbench.py` | the async HTTP load test (`clef bench`; `bench/http_bench.py` is a shim) |
-| `clef_server/static/` | Clef Console (zero-build Preact + htm SPA, vendored uPlot) served at `/` |
+| `clef_server/static/` | Clef Console (zero-build Preact + htm SPA, vendored uPlot; screens in `screens/`) served at `/` |
 | `clef_client/` | sync + async Python client (`httpx`), typed classify results |
 | `clients/js/` | dependency-free ESM JS/TS client (`fetch`), Node 18+ and browsers |
 
@@ -43,7 +48,10 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_MODEL_REPO` / `CLEF_MODEL_REVISION` | `Cloudflare/clef-flash` / pinned sha | what `clef download` fetches and the cache lookup uses |
 | `CLEF_DEVICE` | `auto` | `auto`, `cuda`, `rocm`, `mps`, `cpu` (`cuda:1` / `rocm:1` select an index) |
 | `CLEF_DTYPE` | `auto` | `auto`, `bfloat16`, `float16`, `float32` (auto: see backend dtype rules) |
-| `CLEF_QUANT` | `none` | `none`, `int8`, `nf4` (bitsandbytes, CUDA only; refused elsewhere with a clear error) |
+| `CLEF_QUANT` | `none` | `none`, `int8`, `nf4`. int8: bitsandbytes on CUDA, torchao on ROCm / MPS / CPU. nf4: bitsandbytes only (CUDA, and ROCm where it is not recommended); refused elsewhere with a clear error |
+| `CLEF_QUANT_BACKEND` | `auto` | `auto`, `bnb`, `torchao`: the library behind `CLEF_QUANT` (auto: CUDA keeps bitsandbytes, everything else torchao; nf4 is bitsandbytes only) |
+| `CLEF_OFFLOAD` | `none` | `none` or `cpu`: keep the embeddings and the layers that do not fit under the device budget in host RAM and stream them in per forward (CUDA and ROCm; a warning and no effect on MPS / CPU, which share one memory pool) |
+| `CLEF_MAX_DEVICE_MEMORY_GB` | `0` | device memory this process may allocate, applied as a hard allocator limit; `0` = no cap (offload then plans from free memory). 2.5 GB of it is reserved for activations when planning the split |
 | `CLEF_PREFLIGHT` | `1` | memory check before loading |
 | `CLEF_TELEMETRY` | `1` | GPU telemetry via pynvml / amdsmi / rocm-smi when available |
 | `CLEF_HOST` / `CLEF_PORT` | `127.0.0.1` / `8910` | bind address. A non-loopback host without keys logs a loud warning |
@@ -54,11 +62,20 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_STATE_DIR` | per OS | Linux `$XDG_STATE_HOME/clef` (`~/.local/state/clef`), macOS `~/Library/Application Support/clef`, Windows `%LOCALAPPDATA%\clef`. Legacy alias `CLEF_LOG_DIR` |
 | `CLEF_MAX_LABELS` | `64` | labels per classify request / saved classifier |
 | `CLEF_MAX_CLASSIFIERS` | `1000` | saved classifiers |
-| `CLEF_CLASSIFY_THRESHOLD` | `0.5` | default multi-label threshold |
+| `CLEF_CLASSIFY_THRESHOLD` | `0.5` | default multi-label threshold (also used by `/v1/chat/completions` array properties) |
+| `CLEF_MAX_EVAL_ROWS` | `500` | rows per `POST /v1/evaluate` request |
+| `CLEF_MAX_JOB_EVAL_ROWS` | `100000` | rows per `evaluate` job and per `POST /v1/evaluate/metrics` request |
+| `CLEF_MAX_JOB_ITEMS` | `100000` | items per `classify` / `score` / `systemone` job |
+| `CLEF_MAX_JOBS` | `100` | queued + running jobs (more: 409 with `Retry-After`) |
+| `CLEF_JOB_TTL_HOURS` | `168` | finished jobs and their rows are purged this long after they finish; `0` keeps them forever |
+| `CLEF_JOB_ENGINE_WAIT_S` | `600` | how long a job waits for an unavailable engine before failing |
+| `CLEF_WEBHOOK_ALLOW` | empty | hosts (`hooks.example.com`, `*.corp.example.net`), IPs and CIDRs webhooks may be delivered to; empty = webhooks off |
+| `CLEF_WEBHOOK_TIMEOUT_S` | `10` | total timeout of one delivery attempt |
+| `CLEF_WEBHOOK_ATTEMPTS` | `5` | delivery attempts for final events (`job.progress` is never retried) |
 | `CLEF_SAMPLE_INTERVAL_S` | `2` | gauge sampling period for the time series (memory, telemetry, queue) |
 | v2 knobs | unchanged | `CLEF_MAX_TOKENS`, `CLEF_MAX_BODY_MB`, `CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES`, `CLEF_VIDEO_FPS`, `CLEF_MAX_BATCH`, `CLEF_MAX_QUESTIONS`, `CLEF_ALLOW_URL_FETCH`, `CLEF_URL_FETCH_MAX_MB`, `CLEF_MAX_MICROBATCH`, `CLEF_BATCH_WINDOW_MS`, `CLEF_BUCKETS`, `CLEF_PAD_MULTIPLE` (64, measured on ROCm only), `CLEF_PAD_TO_BUCKET`, `CLEF_WARMUP`, `CLEF_LOG_STATE`, `CLEF_LOG_BUFFER` |
 
-`Config` validates enums in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
+`Config` validates enums (device, dtype, quant, quant backend, offload), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range and `CLEF_RATE_LIMIT >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
 `auth_required`, `is_loopback`, `public_limits()`.
 
 ## Backend interface (`backend.py`)
@@ -95,13 +112,28 @@ class Backend:
     def versions(self) -> dict                         # {"torch","cuda","hip","driver","macos"} (None if n/a)
     def fast_path(self) -> dict                        # {"causal_conv1d": bool, "fla": bool, "expected": bool}
 
-def preflight(backend: Backend, dtype: torch.dtype, quant: str, weights_gb: float) -> list[str]:
-    """Raise PreflightError when free memory is clearly below what the load needs; return warnings when close."""
+def preflight(backend: Backend, dtype: torch.dtype, quant: str, weights_gb: float,
+              cap_gb: float = 0.0, offload: str = "none") -> list[str]:
+    """Raise PreflightError when free memory (or the CLEF_MAX_DEVICE_MEMORY_GB cap) is clearly below what the load
+    needs; return warnings when close. With offload=cpu on cuda / rocm the engine plans the split itself and only
+    the cap is checked here."""
 
-def quantization_config(backend: Backend, quant: str, dtype: torch.dtype) -> Any | None:
-    """None for "none". int8 / nf4 -> transformers BitsAndBytesConfig, ONLY on cuda; BackendError elsewhere
-    ("CLEF_QUANT requires an NVIDIA GPU (bitsandbytes); backend is mps")."""
+def quant_method(backend: Backend, quant: str, choice: str = "auto") -> str:
+    """"bnb" or "torchao". auto: nf4 -> bnb; int8 -> bnb on cuda, torchao on rocm / mps / cpu.
+    An explicit choice wins (nf4 + torchao is a BackendError)."""
+
+def quantization_config(backend: Backend, quant: str, dtype: torch.dtype, choice: str = "auto") -> Any | None:
+    """None for "none". Else a transformers config: BitsAndBytesConfig (int8 / nf4; cuda and rocm only) or
+    TorchAoConfig(Int8WeightOnlyConfig) with the embeddings and the vision tower left in bf16. BackendError with
+    an install hint when the library is missing or the backend cannot run it."""
+
+def recommend_memory_setting(backend: Backend, weights_gb: float = 19.0) -> str | None:
+    """One line of advice from the detected memory (printed by `clef doctor`); None when bf16 fits."""
 ```
+
+Offload support on `Backend`: `has_discrete_memory` (true on cuda / rocm), `pin_host(tensor)`, `host_copier()` (a
+`HostCopier` that copies pinned host tensors on a side stream) and `apply_memory_cap(cap_gb)`
+(`torch.cuda.set_per_process_memory_fraction`; returns whether a limit was set). `ACTIVATION_RESERVE_GB = 2.5`.
 
 Dtype rules (`resolve_dtype("auto")`): bf16 on cuda (if `torch.cuda.is_bf16_supported()`, else fp16 + warning),
 rocm, and mps on macOS >= 14 (fp16 + warning before 14); cpu: bf16 when the CPU supports it, else fp32. An explicit
@@ -172,8 +204,16 @@ Rules (v2 rules kept):
 - No `torch.cuda.*` outside `backend.py`. OOM: `backend.is_oom(exc)` -> `backend.empty_cache()` ->
   `GpuOutOfMemory`; the worker keeps running. Timing uses `backend.synchronize()`.
 - Load order on the worker: detect backend -> resolve dtype -> resolve model path -> preflight (if enabled) ->
-  quantization config -> `load_release_model(path, device=..., dtype=..., quantization_config=...)` (kwarg only
-  when quantizing). Each failure becomes status "error" with a one-line actionable message.
+  `load_model(...)`: apply the device cap (`CLEF_MAX_DEVICE_MEMORY_GB`), build the quantization config, then either
+  the standard path (`load_release_model(path, device=..., dtype=..., quantization_config=...)`, kwarg only when
+  quantizing) or, with `CLEF_OFFLOAD=cpu` on cuda / rocm, an offloaded load. Each failure becomes status "error"
+  with a one-line actionable message.
+- Offloaded load (`offload.py`): token and output embeddings (~4 GB) stay on the host and are gathered on the CPU;
+  decoder layers beyond the device budget (cap or free memory, minus `ACTIVATION_RESERVE_GB`) are held in pinned
+  host memory, spread evenly through the stack, and copied in on a side stream one or two layers ahead of the
+  compute; the vision tower, final norm, rotary tables and the joint head stay on the device. The weights are the
+  same tensors, so probabilities are identical to a normal run. After a failed forward the streamer puts the layers
+  back on the host. Measured numbers: [memory.md](memory.md).
 - The engine reports `stats.record_forward(...)` and `stats.set_queue_depth(n)` as in v2.
 
 ## Stats interface (`stats.py`)
@@ -199,19 +239,57 @@ request count, error count, successful latencies (capped at 1000 per second), fo
 max queue depth seen (from `set_queue_depth` and `sample`), and the last gauge sample. Thread-safe (engine thread
 + event loop + sampler).
 
+## Feature modules (`appctx.py`)
+
+New API surface is added as a **feature module** instead of growing `main.py`. A module exposes
+`router(ctx: AppContext) -> APIRouter` and is listed in `main.FEATURES` (currently `["evaluation", "compat",
+"jobs"]`, in that order: evaluation registers its job kind before jobs reads the registry). `create_app()` builds the
+context, imports each module with `importlib` and includes its router.
+
+`AppContext` fields:
+
+| Field | What it is |
+| --- | --- |
+| `cfg`, `stats`, `engine`, `store` | the `Config`, `Stats`, `Engine` and `ClassifierStore` of this app |
+| `auth`, `limited` | FastAPI dependency lists: `auth` goes on every router that needs a key, `limited` adds the rate limit on inference routes |
+| `errors` | the shared OpenAPI `responses` for the standard error statuses |
+| `infer(request, reqs, batch, label="batch")` | the request path: limits, media load, one `engine.decide()`, and the request log / stats entry |
+| `decide(reqs, batch=True, label="batch")` | the same without a request, for background work (jobs): limits, media and one `engine.decide()`; not logged or counted in stats |
+| `map_exception(exc)`, `api_error(status, detail, headers=None)`, `request_id(request)` | the shared error mapping (raise the result `from exc`) |
+| `run_classify`, `run_classify_batch`, `run_score` | the classification routes' implementations, reusable by other features |
+| `on_startup`, `on_shutdown` | lists of async callables run inside the app lifespan after the engine starts / before it stops (jobs start and stop their runner here) |
+| `extra` | a dict features use to publish objects to each other; `extra["job_kinds"]` is the job-kind registry |
+
+Rules for a feature: inference goes through `ctx.infer` or `ctx.decide` (never straight to the engine), routes carry
+`ctx.auth` (and `ctx.limited` when they run the model), and all request / response models are pydantic so the route
+appears in `openapi.json`.
+
 ## HTTP API
+
+| Route | Purpose | Section |
+| --- | --- | --- |
+| `GET /health`, `GET /livez`, `GET /schema-example` | status, liveness, copy-paste bodies (open) | [below](#get-health) |
+| `POST /v1/systemone`, `POST /v1/batch` | the original typed questions API | [below](#post-v1systemone-post-v1batch) |
+| `POST /v1/classify`, `/v1/classify/batch`, `/v1/score`; `PUT|GET|DELETE /v1/classifiers/{name}`, `GET /v1/classifiers`, `POST /v1/classifiers/{name}[/batch]` | classification | [below](#classification-api-classifypy-classifierspy) |
+| `GET /v1/models[/{id}]`, `POST /v1/chat/completions` | OpenAI-compatible structured outputs | [Compat](#openai-and-hugging-face-compat-compatpy) |
+| `POST /hf/models/{id}` (and the hidden `POST /models/{id}`) | Hugging Face zero-shot classification | [Compat](#openai-and-hugging-face-compat-compatpy) |
+| `POST /v1/evaluate`, `POST /v1/evaluate/metrics` | accuracy, F1, confusion matrix, calibration | [Evaluation](#evaluation-evaluationpy) |
+| `POST /v1/jobs`, `GET /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/results`, `POST /v1/jobs/{id}/cancel`, `DELETE /v1/jobs/{id}` | async jobs | [Jobs](#async-jobs-and-webhooks-jobspy-webhookspy) |
+| `GET /v1/stats`, `/v1/stats/timeseries`, `/v1/log`, `/v1/events` | observability (console) | below |
 
 ### Auth, rate limit, CORS (`security.py`)
 
-- Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration). When any key exists every `/v1/*` route needs
-  `X-API-Key: <key>` or `Authorization: Bearer <key>` (401 + `WWW-Authenticate: Bearer` otherwise). For SSE
+- Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration). When any key exists every `/v1/*` route, and the
+  Hugging Face routes (`/hf/models/*`, `/models/*`), need `X-API-Key: <key>` or `Authorization: Bearer <key>` (401 +
+  `WWW-Authenticate: Bearer` otherwise; the OpenAI and HF routes render that in their own error shape). For SSE
   (EventSource cannot set headers) `/v1/events?key=<key>` is also accepted. Comparison is constant-time over all
   keys. The matching key's **name** (never the key) is stored on `request.state.key_name` and written to the request
   log (`"key"`) and to `/v1/stats` (`by_key`). Auth off -> `key` is `null`.
 - Open routes: `/`, static files, `/health`, `/livez`, `/schema-example`, `/docs`, `/openapi.json`.
 - Rate limit (`CLEF_RATE_LIMIT=N`): sliding 60 s window per key name (per client IP when auth is off), counted on
   the POST inference routes only (`/v1/systemone`, `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/score`,
-  `POST /v1/classifiers/{name}[/batch]`). Over the limit: `429 {"detail": "rate limit exceeded (N/min)",
+  `POST /v1/classifiers/{name}[/batch]`, `/v1/chat/completions`, `/hf/models/*`, `/v1/evaluate`, `POST /v1/jobs`).
+  `/v1/evaluate/metrics` and the job read / cancel / delete routes are not counted. Over the limit: `429 {"detail": "rate limit exceeded (N/min)",
   "request_id"}` + `Retry-After: <int seconds>`. Rejected requests are logged (status 429) but not counted.
 - CORS: off by default. `CLEF_CORS_ORIGINS=https://a.example,https://b.example` (or `*`) installs Starlette's
   `CORSMiddleware` with methods GET/POST/PUT/DELETE/OPTIONS, headers `*` (X-API-Key, Authorization, Content-Type),
@@ -306,6 +384,80 @@ Errors name the index: `inputs[3]: ...`.
   from a validated name, written atomically (temp file + `os.replace`), at most `max_classifiers` (409 beyond).
   Unreadable/corrupt files are skipped in the list and logged.
 
+### OpenAI and Hugging Face compat (`compat*.py`)
+
+Guide: [openai-compat.md](openai-compat.md). Both dialects translate to ONE SystemOne record per request and go
+through `ctx.infer`, so keys, rate limit, log, stats and limits are shared and the probabilities equal the
+equivalent `/v1/systemone` call.
+
+- `GET /v1/models` lists `clef-flash`; `GET /v1/models/{id}` returns it, any other id is 404 `model_not_found`.
+- `POST /v1/chat/completions`: the schema comes from `response_format` (`json_schema`) or from exactly one forced
+  tool. Each top-level property becomes one question (`compat_schema.py`): string enum -> `choice`; boolean ->
+  `noul` (true when P >= 0.5); integer enum, bounded integer (2..64 values) or string enum with `x-clef-ordinal` ->
+  `score`; array of string enums -> one `noul` per option (options with P >= `CLEF_CLASSIFY_THRESHOLD`). Anything
+  else (free text, numbers, nested objects) is a 400 whose `param` names the property. `messages` become the
+  `state` (a lone user message verbatim, otherwise a readable transcript); `image_url` / `video_url` parts become
+  `images` / `videos`.
+- Response: OpenAI `chat.completion` with the argmax as JSON in `message.content` (or a `tool_calls` entry),
+  `logprobs` carrying `log p` (`top_logprobs` 0..64, floor `-9999`), `usage` (`completion_tokens` always 0) and a
+  non-standard top-level `clef` object with every probability, `timing` and `request_id`. `stream: true` returns
+  valid SSE (role chunk, one content chunk, finish chunk, optional usage chunk, `[DONE]`). `n > 1`, `text` /
+  `json_object` response formats and requests without a schema are 400s (`missing_schema` when no schema was given).
+- `POST /hf/models/{model_id:path}`: Inference API zero-shot body `{inputs, parameters: {candidate_labels,
+  multi_label, hypothesis_template}}`. Response `{sequence, labels, scores}` sorted by score, or
+  `[{label, score}]` when the User-Agent is `hf_hub/1.x` (force with `?format=classic|list`); `inputs` may be a
+  list (one micro-batched pass).
+- Errors on these routes use the client's shape (`compat_errors.py`): OpenAI `{"error": {message, type, param,
+  code}}`, Hugging Face `{"error": "message"}`; status codes match the rest of the API.
+
+### Evaluation (`evaluation.py`)
+
+Guide: [evaluation.md](evaluation.md). `compute_metrics` is the single implementation of the metric math; the console
+and the job kind use it too.
+
+- `POST /v1/evaluate` `{labels | classifier, instructions?, multi_label?, threshold?, bins?, rows: [{input, gold}],
+  include_predictions?}`: at most `CLEF_MAX_EVAL_ROWS` rows (400 beyond, pointing at the job kind), classified
+  `CLEF_MAX_BATCH` at a time through `ctx.infer`, then scored. A gold label outside the label set is a 400 naming
+  the row, before any inference.
+- `POST /v1/evaluate/metrics` `{labels, rows: [{gold, scores}], multi_label?, threshold?, bins?,
+  include_predictions?}`: no inference, at most `CLEF_MAX_JOB_EVAL_ROWS` rows, not rate limited.
+- Response: `n`, `accuracy`, `top2_accuracy`, `macro_f1`, `micro_f1`, `weighted_f1`, `per_label`,
+  `confusion_matrix {labels, matrix}`, `calibration {bins, ece, mce, brier, nll, mean_confidence}`,
+  `coverage_curve`, `auto_route`, optional `predictions`. Multi-label: `exact_match`, `hamming_loss`, per-label
+  `tp fp fn tn`.
+- `evaluate` job kind (registered in `ctx.extra["job_kinds"]`): same payload as `POST /v1/evaluate`, up to
+  `CLEF_MAX_JOB_EVAL_ROWS` rows, one stored item per row, result = the metrics object. Not resumable (it restarts).
+
+### Async jobs and webhooks (`jobs.py`, `webhooks.py`)
+
+Guide: [jobs.md](jobs.md).
+
+- `POST /v1/jobs` `{kind, payload, webhook?, metadata?}` -> 202 with the job and `Location: /v1/jobs/{id}`. The
+  payload is fully validated at submit (400 with a path); an unknown kind lists the available ones. Kinds:
+  `classify`, `score`, `systemone` (jobs.py) and `evaluate` (evaluation.py). 409 + `Retry-After` when
+  `CLEF_MAX_JOBS` is reached.
+- `GET /v1/jobs?status&kind&limit&offset` (newest first), `GET /v1/jobs/{id}` (status, progress, ETA, result summary,
+  webhook delivery status), `GET /v1/jobs/{id}/results` (JSON pages with `next_offset`, or a full stream with
+  `?format=ndjson|csv`; CSV neutralises cells starting with `=`, `+`, `-`, `@`), `POST /v1/jobs/{id}/cancel`,
+  `DELETE /v1/jobs/{id}` (409 while queued or running).
+- Storage: SQLite `<state_dir>/jobs.db` (jobs, payloads, result rows, webhook deliveries). Statuses: `queued`,
+  `running`, `succeeded`, `failed`, `cancelled`, `interrupted`. One runner, FIFO, one job at a time and ONE
+  micro-batch in flight (`CLEF_MAX_MICROBATCH` records through `ctx.decide`), so interactive requests interleave.
+  A job interrupted by a stop or crash resumes after its last stored row on the next start. A row the engine rejects
+  becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
+  `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
+- Ownership: with auth on, a job belongs to the key name that submitted it and other keys get 404 (also in the
+  list); jobs created while auth was off stay visible to every key.
+- Webhooks: events `job.succeeded`, `job.failed`, `job.cancelled` (default) and opt-in `job.progress` (at most one
+  per 10 s, one attempt). Headers `X-Clef-Event`, `X-Clef-Delivery`, and with a secret `X-Clef-Timestamp` and
+  `X-Clef-Signature: sha256=` HMAC-SHA256 of `"<timestamp>.<raw body>"`. 2xx = delivered; 408 / 425 / 429 / 5xx and
+  network errors retry with exponential backoff up to `CLEF_WEBHOOK_ATTEMPTS`; other statuses and all redirects are
+  final. Disabled until `CLEF_WEBHOOK_ALLOW` is set; the allow-list is checked at submit and on every attempt, the
+  host is resolved then and the connection is pinned to the checked IP (see [SECURITY.md](../SECURITY.md)).
+- Jobs are not counted in `/v1/stats` or the request log (they use `ctx.decide`).
+- Custom kinds: `ctx.extra.setdefault("job_kinds", {})[name] = {"validate": fn, "run": async_fn, "resumable": bool}`
+  (see [jobs.md](jobs.md#writing-a-job-kind)).
+
 ### `GET /health`
 200 when status is ready or warming, 503 otherwise. `{"ready", "status", "version": "3.0.0", **engine.info(),
 "load_seconds", "uptime_s", "error", "limits": Config.public_limits()}`. `GET /livez` -> 200 `{"ok": true}`.
@@ -346,18 +498,21 @@ default 5.
 
 ### Errors
 Always `{"detail": "<message>", "request_id": "<hex>"}`; header `X-Request-ID` on every response.
-400 invalid input, 401 auth, 404 unknown classifier, 409 too many classifiers, 413 too large, 429 rate limited
-(+ `Retry-After`), 503 not ready / OOM, 500 internal (generic message; traceback only in the server log).
+400 invalid input, 401 auth, 404 unknown classifier / model / job, 409 too many classifiers or jobs (or an invalid job
+state transition), 413 too large, 429 rate limited (+ `Retry-After`), 503 not ready / OOM, 500 internal (generic
+message; traceback only in the server log). The OpenAI and Hugging Face routes use their clients' error shapes (see
+Compat).
 
 ### OpenAPI
 `openapi.json` at the repo root is exported from `create_app()` by `scripts/export_openapi.py` (CI checks it is up to
-date). All new routes have pydantic request/response models so `/docs` shows them.
+date). All routes, including the feature modules', have pydantic request/response models so `/docs` shows them.
 
 ## CLI (`clef`, `cli.py`)
 
 ```
-clef serve [--host H] [--port P] [--device D] [--dtype T] [--quant Q] [--model-path DIR] [--detach]
-           [--timeout S]      # flags set the matching CLEF_* env; foreground by default (Ctrl+C stops)
+clef serve [--host H] [--port P] [--device D] [--dtype T] [--quant Q] [--offload none|cpu]
+           [--max-device-memory-gb GB] [--model-path DIR] [--detach] [--timeout S]
+           # flags set the matching CLEF_* env; foreground by default (Ctrl+C stops)
 clef stop | clef status [--json] | clef logs [-f] [-n N]
 clef doctor [--no-gpu] [--smoke] [--json]    # exit 0 ok/warn, 1 on any FAIL
 clef download [--revision SHA] [--dir DIR] [--yes]
@@ -372,7 +527,8 @@ clef version
   when something already answers on the port.
 - `stop`: SIGTERM (Windows: `taskkill /PID /T`), wait 30 s, then kill; removes the pidfile.
 - `status`: process + `/health` summary (backend, device, status); exit 0 when healthy.
-- `doctor --no-gpu`: skips everything that needs a GPU or the weights (CI smoke). `--smoke`: loads the model on
+- `doctor --no-gpu`: skips everything that needs a GPU or the weights (CI smoke). On a GPU, `doctor` also prints a
+  `memory setting` line (from `recommend_memory_setting`) when bf16 would not fit comfortably. `--smoke`: loads the model on
   the detected backend, runs one fixed record, checks probabilities sum to 1 and prints latency.
 - `download`: `huggingface_hub.snapshot_download(MODEL_REPO, revision=MODEL_REVISION)` into the HF cache (or
   `--dir` / `CLEF_MODEL_PATH`), resumable; checks free disk >= 21 GB first and warns about the ~19 GB size.
@@ -382,6 +538,7 @@ clef version
 ## Console (`static/`)
 
 Zero-build Preact + htm; one vendored charting library (`static/vendor/uPlot.*`, MIT) for time series, everything
-else hand-written SVG. No runtime CDN calls. Screens: Playground (SystemOne + Classify modes), History, Batch, Ops.
+else hand-written SVG. No runtime CDN calls. Screens: Playground (SystemOne + Classify modes), History, Batch, Evaluate (labelled dataset -> `/v1/classify/batch`
+in chunks -> `/v1/evaluate/metrics`; confusion heatmap, reliability diagram, coverage curve, mistakes, export), Ops.
 It consumes `/health`, `/v1/stats`, `/v1/stats/timeseries`, `/v1/events?step_s=`, `/v1/log`, `/v1/systemone`,
-`/v1/batch`, `/v1/classify`, `/v1/classifiers*`.
+`/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/classifiers*`, `/v1/evaluate/metrics`.
