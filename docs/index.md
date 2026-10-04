@@ -1,5 +1,5 @@
 ---
-title: clef
+title: Calibrated local classification
 hide:
   - navigation
   - toc

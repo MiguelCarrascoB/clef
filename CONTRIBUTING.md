@@ -50,7 +50,9 @@ python -m venv .venv-docs && .venv-docs/bin/pip install -r requirements/docs.txt
 NO_MKDOCS_2_WARNING=true .venv-docs/bin/mkdocs build --strict
 ```
 
-The site is deployed to <https://miguelcarrascob.github.io/clef/> from `main` by `.github/workflows/docs.yml`.
+The site at <https://miguelcarrascob.github.io/clef/> is served by GitHub Pages from the `gh-pages` branch. GitHub
+Actions is disabled for this repository, so publish by hand after committing docs changes:
+`bash scripts/publish_docs.sh` (strict build, then one commit on `gh-pages`).
 
 Run `ruff format` only on files you changed; a repo-wide format in a multi-person change touches everyone's files.
 Python line length is 110.
