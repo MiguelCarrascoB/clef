@@ -1,4 +1,4 @@
-"""Record docs/screenshots/console.gif: Playground classify -> Evaluate (sample) -> Ops live charts, dark theme.
+"""Record docs/screenshots/console.gif: Playground classify, Evaluate (sample), Ops live charts (dark).
 
     pip install playwright pillow       # uses an installed Edge or Chrome; no browser download needed
     python scripts/record_gif.py --out docs/screenshots/console.gif
@@ -101,7 +101,8 @@ def to_gif(frames, out: Path, fps: float, width: int, max_mb: float) -> None:
     )
     size = out.stat().st_size / 1e6
     print(
-        f"wrote {out} ({len(quant)} frames, {len(quant) / fps:.1f}s, {width}x{images[0].height}, {size:.2f} MB)"
+        f"wrote {out} ({len(quant)} frames, {len(quant) / fps:.1f}s, "
+        f"{width}x{images[0].height}, {size:.2f} MB)"
     )
     if size > max_mb:
         print(f"warning: larger than {max_mb} MB; lower --fps / --width", file=sys.stderr)
