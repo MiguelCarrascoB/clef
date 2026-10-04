@@ -661,3 +661,11 @@ def test_info_memory_block_standard_and_offload(started):
     assert mem["embeddings_on_host"] is True and mem["layers_on_host"] == 6 and mem["layers_total"] == 32
     assert mem["quant"] == "int8" and mem["quant_backend"] == "torchao"  # FakeBackend is rocm: not bnb
     assert mem["host_weights_gb"] == 7.5 and mem["device_weights_gb"] == 11.0
+
+
+def test_sample_skips_gpu_telemetry_while_the_model_loads():
+    """amdsmi_init from the sampler thread raced the loader's own GPU init and segfaulted (ROCm / WSL2)."""
+    fake = FakeBackend()
+    eng = Engine(make_cfg(), FakeStats(), loader=make_loader(FakeModel()), backend=fake)
+    assert eng.status == "loading"
+    assert eng.sample()["mem_used_gb"] is None and fake.telemetry_calls == 0

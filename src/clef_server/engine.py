@@ -498,6 +498,11 @@ class Engine:
         b = self._backend
         if b is None:
             return out
+        if self.status == "loading" and b.name in ("cuda", "rocm"):
+            # The loader thread is initialising the GPU runtime (torch calls amdsmi_init / NVML itself).
+            # A concurrent amdsmi_init from here segfaulted the process on ROCm / WSL2 (measured, with
+            # CLEF_MAX_DEVICE_MEMORY_GB set); the gauges are empty during the load anyway.
+            return out
         try:
             mem = b.memory()
             out["mem_used_gb"] = mem.get("allocated_gb")
