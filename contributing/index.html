@@ -1574,7 +1574,9 @@ Markdown are formatted by <code>ruff format</code>, so keep them formatted and f
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>python<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv-docs<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>.venv-docs/bin/pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements/docs.txt<span class="w">   </span><span class="c1"># Windows: .venv-docs\Scripts\pip</span>
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nv">NO_MKDOCS_2_WARNING</span><span class="o">=</span><span class="nb">true</span><span class="w"> </span>.venv-docs/bin/mkdocs<span class="w"> </span>build<span class="w"> </span>--strict
 </code></pre></div>
-<p>The site is deployed to <a href="https://miguelcarrascob.github.io/clef/">https://miguelcarrascob.github.io/clef/</a> from <code>main</code> by <code>.github/workflows/docs.yml</code>.</p>
+<p>The site at <a href="https://miguelcarrascob.github.io/clef/">https://miguelcarrascob.github.io/clef/</a> is served by GitHub Pages from the <code>gh-pages</code> branch. GitHub
+Actions is disabled for this repository, so publish by hand after committing docs changes:
+<code>bash scripts/publish_docs.sh</code> (strict build, then one commit on <code>gh-pages</code>).</p>
 <p>Run <code>ruff format</code> only on files you changed; a repo-wide format in a multi-person change touches everyone's files.
 Python line length is 110.</p>
 <p>CI (<code>.github/workflows/ci.yml</code>) runs on Ubuntu (Python 3.10 and 3.12), macOS 14 and Windows (3.12): ruff, unit tests,
