@@ -46,10 +46,18 @@ curl -s http://127.0.0.1:8910/v1/evaluate -H 'Content-Type: application/json' -d
 Send `classifier: "<name>"` instead of `labels` / `instructions` / `multi_label` to use a saved classifier. For
 multi-label, set `multi_label: true` and make `gold` a list (`[]` is allowed: no label applies). A gold label that is
 not in the label set is a 400 that names the row, before any inference runs. Rows are classified `CLEF_MAX_BATCH` at a
-time through the normal inference path, so Ops stats and the request log count them.
+time through the normal inference path. The call is one tracked request: Ops stats, the request log and the in-flight
+count include it (with the number of rows evaluated), and any per-row failure fails the whole request; use the job
+kind below if you want bad rows isolated.
 
 `POST /v1/evaluate/metrics` takes `{labels, rows: [{gold, scores}], multi_label?, threshold?, bins?, include_predictions?}`
 where `scores` is the `scores` object `/v1/classify` returned. Use it to score predictions you collected elsewhere.
+Scores are checked, not guessed: a row whose `scores` has none of the label names as keys (label keys are
+case-sensitive, so `Billing` does not match `billing`), or a value that is not a finite number, is a 400 naming the
+row (`rows[12].scores: ...`). Milder problems are repaired and counted in the response: `defaulted_scores` (label keys
+missing from a row, taken as 0), `clipped_scores` (values outside 0 to 1, clamped) and `degenerate_rows` (rows
+affected, including single-label rows whose scores are all zero). Non-zero counts mean the input is not what
+`/v1/classify` produces; check them before trusting the numbers.
 
 The response contains `n`, `accuracy`, `top2_accuracy`, `macro_f1`, `micro_f1`, `weighted_f1`, `per_label`,
 `confusion_matrix {labels, matrix}` (rows gold, columns predicted), `calibration {bins, ece, mce, brier, nll,
@@ -66,9 +74,24 @@ curl -s http://127.0.0.1:8910/v1/jobs -H 'Content-Type: application/json' \
   -d '{"kind": "evaluate", "payload": {"labels": ["billing","technical"], "rows": [...]}}'
 ```
 
-Invalid payloads are rejected at submit (400). Every classified row is stored as a job item (`index`, `input`, `gold`,
-`predicted`, `confidence`, `correct`, `scores`), progress counts rows, and the job result is the metrics object above.
-Cancelling a job returns the metrics of the rows finished so far, marked `cancelled` and `partial`.
+Invalid payloads are rejected at submit (400): unknown fields, too many rows, a gold label outside the label set and,
+with `classifier`, a classifier that does not exist (the saved labels are loaded at submit and the gold labels are
+checked against them). The classifier is looked up again when the job starts, so deleting it while the job is queued
+fails the job with a clear message; editing it in between means the job uses the version current at start (and, on a
+resume, at the resume).
+
+Every classified row is stored as a job item (`index`, `input`, `gold`, `predicted`, `confidence`, `correct`,
+`scores`), progress counts rows, and the job result is the metrics object above plus `n_errors`.
+
+- **Same resilience as the other job kinds** (see [jobs.md](jobs.md)). Rows go to the engine in micro-batches
+  (`CLEF_MAX_MICROBATCH`), so interactive requests are not stuck behind a long run. A job queued or resumed while the
+  model is still loading waits (up to `CLEF_JOB_ENGINE_WAIT_S`) instead of failing.
+- **Bad rows do not sink the job.** A row the engine rejects (too long for the context window, or GPU out of memory
+  even alone) is stored as an item `{index, input, gold, error}`, counted in `n_errors`, and **left out of the
+  metrics**: `n` is the number of rows that were scored, so `n + n_errors` is the rows processed.
+- **Resumable.** If the server restarts mid-job, the job continues from the first unfinished row; the rows already
+  stored (including their errors) are replayed into the metrics, so the final result covers the whole dataset.
+- Cancelling a job returns the metrics of the rows finished so far, marked `cancelled` and `partial`.
 
 ## What the numbers mean
 
