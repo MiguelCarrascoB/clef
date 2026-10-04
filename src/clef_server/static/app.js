@@ -28,6 +28,11 @@ function App() {
     return () => { window.removeEventListener('clef:unauthorized', h); window.removeEventListener('hashchange', hash); };
   }, []);
   const cur = TABS.find((t) => t.id === tab) || TABS[0];
+  // On narrow screens the tab strip scrolls sideways: keep the active tab visible.
+  useEffect(() => {
+    const el = document.querySelector('.tab.active');
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [cur.id]);
   const View = cur.view;
   const open = useCallback(() => setSettingsOpen(true), []);
   const close = useCallback(() => setSettingsOpen(false), []);

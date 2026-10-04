@@ -22,6 +22,7 @@ from clef_server.engine import (
     EngineNotReady,
     GpuOutOfMemory,
     InputTooLarge,
+    LoadInfo,
     bucket_for,
     pad_batch_right,
 )
@@ -643,3 +644,20 @@ def test_offload_on_unified_memory_is_a_warning_not_an_error():
     assert wait_for(lambda: eng.status in ("ready", "warming"))
     assert any("no effect" in w for w in eng.info()["warnings"])
     eng.shutdown()
+
+
+def test_info_memory_block_standard_and_offload(started):
+    eng = Engine(make_cfg(), FakeStats(), loader=make_loader(FakeModel()), backend=FakeBackend())
+    mem = eng.info()["memory"]  # before any load
+    assert mem["mode"] == "standard" and mem["offload"] == "none" and mem["max_device_memory_gb"] is None
+    assert mem["layers_on_host"] == 0 and mem["embeddings_on_host"] is False and mem["quant_backend"] is None
+    cfg = make_cfg(offload="cpu", max_device_memory_gb=15.0, quant="int8")
+    eng = Engine(cfg, FakeStats(), loader=make_loader(FakeModel()), backend=FakeBackend())
+    eng._load_info = LoadInfo(
+        mode="offload", streamed_layers=6, n_layers=32, host_weights_gb=7.5, device_weights_gb=11.0
+    )
+    mem = eng.info()["memory"]
+    assert mem["offload"] == "cpu" and mem["mode"] == "offload" and mem["max_device_memory_gb"] == 15.0
+    assert mem["embeddings_on_host"] is True and mem["layers_on_host"] == 6 and mem["layers_total"] == 32
+    assert mem["quant"] == "int8" and mem["quant_backend"] == "torchao"  # FakeBackend is rocm: not bnb
+    assert mem["host_weights_gb"] == 7.5 and mem["device_weights_gb"] == 11.0

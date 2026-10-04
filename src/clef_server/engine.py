@@ -447,6 +447,7 @@ class Engine:
         except Exception:
             tf_version = None
         return {
+            "memory": self._memory_info(),
             "backend": b.name if b is not None else None,
             "device": str(b.device) if b is not None else self.cfg.device,
             "dtype": _dtype_name(self._dtype) if self._dtype is not None else self.cfg.dtype,
@@ -459,6 +460,30 @@ class Engine:
             "fast_path": fast_path,
             "versions": versions,
             "warnings": list(self._warnings),
+        }
+
+    def _memory_info(self) -> dict[str, Any]:
+        """Memory mode in effect (offload, device cap, quant) and what sits on the host."""
+        cfg, li, b = self.cfg, self._load_info, self._backend
+        quant = getattr(cfg, "quant", "none")
+        quant_backend = None
+        if quant != "none" and b is not None:
+            with contextlib.suppress(Exception):
+                quant_backend = backend_mod.quant_method(b, quant, getattr(cfg, "quant_backend", "auto"))
+        cap = float(getattr(cfg, "max_device_memory_gb", 0.0) or 0.0)
+        mode = li.mode if li is not None else "standard"  # "offload" only when it was actually applied
+        host_layers = li.streamed_layers if li is not None else 0
+        return {
+            "offload": getattr(cfg, "offload", "none"),
+            "mode": mode,
+            "max_device_memory_gb": cap if cap > 0 else None,
+            "quant": quant,
+            "quant_backend": quant_backend,
+            "embeddings_on_host": mode == "offload",
+            "layers_on_host": host_layers,
+            "layers_total": li.n_layers if li is not None else 0,
+            "host_weights_gb": li.host_weights_gb if li is not None else 0.0,
+            "device_weights_gb": li.device_weights_gb if li is not None else 0.0,
         }
 
     def sample(self) -> dict:

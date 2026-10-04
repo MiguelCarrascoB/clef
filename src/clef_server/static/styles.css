@@ -81,7 +81,7 @@ kbd { font-size: 10px; padding: 1px 5px; border: 1px solid var(--border-2); bord
 .brand { display: flex; align-items: center; gap: var(--sp-2); font-weight: 650; letter-spacing: -.01em; }
 .logo { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: var(--accent); color: #fff; font-size: 16px; }
 .tabs { display: flex; gap: 2px; height: 100%; }
-.tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 0 var(--sp-3); font: inherit; font-weight: 550; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: color var(--dur), border-color var(--dur); }
+.tab { background: none; white-space: nowrap; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 0 var(--sp-3); font: inherit; font-weight: 550; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: color var(--dur), border-color var(--dur); }
 .tab:hover { color: var(--text); } .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .count { font: 600 10px var(--mono); background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); border-radius: 9px; padding: 0 6px; margin-left: 6px; }
 .tab .count { margin-left: 0; }
@@ -358,6 +358,11 @@ button.lg-item { cursor: pointer; } button.lg-item:hover { color: var(--text); }
 
 @media (max-width: 900px) { .topbar { gap: var(--sp-2); padding: 0 var(--sp-2); } .brand-name, .health-gpu { display: none; } .tab { padding: 0 var(--sp-2); } .vram-track { width: 48px; } .state-cell { max-width: 180px; } }
 @media (max-width: 560px) {
+  /* two rows: brand + status on top, the tab strip below, scrolling sideways instead of widening the page */
+  .topbar { flex-wrap: wrap; height: auto; row-gap: 0; padding: var(--sp-2) var(--sp-3) 0; }
+  .brand-name { display: inline; } .topbar-right { order: 2; min-width: 0; }
+  .tabs { order: 3; flex: 1 0 100%; height: 40px; margin: var(--sp-2) calc(-1 * var(--sp-3)) 0; padding: 0 var(--sp-2); overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; border-top: 1px solid var(--border); }
+  .tabs::-webkit-scrollbar { display: none; } .tab { flex: none; }
   .page, .split { padding: var(--sp-3); } .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); } .kpi-value { font-size: 22px; }
   .vram { display: none; } .health-label { display: none; } .tab { font-size: var(--fs-sm); padding: 0 7px; } .tab .count { display: none; }
   .pbar { grid-template-columns: minmax(56px, 30%) 1fr 48px; } .pbar.has-delta { grid-template-columns: minmax(56px, 30%) 1fr 48px; } .pbar-delta { display: none; }

@@ -16,6 +16,21 @@ const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == n
 const stepFor = (w) => Math.max(1, Math.round(w / POINTS));
 const last = (a) => (a && a.length ? a[a.length - 1] : null);
 
+// Memory mode from /health: nothing for the plain default; else what moved to the host / the cap / the quantizer.
+function memoryLabel(m) {
+  if (!m) return '';
+  const parts = [];
+  if (m.mode === 'offload') parts.push(m.layers_on_host ? `offload ${m.layers_on_host}/${m.layers_total} layers` : 'offload embeddings');
+  if (m.max_device_memory_gb) parts.push(`cap ${m.max_device_memory_gb} GB`);
+  if (m.quant && m.quant !== 'none') parts.push(`${m.quant}${m.quant_backend ? ` (${m.quant_backend})` : ''}`);
+  return parts.join(' · ');
+}
+function memoryTip(m) {
+  const lines = [`CLEF_OFFLOAD=${m.offload}`, `device weights ${m.device_weights_gb} GB, host weights ${m.host_weights_gb} GB`];
+  if (m.embeddings_on_host) lines.push('token and output embeddings on the host');
+  return lines.join('\n');
+}
+
 /** Append a new point (new t) or replace the last one (same t). */
 function applyPoint(ts, p, max) {
   if (!ts || p.t == null) return ts;
@@ -251,6 +266,7 @@ export function Ops() {
       <div class="it"><span class="k">Errors</span><span class="v mono">${s.errors ?? '-'}</span></div>
       <div class="it"><span class="k">In flight</span><span class="v mono">${s.in_flight ?? '-'}</span></div>
       <div class="it"><span class="k">Backend</span><span class="v mono">${hd.backend ? `${hd.backend} · ${hd.dtype || ''}${hd.quant && hd.quant !== 'none' ? ` · ${hd.quant}` : ''}` : '-'}</span></div>
+      ${memoryLabel(hd.memory) ? html`<div class="it"><span class="k">Memory mode</span><span class="v mono" title=${memoryTip(hd.memory)}>${memoryLabel(hd.memory)}</span></div>` : null}
       <div class="it"><span class="k">Padding</span><span class="v mono">${s.forward && s.forward.padding_ratio != null ? fmtNum(s.forward.padding_ratio, 2) : '-'}</span></div>
     </div>
 
