@@ -151,8 +151,8 @@ videos, runs on NVIDIA (CUDA), AMD (ROCm, also under WSL2), Apple Silicon (MPS) 
 | --- | --- | --- |
 | Windows + WSL2, AMD RX 7900 XTX | ROCm 7.2 | **verified** (development machine, all tests + benchmarks) |
 | Ubuntu / Windows + WSL2, NVIDIA | CUDA | **untested on hardware** (code paths unit-tested with mocked backends) |
-| macOS, Apple Silicon | MPS | **untested on hardware** (CI macOS runners have no MPS) |
-| Any OS, no GPU | CPU | **verified in CI** (unit tests on Ubuntu, macOS, Windows; the model is not loaded in CI) |
+| macOS, Apple Silicon | MPS | **untested on hardware** (no Apple Silicon machine has run it yet) |
+| Any OS, no GPU | CPU | **unit-tested** on Ubuntu, macOS and Windows (the tests never load the model) |
 
 "Untested on hardware" becomes "verified" only after a maintainer runs the [hardware validation](hardware-validation.md)
 and pastes the result into [hardware results](hardware-results.md).

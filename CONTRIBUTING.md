@@ -31,7 +31,7 @@ inside WSL, then `pip install -e ".[server,dev]"`. Use `.\clef.ps1` from Windows
 
 **Node** (JS client only): Node 18+, no install step.
 
-## Checks (CI runs the same)
+## Checks (run them before a PR)
 
 ```bash
 ruff check .
@@ -42,7 +42,7 @@ node --test clients/js/test/client.test.js           # JS client
 shellcheck scripts/*.sh
 ```
 
-If you touch the docs, build the site the way CI does (strict: any broken link or warning fails). Python code blocks in
+If you touch the docs, build the site strictly ( any broken link or warning fails). Python code blocks in
 Markdown are formatted by `ruff format`, so keep them formatted and free of aligned trailing comments:
 
 ```bash
@@ -57,10 +57,8 @@ Actions is disabled for this repository, so publish by hand after committing doc
 Run `ruff format` only on files you changed; a repo-wide format in a multi-person change touches everyone's files.
 Python line length is 110.
 
-CI (`.github/workflows/ci.yml`) runs on Ubuntu (Python 3.10 and 3.12), macOS 14 and Windows (3.12): ruff, unit tests,
-OpenAPI check, wheel build and a CLI smoke test from the built wheel (`clef --help`, `clef version`,
-`clef doctor --no-gpu`), plus the JS tests, shellcheck and a build-only Docker job for the CUDA and ROCm images.
-Nothing is published; a `v*` tag builds a GitHub Release with the wheel, sdist and `openapi.json`.
+The repository has no CI (GitHub Actions is disabled), so these checks are the gate: run all of them before opening
+a PR, on Python 3.10 if you can (the oldest supported version). Nothing is published to PyPI, npm or a registry.
 
 ## Tests
 
@@ -85,7 +83,7 @@ Nothing is published; a `v*` tag builds a GitHub Release with the wheel, sdist a
 
 ## Hardware checklist
 
-CI cannot exercise GPUs, and macOS runners have no MPS. If your change touches a backend (dtype, memory, fast paths,
+The unit tests cannot exercise GPUs. If your change touches a backend (dtype, memory, fast paths,
 quantization, telemetry), say in the PR which hardware you ran it on. Maintainers with a real NVIDIA or Mac machine:
 follow [docs/hardware-validation.md](docs/hardware-validation.md) and paste the results. Performance changes need
 before/after numbers from `clef bench`; a regression of more than 5% on the verified ROCm setup blocks a change.

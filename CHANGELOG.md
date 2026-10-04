@@ -47,9 +47,9 @@ memory mode. CUDA and Apple Silicon remain untested on hardware.
   `router(ctx) -> APIRouter` and is listed in `main.FEATURES` (`evaluation`, `compat`, `jobs`); the context carries
   config, stats, engine, auth and rate-limit dependencies, the inference helpers and startup / shutdown hooks.
   Evaluation, compat and jobs are built on it.
-- **Docs site** (MkDocs Material, deployed to GitHub Pages by `.github/workflows/docs.yml`, built with `--strict`
-  on pull requests): <https://miguelcarrascob.github.io/clef/>, with the interactive API reference generated from
-  `openapi.json`.
+- **Docs site** (MkDocs Material, built with `--strict` and published to the `gh-pages` branch by
+  `scripts/publish_docs.sh`): <https://miguelcarrascob.github.io/clef/>, with the interactive API reference
+  generated from `openapi.json`.
 
 ### Changed
 - Measured on the RX 7900 XTX (see [docs/memory.md](docs/memory.md)): offload is bit-identical to bf16. A 16 GB
@@ -81,6 +81,8 @@ memory mode. CUDA and Apple Silicon remain untested on hardware.
 - Compat chat responses list ignored request fields in `clef.ignored`.
 - Python and JS clients: `save_job_results(require_finished=True)` writes atomically; `jobs()` exposes `total`;
   the JS client no longer retries a job submission after it was sent (unless an idempotency key is given).
+- GitHub Actions workflows (CI, release, docs) and Dependabot are removed; GitHub Actions is disabled for the
+  repository. The checks in CONTRIBUTING.md are run locally before a PR, and the docs are published by hand.
 
 ### Fixed
 - Server start with `CLEF_MAX_DEVICE_MEMORY_GB` segfaulted on ROCm / WSL2: GPU telemetry sampling raced torch's

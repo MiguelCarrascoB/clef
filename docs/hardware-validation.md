@@ -1,7 +1,7 @@
 # Hardware validation checklist
 
-For maintainers with a real Mac (Apple Silicon) or NVIDIA machine. GitHub runners have no GPU and macOS runner VMs
-have no MPS, so CI cannot prove these backends. Until this checklist has been run and its results pasted back, the
+For maintainers with a real Mac (Apple Silicon) or NVIDIA machine. The unit tests mock the backends and never load
+the model, so they cannot prove these backends. Until this checklist has been run and its results pasted back, the
 README marks CUDA and MPS as "untested on hardware".
 
 Time: ~30-60 min plus the ~19 GB download. Needs: 24 GB NVIDIA GPU or Mac with >= 32 GB (or a 16 GB NVIDIA for the

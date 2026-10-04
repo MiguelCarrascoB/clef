@@ -27,8 +27,7 @@ caveats and the full measurement table: [Smaller GPUs](memory.md).
 Disk: ~19 GB for the weights plus ~21 GB free during `clef download`.
 
 !!! note "Nothing is published to PyPI"
-    Install from a checkout, from the wheel on the
-    [GitHub Releases](https://github.com/MiguelCarrascoB/clef/releases) page, or straight from git (below).
+    Install from a checkout or straight from git (below).
 
 ## One-line install
 

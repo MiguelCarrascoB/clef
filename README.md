@@ -7,7 +7,6 @@
 Run Cloudflare's [clef-flash](https://huggingface.co/Cloudflare/clef-flash) decision model locally behind a FastAPI
 server, a CLI, Python and JavaScript clients and a web console.
 
-[![CI](https://github.com/MiguelCarrascoB/clef/actions/workflows/ci.yml/badge.svg)](https://github.com/MiguelCarrascoB/clef/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-miguelcarrascob.github.io%2Fclef-blue.svg)](https://miguelcarrascob.github.io/clef/)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
@@ -72,8 +71,7 @@ clef download    # one-time, ~19 GB, pinned and resumable
 clef serve       # then open http://127.0.0.1:8910/
 ```
 
-Not on PyPI yet: install from git, from a clone (see [Installation](#installation)) or from a wheel on the GitHub
-Releases page.
+Not on PyPI yet: install from git or from a clone (see [Installation](#installation)).
 
 ## Usage
 
@@ -232,9 +230,9 @@ matrix, reliability diagram, coverage curve, mistakes) and **Ops** (live KPIs an
 | Platform | Backend | Status |
 | --- | --- | --- |
 | Windows + WSL2, AMD RX 7900 XTX | ROCm 7.2 | ✅ **verified** (development machine, all tests + benchmarks) |
-| Any OS, no GPU | CPU | ✅ **verified in CI** (unit tests on Ubuntu, macOS, Windows; the model is not loaded in CI) |
+| Any OS, no GPU | CPU | ✅ **unit-tested** on Ubuntu, macOS and Windows (the tests never load the model) |
 | Ubuntu / Windows + WSL2, NVIDIA | CUDA | ⚠️ **untested on hardware** (code paths unit-tested with mocked backends) |
-| macOS, Apple Silicon | MPS | ⚠️ **untested on hardware** (CI macOS runners have no MPS) |
+| macOS, Apple Silicon | MPS | ⚠️ **untested on hardware** (no Apple Silicon machine has run it yet) |
 
 "Untested on hardware" becomes "verified" once someone runs [docs/hardware-validation.md](docs/hardware-validation.md)
 and adds the result to [docs/hardware-results.md](docs/hardware-results.md). **Have an NVIDIA card or a Mac? That is

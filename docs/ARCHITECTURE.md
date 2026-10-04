@@ -504,7 +504,7 @@ message; traceback only in the server log). The OpenAI and Hugging Face routes u
 Compat).
 
 ### OpenAPI
-`openapi.json` at the repo root is exported from `create_app()` by `scripts/export_openapi.py` (CI checks it is up to
+`openapi.json` at the repo root is exported from `create_app()` by `scripts/export_openapi.py` (`--check` verifies it is up to
 date). All routes, including the feature modules', have pydantic request/response models so `/docs` shows them.
 
 ## CLI (`clef`, `cli.py`)
@@ -527,7 +527,7 @@ clef version
   when something already answers on the port.
 - `stop`: SIGTERM (Windows: `taskkill /PID /T`), wait 30 s, then kill; removes the pidfile.
 - `status`: process + `/health` summary (backend, device, status); exit 0 when healthy.
-- `doctor --no-gpu`: skips everything that needs a GPU or the weights (CI smoke). On a GPU, `doctor` also prints a
+- `doctor --no-gpu`: skips everything that needs a GPU or the weights (smoke check). On a GPU, `doctor` also prints a
   `memory setting` line (from `recommend_memory_setting`) when bf16 would not fit comfortably. `--smoke`: loads the model on
   the detected backend, runs one fixed record, checks probabilities sum to 1 and prints latency.
 - `download`: `huggingface_hub.snapshot_download(MODEL_REPO, revision=MODEL_REVISION)` into the HF cache (or

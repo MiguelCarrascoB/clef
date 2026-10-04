@@ -9,7 +9,7 @@ description = "Run Cloudflare's clef-flash decision model locally (CUDA, ROCm, A
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-# The WSL venv runs Python 3.10; CI runs 3.12. Keep the floor at what is actually deployed.
+# The WSL venv runs Python 3.10; development also uses 3.12. Keep the floor at what is actually deployed.
 requires-python = ">=3.10"
 keywords = ["llm", "classification", "fastapi", "clef-flash", "local-inference"]
 classifiers = [

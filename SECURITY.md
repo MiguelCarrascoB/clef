@@ -62,7 +62,7 @@ most, trusted callers on a local network.
   [`THIRD_PARTY_NOTICES.md`](src/clef_server/static/vendor/THIRD_PARTY_NOTICES.md).
 - **Model and dependencies.** Weights come from the pinned Hugging Face revision; `CLEF_MODEL_PATH` should point only
   at files you trust (the model code in the release directory is imported and executed). Dependencies are pinned in
-  `requirements/`; Dependabot updates the GitHub Actions.
+  `requirements/`.
 
 Out of scope / not provided: TLS (use a reverse proxy, see [docs/remote-access.md](docs/remote-access.md)), per-user
 authorization (all keys have the same access to the model; job ownership only scopes job visibility), multi-tenant isolation, protection against a malicious model directory.
