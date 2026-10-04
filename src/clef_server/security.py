@@ -16,7 +16,9 @@ from starlette.middleware.cors import CORSMiddleware
 
 from .config import Config
 
-TRACKED_EXACT = frozenset({"/v1/systemone", "/v1/batch", "/v1/classify", "/v1/classify/batch", "/v1/score"})
+TRACKED_EXACT = frozenset(
+    {"/v1/systemone", "/v1/batch", "/v1/classify", "/v1/classify/batch", "/v1/score", "/v1/evaluate"}
+)
 _CLASSIFIER_RUN = re.compile(r"^/v1/classifiers/[^/]+(/batch)?$")
 # compat routes (OpenAI chat completions, Hugging Face zero-shot): see compat.py
 _COMPAT_RUN = re.compile(r"^(/v1/chat/completions|(/hf)?/models/.+)$")
