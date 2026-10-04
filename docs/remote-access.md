@@ -37,7 +37,8 @@ machines on your local network, and what to add if you expose it further.
 
    `Authorization: Bearer <key>` works too. The Python and JS clients take the key as `api_key=` / `apiKey`.
 
-All `/v1/*` routes then require a key (401 otherwise). Open routes: `/`, static files, `/health`, `/livez`, `/docs`,
+All `/v1/*` routes, and the Hugging Face routes (`/hf/models/*`), then require a key (401 otherwise); the OpenAI SDKs
+send it as `Authorization: Bearer` from their `api_key` setting. Open routes: `/`, static files, `/health`, `/livez`, `/docs`,
 `/openapi.json`. The console is served without a key, but its API calls need one: enter it in the console settings. The
 live event stream accepts `?key=` because browsers cannot set headers on `EventSource`; this puts the key in the URL,
 so on untrusted networks use TLS.
@@ -52,9 +53,17 @@ so on untrusted networks use TLS.
 ## Rate limit
 
 `CLEF_RATE_LIMIT=N` allows N inference requests per minute per key (per client IP when auth is off), sliding 60 s
-window. Counted routes: `/v1/systemone`, `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/score` and
-`POST /v1/classifiers/{name}[/batch]`. Over the limit: `429` with `Retry-After: <seconds>`. `0` (default) disables it.
+window. Counted routes: `/v1/systemone`, `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/score`,
+`POST /v1/classifiers/{name}[/batch]`, `/v1/chat/completions`, `/hf/models/*`, `/v1/evaluate` and `POST /v1/jobs`. Over the limit: `429` with `Retry-After: <seconds>`. `0` (default) disables it.
 A batch call counts as one request, so also keep `CLEF_MAX_BATCH` reasonable.
+
+## Jobs, webhooks and keys
+
+Async jobs belong to the key that submitted them: other keys get `404` for them and do not see them in the job list.
+Webhooks are off until you set `CLEF_WEBHOOK_ALLOW`; list only the receivers you trust (a private address needs its
+IP or CIDR listed explicitly) and see [Jobs & webhooks](jobs.md#webhooks-are-off-by-default-ssrf) and the
+[security policy](../SECURITY.md) before enabling them on an exposed server. `jobs.db` in the state directory holds
+your submitted inputs and the webhook secrets in clear text, so protect that directory like the keys file.
 
 ## CORS (browser callers)
 

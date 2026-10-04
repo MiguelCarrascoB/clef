@@ -21,12 +21,15 @@ Untested on hardware at the time of writing; these are the known failure modes o
 - **`causal-conv1d` fails to build**: it compiles CUDA code and needs `nvcc` matching the torch CUDA version, a C++
   compiler and `ninja`. Prefer a prebuilt wheel matching your torch/CUDA/Python, or install the CUDA toolkit of the same
   major.minor as `torch.version.cuda`. If it cannot be built, run without it; correctness is unchanged.
-- **`CLEF_QUANT` errors**: quantization is CUDA only and needs `bitsandbytes` (`pip install bitsandbytes`). On other
-  backends it is refused with a clear error. If bitsandbytes cannot find the CUDA libraries, check
-  `python -m bitsandbytes`. Quantized probabilities differ slightly from bf16 (numbers pending hardware).
+- **`CLEF_QUANT` errors**: on CUDA `int8` and `nf4` use `bitsandbytes` (`pip install bitsandbytes`, part of the `cuda`
+  extra); if it cannot find the CUDA libraries, check `python -m bitsandbytes`. `CLEF_QUANT_BACKEND=torchao` needs
+  `pip install "clef-local[quant]"`. `nf4` exists only in bitsandbytes. Quantized probabilities differ slightly from
+  bf16 (numbers on CUDA are pending hardware; on ROCm see [Smaller GPUs](memory.md)).
 - **Out of memory on load or under load**: bf16 needs ~19.5 GB peak. Close other GPU users, use a 24 GB card, or
-  `CLEF_QUANT=int8|nf4`. Preflight (`CLEF_PREFLIGHT=1`) reports this before loading. At runtime an OOM returns 503 and
-  the server keeps running; lower `CLEF_MAX_MICROBATCH` or `CLEF_MAX_TOKENS`.
+  lower the footprint: `CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=<N-1>` (lossless) or `CLEF_QUANT=int8`; the
+  [Smaller GPUs](memory.md) table says what fits where. Preflight (`CLEF_PREFLIGHT=1`) reports this before loading and
+  `clef doctor` prints a recommendation. At runtime an OOM returns 503 and the server keeps running; lower
+  `CLEF_MAX_MICROBATCH` or `CLEF_MAX_TOKENS`, or raise the cap.
 - **bf16 on older GPUs** (pre-Ampere): bf16 is not supported; clef falls back to fp16 with a warning. Check parity with
   `bench/parity.py`.
 
@@ -72,19 +75,55 @@ Untested on hardware at the time of writing.
   clef, export it in your shell.
 - **fla Triton kernels not available**: expected. Triton does not run on macOS, so the torch fallback is used and the
   transformers fast-path warning is normal.
-- **`CLEF_QUANT` is refused**: bitsandbytes quantization is CUDA only.
+- **`CLEF_QUANT=nf4` is refused**: nf4 needs bitsandbytes (NVIDIA or AMD). `CLEF_QUANT=int8` works through torchao
+  (`pip install torchao`, already in the `mps` extra) but is not validated on Apple Silicon.
+- **`CLEF_OFFLOAD=cpu` does nothing**: a Mac shares one memory pool between device and host, so offload has no effect
+  there (a warning is logged). Use `CLEF_QUANT=int8` instead.
 - **Slow first request**: MPS compiles kernels lazily; the startup warmup covers the common shapes.
 - **Closing the lid / sleep stops the server**: use the launchd agent in `deploy/` and keep the Mac awake
   (`caffeinate -i`).
 
 ## CPU
 
+- **`CLEF_OFFLOAD` has no effect**: the CPU backend already runs from host RAM.
 - **Out of memory / the machine swaps**: the model needs ~40 GB of RAM on CPU (weights plus activations). Use a GPU
   backend if you have one.
 - **Very slow**: expected, seconds per record. CPU mode is for development and CI (the unit tests never load the
   model). Set `CLEF_WARMUP=0` to skip the warmup.
 - **Backend detected as cpu on a machine with a GPU**: you installed a CPU torch build. Reinstall from the matching
   lock file, or force a device with `CLEF_DEVICE=cuda|rocm|mps` to get an explicit error with a hint.
+
+## Smaller-memory modes
+
+See [Smaller GPUs](memory.md) for the numbers.
+
+- **Load fails with a "not enough memory" message under `CLEF_OFFLOAD=cpu`**: even streaming every layer does not fit
+  under `CLEF_MAX_DEVICE_MEMORY_GB`. Raise the cap (the smallest one measured to work is 7 GB; 6 crashed while loading
+  on WSL2 because too many layers had to be pinned) or add `CLEF_QUANT=int8`.
+- **Host RAM or WSL2 memory**: offload keeps what it moved off the GPU in pinned host memory (~6 GB at a 15 GB cap,
+  ~15 GB at 7 GB). On WSL2 raise `memory=` in `.wslconfig`. Loading briefly uses more (memory-mapped weight files).
+- **A very long input returns 503 `GpuOutOfMemory` with offload**: activations exceeded the 2.5 GB reserve. Lower
+  `CLEF_MAX_MICROBATCH`, shorten the input or raise the cap. The server stays up.
+- **Slower than bf16**: expected. The layers kept on the host are copied over PCIe each forward (p50 +15% at a 15 GB
+  cap, 3.6x at 7 GB).
+
+## Jobs, webhooks and compatibility routes
+
+- **`400 webhook.url: ...` on submit**: webhooks are off until the operator sets `CLEF_WEBHOOK_ALLOW`; the host (or IP
+  / CIDR for a private address) must be listed. Link-local, multicast and reserved addresses are always refused.
+- **A webhook never arrives**: check `webhook.deliveries` in `GET /v1/jobs/{id}` (`last_status`, `last_error`). The
+  allow-list is re-checked, and the host re-resolved, on every attempt. Retries stop after `CLEF_WEBHOOK_ATTEMPTS`.
+- **`404` for a job you submitted**: another API key. Jobs are visible only to the key that created them.
+- **`409` on `POST /v1/jobs`**: `CLEF_MAX_JOBS` queued or running jobs; retry after `Retry-After`. On cancel / delete
+  it means the job is already finished / still active.
+- **A job stays `queued`**: jobs run one at a time, in order; check `GET /v1/jobs?status=running`. While the model is
+  loading a job waits instead of failing.
+- **`400 missing_schema` from `/v1/chat/completions`**: clef decides, it does not generate text. Send a
+  `response_format` JSON schema (or one forced tool); see [compatibility](openai-compat.md).
+- **`huggingface_hub` cannot find the model**: pass the full route, `model="http://127.0.0.1:8910/hf/models/clef-flash"`,
+  instead of setting `HF_ENDPOINT`.
+- **`POST /v1/evaluate` rejects the rows**: more than `CLEF_MAX_EVAL_ROWS` (500), or a gold label that is not in the
+  label set. Large sets: submit an `evaluate` job.
 
 ## Common
 
@@ -104,5 +143,5 @@ Untested on hardware at the time of writing.
 - **Not enough disk space**: the weights are ~19 GB; `clef doctor` and `clef download` check this up front.
 - **Where are the logs / state?** `clef logs -f`. The state directory is `~/.local/state/clef` on Linux,
   `~/Library/Application Support/clef` on macOS, `%LOCALAPPDATA%\clef` on Windows (`CLEF_STATE_DIR` overrides;
-  `CLEF_LOG_DIR` is a legacy alias). It holds `server.log`, `server.pid` and `classifiers/`.
+  `CLEF_LOG_DIR` is a legacy alias). It holds `server.log`, `server.pid`, `classifiers/` and `jobs.db`.
 - **Upgrading from v2**: see the migration notes in the [CHANGELOG](../CHANGELOG.md).
