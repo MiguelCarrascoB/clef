@@ -7,7 +7,7 @@ Please report privately through GitHub: Security tab > "Report a vulnerability"
 Include the version (`clef version`), the backend, and steps to reproduce. You can expect an acknowledgement within a
 few days; this is a one-maintainer project, so there is no formal SLA.
 
-Supported version: the latest release (3.x).
+Supported version: the latest release (3.1.x).
 
 ## Threat model
 
@@ -39,11 +39,14 @@ most, trusted callers on a local network.
   The list is checked when the job is submitted and again on **every delivery attempt**: the hostname is resolved
   at that moment, every returned address must be public or inside a listed IP / CIDR, and the connection is pinned to
   the checked address, so a DNS answer that changes later (rebinding) is refused. Link-local (cloud metadata),
-  multicast, unspecified and reserved addresses are refused even when a CIDR covers them. Redirects are never
+  multicast, unspecified and reserved addresses are refused even when a CIDR covers them. IPv6 addresses that embed
+  an IPv4 address (NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, 6to4, Teredo) are judged by that IPv4 address, and
+  site-local IPv6 is refused, so a translated address cannot reach a private host. Redirects are never
   followed, environment proxies are ignored, credentials in the URL are rejected and API keys are never sent.
   Deliveries are signed (`X-Clef-Signature`, HMAC-SHA256 over `"<timestamp>.<body>"`); receivers should verify it and
   check the timestamp. Use `https` for anything that leaves your machine. The TLS path has not been tested against a
-  real TLS server yet. Details: [docs/jobs.md](docs/jobs.md#webhooks).
+  real TLS server yet. `POST /v1/jobs/{id}/webhook/redeliver` resends a failed delivery only to the job's stored URL,
+  needs the owner's key, is rate limited and re-runs every check above. Details: [docs/jobs.md](docs/jobs.md#webhooks).
 - **Jobs: ownership, retention, disk.** With keys configured, a job belongs to the key name that submitted it; other
   keys get `404` and do not see it in the list. This is a convenience between cooperating callers, not tenant
   isolation: there is no admin view, and jobs created while auth was off stay visible to every key. Jobs are stored in

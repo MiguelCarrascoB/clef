@@ -301,7 +301,7 @@ def test_status_unreachable_exit_1(tmp_path, monkeypatch, capsys):
 
 def test_status_ready_exit_0(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("CLEF_STATE_DIR", str(tmp_path))
-    ok = (200, {"status": "ready", "version": "3.0.0"})
+    ok = (200, {"status": "ready", "version": "3.1.0"})
     monkeypatch.setattr(cli, "http_json", lambda url, timeout=3.0: ok)
     assert cli.main(["status", "--json"]) == 0
     assert '"ready"' in capsys.readouterr().out

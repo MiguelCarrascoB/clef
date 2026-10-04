@@ -1,6 +1,6 @@
 {
   "name": "clef-client",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Dependency-free JavaScript client for the clef-flash server (Node 18+ and browsers)",
   "type": "module",
   "private": true,

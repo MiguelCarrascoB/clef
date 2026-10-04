@@ -306,8 +306,11 @@ the stored payload, which already holds the saved classifier as it was at submit
 their own timer (every ten minutes), also while a job is running. Delete the file to drop all jobs (an older
 `jobs.db` is upgraded in place).
 
-**Throughput.** Jobs run one at a time, FIFO, at the engine's batch speed (roughly 8-9 records/s on one GPU),
-shared with interactive traffic. Priority between jobs, and a priority lane inside the engine, do not exist.
+**Throughput.** Jobs run one at a time, FIFO, at the engine's batch speed, shared with interactive traffic.
+Priority between jobs, and a priority lane inside the engine, do not exist. Measured on the RX 7900 XTX (bf16,
+short tickets): a 500-item `classify` job ran at ~15 items/s (32 s); meanwhile interactive `/v1/classify` calls
+took p50 422 / p95 458 ms instead of 109 / 118 ms idle. They are never starved, but expect them to be ~4x slower
+while a large job runs.
 
 ## Writing a job kind
 

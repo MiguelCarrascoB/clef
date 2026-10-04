@@ -459,7 +459,7 @@ Guide: [jobs.md](jobs.md).
   (see [jobs.md](jobs.md#writing-a-job-kind)).
 
 ### `GET /health`
-200 when status is ready or warming, 503 otherwise. `{"ready", "status", "version": "3.0.0", **engine.info(),
+200 when status is ready or warming, 503 otherwise. `{"ready", "status", "version": "3.1.0", **engine.info(),
 "load_seconds", "uptime_s", "error", "limits": Config.public_limits()}`. `GET /livez` -> 200 `{"ok": true}`.
 
 ### `GET /v1/stats?window_s=300`

@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 3.1.0 (2026-10-04)
 
-Four features on top of 3.0.0, plus the public-release sweep. Only the Windows + WSL2 + ROCm setup has been run on
-real hardware; the compat, evaluation and jobs routes were tested against a fake engine (and, for compat, the
-official `openai` 3.24 and `huggingface_hub` 1.33 SDKs), and the memory modes were measured on the RX 7900 XTX only.
+Four features on top of 3.0.0, plus the public-release sweep. Everything was run on the verified Windows + WSL2 +
+ROCm setup (RX 7900 XTX): the compat routes with the official `openai` and `huggingface_hub` SDKs, evaluation on
+`examples/tickets_labelled.csv` (accuracy 0.87, ECE 0.04), a 500-item job alongside interactive traffic, and every
+memory mode. CUDA and Apple Silicon remain untested on hardware.
 
 ### Added
 - **OpenAI and Hugging Face compatibility** ([guide](docs/openai-compat.md)): `GET /v1/models[/{id}]` and
@@ -62,6 +63,31 @@ official `openai` 3.24 and `huggingface_hub` 1.33 SDKs), and the memory modes we
   `max_job_items` and `webhooks_enabled`.
 - README restructured for the public release (hero GIF, usage sections for the OpenAI SDK, evaluation and jobs,
   measured memory options); the docs site gains pages for the four features.
+- `/health` gains a `memory` block (offload mode, cap, quant and quant backend, layers / embeddings on the host,
+  host and device weight GB), shown on the Ops screen when not the default. Load-time fallbacks and caveats (cap not
+  enforced, offload fallback, unpinned host memory, nf4 on ROCm, int8 on MPS, cap above free memory) are listed in
+  `/health` `warnings`, and `clef doctor` warns for those combinations and below a 7 GB offload cap on WSL.
+- Console: at 560 px and below the top bar wraps into two rows with a scrolling tab strip (no horizontal page
+  scroll at 375 px).
+- Jobs: a job whose items all fail (or that trips the circuit breaker on a systemic error) ends `failed` instead
+  of `succeeded`; the job view gains `warnings` and `webhook.failed_deliveries`, clients gain `has_errors`. Saved
+  classifiers are copied into the job at submit (`snapshot_of`) for every kind, including `evaluate`. Jobs
+  interrupted more than `CLEF_JOB_MAX_RESUMES` (3) times are failed. `POST /v1/jobs` honours `Idempotency-Key`.
+  Webhooks retry for ~8 minutes by default (`CLEF_WEBHOOK_ATTEMPTS` 10, `CLEF_WEBHOOK_BACKOFF_S`,
+  `CLEF_WEBHOOK_BACKOFF_CAP_S`) and a failed delivery can be resent with `POST /v1/jobs/{id}/webhook/redeliver`.
+- Evaluation: the `evaluate` job kind waits for the model, isolates bad rows (`n_errors`) and resumes; rows with
+  NaN / non-numeric scores or none of the labels are rejected, defaulted or clipped scores are counted;
+  `POST /v1/evaluate` counts in stats and the request log.
+- Compat chat responses list ignored request fields in `clef.ignored`.
+- Python and JS clients: `save_job_results(require_finished=True)` writes atomically; `jobs()` exposes `total`;
+  the JS client no longer retries a job submission after it was sent (unless an idempotency key is given).
+
+### Fixed
+- Server start with `CLEF_MAX_DEVICE_MEMORY_GB` segfaulted on ROCm / WSL2: GPU telemetry sampling raced torch's
+  own device initialisation. The sampler now skips GPU telemetry while the model loads.
+- Blank `CLEF_*` variables (WSLENV forwards unset Windows variables as empty strings) now mean "unset" instead of
+  failing config validation.
+- CSV export no longer prefixes negative numbers with a quote, and an export of a running job keeps every column.
 
 ### Security
 - Webhook deliveries are an SSRF surface, so they are off by default and gated by `CLEF_WEBHOOK_ALLOW`. The
@@ -69,16 +95,20 @@ official `openai` 3.24 and `huggingface_hub` 1.33 SDKs), and the memory modes we
   pinned to the checked address (no DNS rebinding), link-local (cloud metadata), multicast, unspecified and
   reserved addresses are always refused, redirects and environment proxies are ignored and API keys are never
   sent. Webhook secrets are stored in clear text in `jobs.db` (HMAC needs them).
-- Job results exported as CSV neutralise spreadsheet formulas (cells starting with `=`, `+`, `-` or `@`).
+- Webhook addresses that embed an IPv4 address (NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`, 6to4, Teredo) are
+  judged by that IPv4 address, and site-local / reserved IPv6 ranges are refused, so a translated address can no
+  longer reach a private host. Redelivery reuses the stored URL and re-runs every check.
+- Job results exported as CSV neutralise spreadsheet formulas (text cells starting with `=`, `+`, `-` or `@`).
 - Jobs are owned by the API key name that submitted them; other keys get `404`. Job payloads and results are kept on
   disk until deleted or until `CLEF_JOB_TTL_HOURS` expires.
 - `THIRD_PARTY_NOTICES` for the vendored Preact, htm and uPlot console libraries
   (`src/clef_server/static/vendor/THIRD_PARTY_NOTICES.md`).
 
 ### Known gaps
-- Jobs are not counted in `/v1/stats` or the request log; the webhook TLS path was not tested against a real TLS
-  server; LangChain was not tested against the compat routes; offload, torchao int8 and the device cap are untested
-  on NVIDIA and Apple Silicon.
+- Jobs are not counted in `/v1/stats` or the request log, and there is no priority lane: interactive calls are
+  ~4x slower while a large job runs (p50 109 -> 422 ms measured). The webhook TLS path was not tested against a real
+  TLS server; LangChain was not tested against the compat routes; offload, torchao int8 and the device cap are
+  untested on NVIDIA and Apple Silicon.
 
 ## 3.0.0
 

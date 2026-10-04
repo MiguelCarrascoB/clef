@@ -93,6 +93,12 @@ Every classified row is stored as a job item (`index`, `input`, `gold`, `predict
   stored (including their errors) are replayed into the metrics, so the final result covers the whole dataset.
 - Cancelling a job returns the metrics of the rows finished so far, marked `cancelled` and `partial`.
 
+!!! example "On real hardware"
+    `examples/tickets_labelled.csv` (47 tickets, billing / technical / account, a few deliberately ambiguous)
+    with the instructions "Which team should handle the message?", bf16 on an RX 7900 XTX: accuracy 0.872,
+    top-2 accuracy 1.0, macro-F1 0.867, ECE 0.041, Brier 0.202, 3.2 s for the whole set. Most of the 6 mistakes
+    are billing / account and account / technical confusions. Without instructions accuracy drops to 0.83.
+
 ## What the numbers mean
 
 - **Accuracy**: share of rows where the top label equals the gold label. **Top-2 accuracy**: the gold label is among
