@@ -1,0 +1,2136 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Local server, CLI, clients and web console for Cloudflare's clef-flash decision model.">
+      
+      
+      
+        <link rel="canonical" href="https://miguelcarrascob.github.io/clef/changelog/">
+      
+      
+        <link rel="prev" href="../security/">
+      
+      
+        <link rel="next" href="../license/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Changelog - clef</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#changelog" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="clef" class="md-header__button md-logo" aria-label="clef" data-md-component="logo">
+      
+  <img src="../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            clef
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Changelog
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/MiguelCarrascoB/clef" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    MiguelCarrascoB/clef
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../getting-started/" class="md-tabs__link">
+          
+  
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../classification/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../cli/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../troubleshooting/" class="md-tabs__link">
+          
+  
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../contributing/" class="md-tabs__link">
+          
+  
+  
+  Project
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="clef" class="md-nav__button md-logo" aria-label="clef" data-md-component="logo">
+      
+  <img src="../assets/logo.svg" alt="logo">
+
+    </a>
+    clef
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/MiguelCarrascoB/clef" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    MiguelCarrascoB/clef
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-request/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../classification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Classification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openai-compat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAI & Hugging Face compatibility
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Jobs & webhooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smaller GPUs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../remote-access/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Remote access
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Console
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ARCHITECTURE/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hardware-validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hardware validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hardware-results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hardware results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#310-2026-10-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.1.0 (2026-10-04)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3.1.0 (2026-10-04)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#security" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#known-gaps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gaps
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#300" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.0.0
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3.0.0">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#removed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#migration-notes-from-2x" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migration notes from 2.x
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#200" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.0.0
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2.0.0">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ops-packaging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ops / packaging
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#100" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.0.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../license/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    License
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#310-2026-10-04" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.1.0 (2026-10-04)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3.1.0 (2026-10-04)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#security" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#known-gaps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known gaps
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#300" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.0.0
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3.0.0">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#removed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Removed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#migration-notes-from-2x" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migration notes from 2.x
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#200" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2.0.0
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2.0.0">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ops-packaging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ops / packaging
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#100" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.0.0
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/MiguelCarrascoB/clef/edit/main/docs/changelog.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="changelog">Changelog<a class="headerlink" href="#changelog" title="Permanent link">&para;</a></h1>
+<h2 id="310-2026-10-04">3.1.0 (2026-10-04)<a class="headerlink" href="#310-2026-10-04" title="Permanent link">&para;</a></h2>
+<p>Four features on top of 3.0.0, plus the public-release sweep. Everything was run on the verified Windows + WSL2 +
+ROCm setup (RX 7900 XTX): the compat routes with the official <code>openai</code> and <code>huggingface_hub</code> SDKs, evaluation on
+<code>examples/tickets_labelled.csv</code> (accuracy 0.87, ECE 0.04), a 500-item job alongside interactive traffic, and every
+memory mode. CUDA and Apple Silicon remain untested on hardware.</p>
+<h3 id="added">Added<a class="headerlink" href="#added" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>OpenAI and Hugging Face compatibility</strong> (<a href="../openai-compat/">guide</a>): <code>GET /v1/models[/{id}]</code> and
+  <code>POST /v1/chat/completions</code> turn a JSON schema (<code>response_format</code> or one forced tool) into decisions: string
+  enum -&gt; choice, boolean -&gt; yes/no, integer enum / bounded integer / <code>x-clef-ordinal</code> string enum -&gt; score, array
+  of string enums -&gt; multi-label. Answers are argmax JSON in <code>message.content</code>, with <code>logprobs</code> (log of the
+  calibrated probability), a non-standard <code>clef</code> field with every probability, streaming (SSE) and OpenAI-shaped
+  errors. A request without a usable schema is a <code>400 missing_schema</code>. <code>POST /hf/models/{id}</code> is the Hugging Face
+  zero-shot endpoint (classic <code>{sequence, labels, scores}</code> or the <code>[{label, score}]</code> list that <code>huggingface_hub</code>
+  1.x expects). LangChain is not tested.</li>
+<li><strong>Evaluation</strong> (<a href="../evaluation/">guide</a>): <code>POST /v1/evaluate</code> (labelled rows, optionally a saved classifier;
+  up to <code>CLEF_MAX_EVAL_ROWS</code>, default 500) and <code>POST /v1/evaluate/metrics</code> (scores you already have, no
+  inference). Accuracy, top-2, macro / micro / weighted F1, per-label precision / recall / F1, confusion matrix,
+  reliability bins, ECE, MCE, Brier, log-loss, a coverage-vs-accuracy curve and <code>auto_route</code> thresholds;
+  multi-label reports exact match and Hamming loss. An <code>evaluate</code> job kind handles up to
+  <code>CLEF_MAX_JOB_EVAL_ROWS</code> (100000) rows. <code>examples/tickets_labelled.csv</code> is a 47-ticket sample.</li>
+<li><strong>Console: Evaluate tab</strong>: upload CSV / JSON / JSONL, pick the input and gold columns, run with progress and
+  cancel, then read the confusion heatmap, reliability diagram, coverage curve with a threshold readout, per-label
+  table and mistakes list; export predictions or metrics.</li>
+<li><strong>Async jobs and webhooks</strong> (<a href="../jobs/">guide</a>): <code>POST /v1/jobs</code> (kinds <code>classify</code>, <code>score</code>, <code>systemone</code>,
+  <code>evaluate</code>; <code>202</code> with <code>Location</code>), <code>GET /v1/jobs</code>, <code>GET /v1/jobs/{id}</code>, <code>GET /v1/jobs/{id}/results</code> (JSON pages,
+  or <code>?format=ndjson|csv</code>), <code>POST /v1/jobs/{id}/cancel</code>, <code>DELETE /v1/jobs/{id}</code>. Jobs live in SQLite
+  (<code>&lt;state dir&gt;/jobs.db</code>), run FIFO with one micro-batch in flight so interactive calls interleave, resume after a
+  restart, and belong to the API key that submitted them. Webhooks (<code>job.succeeded</code>, <code>job.failed</code>, <code>job.cancelled</code>,
+  opt-in <code>job.progress</code>) are signed with <code>X-Clef-Signature: sha256=HMAC(secret, "&lt;timestamp&gt;.&lt;body&gt;")</code> and are off
+  until <code>CLEF_WEBHOOK_ALLOW</code> lists the receivers. New settings: <code>CLEF_MAX_JOB_ITEMS</code>, <code>CLEF_MAX_JOBS</code>,
+  <code>CLEF_JOB_TTL_HOURS</code>, <code>CLEF_JOB_ENGINE_WAIT_S</code>, <code>CLEF_WEBHOOK_ALLOW</code>, <code>CLEF_WEBHOOK_TIMEOUT_S</code>,
+  <code>CLEF_WEBHOOK_ATTEMPTS</code>.</li>
+<li><strong>Clients</strong>: Python (<code>submit_job</code>, <code>classify_job</code>, <code>job</code>, <code>jobs</code>, <code>cancel_job</code>, <code>delete_job</code>, <code>wait_job</code>,
+  <code>job_results</code>, <code>save_job_results</code>; sync and async) and JavaScript (<code>submitJob</code>, <code>classifyJob</code>, <code>job</code>, <code>jobs</code>,
+  <code>cancelJob</code>, <code>deleteJob</code>, <code>waitJob</code>, <code>jobResults</code>). Examples: <code>openai_sdk.py</code>, <code>hf_zero_shot.py</code>, <code>jobs.py</code>.</li>
+<li><strong>Smaller GPUs</strong> (<a href="../memory/">guide</a>): <code>CLEF_OFFLOAD=cpu</code> (<code>--offload</code>) keeps the embeddings and any layers
+  that do not fit in host RAM and streams them in per forward; <code>CLEF_MAX_DEVICE_MEMORY_GB</code>
+  (<code>--max-device-memory-gb</code>) caps device memory as a hard allocator limit. <code>CLEF_QUANT=int8</code> now works on ROCm,
+  Apple Silicon and CPU through torchao (CUDA keeps bitsandbytes); <code>CLEF_QUANT_BACKEND=auto|bnb|torchao</code> picks the
+  library. <code>clef doctor</code> prints a recommended memory setting. torchao is part of the <code>rocm</code>, <code>mps</code>, <code>cpu</code> and new
+  <code>quant</code> extras. <code>bench/memory_bench.py</code> reproduces the measurements.</li>
+<li><strong>Extension point</strong>: <code>clef_server/appctx.py</code> defines <code>AppContext</code>. A feature module exposes
+  <code>router(ctx) -&gt; APIRouter</code> and is listed in <code>main.FEATURES</code> (<code>evaluation</code>, <code>compat</code>, <code>jobs</code>); the context carries
+  config, stats, engine, auth and rate-limit dependencies, the inference helpers and startup / shutdown hooks.
+  Evaluation, compat and jobs are built on it.</li>
+<li><strong>Docs site</strong> (MkDocs Material, deployed to GitHub Pages by <code>.github/workflows/docs.yml</code>, built with <code>--strict</code>
+  on pull requests): <a href="https://miguelcarrascob.github.io/clef/">https://miguelcarrascob.github.io/clef/</a>, with the interactive API reference generated from
+  <code>openapi.json</code>.</li>
+</ul>
+<h3 id="changed">Changed<a class="headerlink" href="#changed" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Measured on the RX 7900 XTX (see <a href="../memory/">docs/memory.md</a>): offload is bit-identical to bf16. A 16 GB
+  card runs with <code>CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=15</code> (p50 152 -&gt; 175 ms), a 12 GB card with
+  <code>CLEF_QUANT=int8 CLEF_OFFLOAD=cpu</code> (about 206 ms, mean probability error 0.006, 2 of 399 top choices flipped) and
+  an 8 GB card with a cap of 7 (about 540 ms, ~15 GB of host RAM). The old advice for 16 GB cards
+  (<code>CLEF_QUANT=nf4</code> with bitsandbytes) is replaced: nf4 flipped about 9% of top choices on ROCm and is not
+  recommended. CUDA and Apple Silicon are untested on hardware.</li>
+<li><code>CLEF_QUANT=int8</code> is no longer CUDA only (see above). <code>pip install "clef-local[quant]"</code> adds torchao anywhere.</li>
+<li>API keys also protect the new <code>/hf/models/*</code> routes (they live outside <code>/v1</code>). <code>/health</code> <code>limits</code> gains
+  <code>max_job_items</code> and <code>webhooks_enabled</code>.</li>
+<li>README restructured for the public release (hero GIF, usage sections for the OpenAI SDK, evaluation and jobs,
+  measured memory options); the docs site gains pages for the four features.</li>
+<li><code>/health</code> gains a <code>memory</code> block (offload mode, cap, quant and quant backend, layers / embeddings on the host,
+  host and device weight GB), shown on the Ops screen when not the default. Load-time fallbacks and caveats (cap not
+  enforced, offload fallback, unpinned host memory, nf4 on ROCm, int8 on MPS, cap above free memory) are listed in
+  <code>/health</code> <code>warnings</code>, and <code>clef doctor</code> warns for those combinations and below a 7 GB offload cap on WSL.</li>
+<li>Console: at 560 px and below the top bar wraps into two rows with a scrolling tab strip (no horizontal page
+  scroll at 375 px).</li>
+<li>Jobs: a job whose items all fail (or that trips the circuit breaker on a systemic error) ends <code>failed</code> instead
+  of <code>succeeded</code>; the job view gains <code>warnings</code> and <code>webhook.failed_deliveries</code>, clients gain <code>has_errors</code>. Saved
+  classifiers are copied into the job at submit (<code>snapshot_of</code>) for every kind, including <code>evaluate</code>. Jobs
+  interrupted more than <code>CLEF_JOB_MAX_RESUMES</code> (3) times are failed. <code>POST /v1/jobs</code> honours <code>Idempotency-Key</code>.
+  Webhooks retry for ~8 minutes by default (<code>CLEF_WEBHOOK_ATTEMPTS</code> 10, <code>CLEF_WEBHOOK_BACKOFF_S</code>,
+  <code>CLEF_WEBHOOK_BACKOFF_CAP_S</code>) and a failed delivery can be resent with <code>POST /v1/jobs/{id}/webhook/redeliver</code>.</li>
+<li>Evaluation: the <code>evaluate</code> job kind waits for the model, isolates bad rows (<code>n_errors</code>) and resumes; rows with
+  NaN / non-numeric scores or none of the labels are rejected, defaulted or clipped scores are counted;
+  <code>POST /v1/evaluate</code> counts in stats and the request log.</li>
+<li>Compat chat responses list ignored request fields in <code>clef.ignored</code>.</li>
+<li>Python and JS clients: <code>save_job_results(require_finished=True)</code> writes atomically; <code>jobs()</code> exposes <code>total</code>;
+  the JS client no longer retries a job submission after it was sent (unless an idempotency key is given).</li>
+</ul>
+<h3 id="fixed">Fixed<a class="headerlink" href="#fixed" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Server start with <code>CLEF_MAX_DEVICE_MEMORY_GB</code> segfaulted on ROCm / WSL2: GPU telemetry sampling raced torch's
+  own device initialisation. The sampler now skips GPU telemetry while the model loads.</li>
+<li>Blank <code>CLEF_*</code> variables (WSLENV forwards unset Windows variables as empty strings) now mean "unset" instead of
+  failing config validation.</li>
+<li>CSV export no longer prefixes negative numbers with a quote, and an export of a running job keeps every column.</li>
+</ul>
+<h3 id="security">Security<a class="headerlink" href="#security" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Webhook deliveries are an SSRF surface, so they are off by default and gated by <code>CLEF_WEBHOOK_ALLOW</code>. The
+  allow-list is checked at submit and again on every attempt, the host is resolved right then and the request is
+  pinned to the checked address (no DNS rebinding), link-local (cloud metadata), multicast, unspecified and
+  reserved addresses are always refused, redirects and environment proxies are ignored and API keys are never
+  sent. Webhook secrets are stored in clear text in <code>jobs.db</code> (HMAC needs them).</li>
+<li>Webhook addresses that embed an IPv4 address (NAT64 <code>64:ff9b::/96</code> and <code>64:ff9b:1::/48</code>, 6to4, Teredo) are
+  judged by that IPv4 address, and site-local / reserved IPv6 ranges are refused, so a translated address can no
+  longer reach a private host. Redelivery reuses the stored URL and re-runs every check.</li>
+<li>Job results exported as CSV neutralise spreadsheet formulas (text cells starting with <code>=</code>, <code>+</code>, <code>-</code> or <code>@</code>).</li>
+<li>Jobs are owned by the API key name that submitted them; other keys get <code>404</code>. Job payloads and results are kept on
+  disk until deleted or until <code>CLEF_JOB_TTL_HOURS</code> expires.</li>
+<li><code>THIRD_PARTY_NOTICES</code> for the vendored Preact, htm and uPlot console libraries
+  (<code>src/clef_server/static/vendor/THIRD_PARTY_NOTICES.md</code>).</li>
+</ul>
+<h3 id="known-gaps">Known gaps<a class="headerlink" href="#known-gaps" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Jobs are not counted in <code>/v1/stats</code> or the request log, and there is no priority lane: interactive calls are
+  ~4x slower while a large job runs (p50 109 -&gt; 422 ms measured). The webhook TLS path was not tested against a real
+  TLS server; LangChain was not tested against the compat routes; offload, torchao int8 and the device cap are
+  untested on NVIDIA and Apple Silicon.</li>
+</ul>
+<h2 id="300">3.0.0<a class="headerlink" href="#300" title="Permanent link">&para;</a></h2>
+<p>Cross-platform release: the model now runs on NVIDIA (CUDA), AMD (ROCm), Apple Silicon (MPS) and CPU. Only the
+Windows + WSL2 + ROCm path has been run on real hardware; CUDA and MPS are unit-tested with mocked backends and marked
+"untested on hardware" until <code>docs/hardware-validation.md</code> has been run. Quantization accuracy and latency are pending
+hardware.</p>
+<h3 id="added_1">Added<a class="headerlink" href="#added_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Backends</strong> (<code>clef_server/backend.py</code>): <code>CLEF_DEVICE=auto</code> detects cuda, rocm, mps or cpu; per-backend dtype rules
+  with warnings and fallbacks, memory stats, optional GPU telemetry (pynvml, amdsmi, rocm-smi), a preflight memory
+  check before loading, and <code>backend</code>, <code>fast_path</code> and <code>versions</code> in <code>/health</code>.</li>
+<li><strong><code>CLEF_QUANT=int8|nf4</code></strong> (bitsandbytes, CUDA only, refused elsewhere) for 16 GB NVIDIA GPUs.</li>
+<li><strong><code>clef</code> CLI</strong>: <code>serve</code> (foreground or <code>--detach</code>, health-gated), <code>stop</code>, <code>status</code>, <code>logs</code>, <code>doctor</code> (<code>--no-gpu</code>,
+  <code>--smoke</code>, <code>--json</code>), <code>download</code> (pinned, resumable, disk-space check), <code>bench</code>, <code>open</code>, <code>version</code>.</li>
+<li><strong>Classification API</strong>: <code>POST /v1/classify</code> (single and multi-label), <code>/v1/classify/batch</code>, <code>/v1/score</code>, and saved
+  classifiers (<code>PUT|GET|DELETE /v1/classifiers/{name}</code>, <code>POST /v1/classifiers/{name}[/batch]</code>). Same engine and
+  probabilities as <code>/v1/systemone</code>.</li>
+<li><strong>Clients</strong>: typed Python client (sync + async, retries on 503) and a dependency-free JavaScript/TypeScript client
+  (<code>clients/js</code>); <code>examples/</code>; <code>openapi.json</code> exported from the app and checked in CI.</li>
+<li><strong>Remote access</strong>: named API keys (<code>CLEF_API_KEYS</code>), per-key rate limit (<code>CLEF_RATE_LIMIT</code>, 429 + <code>Retry-After</code>),
+  opt-in CORS (<code>CLEF_CORS_ORIGINS</code>), key names in <code>/v1/log</code> and <code>/v1/stats</code>, warning when binding a non-loopback host
+  without keys. Docs: <code>docs/remote-access.md</code> (LAN setup, firewall, Caddy TLS).</li>
+<li><strong>Console</strong>: time-series charts, KPI tiles, histograms, Classify mode, redesigned light/dark theme.
+  <code>GET /v1/stats/timeseries</code> and a live <code>point</code> in the SSE <code>stats</code> event.</li>
+<li><strong>Packaging</strong>: installable package (<code>src/clef_server</code>, <code>src/clef_client</code>), per-backend lock files
+  (<code>requirements/{rocm,cuda,cpu,macos}.txt</code>), Dockerfiles for CUDA and ROCm, compose file, systemd/launchd/Task
+  Scheduler service files.</li>
+<li><strong>CI/release</strong>: matrix on Ubuntu, macOS and Windows (ruff, unit tests, wheel build, CLI smoke from the wheel),
+  JS tests, shellcheck, build-only Docker jobs; a <code>v*</code> tag attaches the wheel, sdist and <code>openapi.json</code> to a GitHub
+  Release. Nothing is published to PyPI, GHCR or npm.</li>
+<li><strong>Repo</strong>: Apache-2.0 <code>LICENSE</code>, <code>CONTRIBUTING.md</code>, <code>SECURITY.md</code>, issue and PR templates, <code>docs/troubleshooting.md</code>,
+  <code>docs/hardware-validation.md</code>, <code>docs/hardware-results.md</code>, <code>docs/classification.md</code>.</li>
+</ul>
+<h3 id="changed_1">Changed<a class="headerlink" href="#changed_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>CLEF_DEVICE</code> defaults to <code>auto</code> (was <code>cuda</code>); <code>CLEF_DTYPE</code> defaults to <code>auto</code> (was <code>bfloat16</code>).</li>
+<li>ROCm/WSL-only environment (<code>HSA_*</code>, AOTriton) is applied only when the torch build is ROCm; macOS sets
+  <code>PYTORCH_ENABLE_MPS_FALLBACK=1</code>.</li>
+<li>Model path resolution: <code>CLEF_MODEL_PATH</code>, else <code>~/models/clef-flash</code> if it holds a release, else the pinned Hugging
+  Face cache snapshot. The server never downloads; use <code>clef download</code>.</li>
+<li>State (log, pidfile, saved classifiers) lives in a per-OS state directory (<code>CLEF_STATE_DIR</code>).</li>
+<li><code>scripts/launch_server.sh</code> and <code>clef.ps1</code> are thin wrappers over the CLI (<code>clef.ps1</code> keeps the WSL keep-alive).</li>
+<li>README rewritten with per-platform quick starts, a support matrix and a hardware table.</li>
+</ul>
+<h3 id="removed">Removed<a class="headerlink" href="#removed" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>server/</code> directory (moved to <code>src/clef_server/</code>), <code>requirements/server.txt</code> (replaced by per-backend locks).</li>
+</ul>
+<h3 id="migration-notes-from-2x">Migration notes from 2.x<a class="headerlink" href="#migration-notes-from-2x" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Code moved from <code>server/</code> to <code>src/clef_server/</code>; <code>python server/main.py</code> becomes <code>clef serve</code>
+  (<code>clef serve --detach</code> replaces <code>launch_server.sh start</code>). Imports: <code>clef_server.*</code> instead of <code>server.*</code>.</li>
+<li><code>pip install -r requirements/server.txt</code> becomes <code>pip install -r requirements/&lt;rocm|cuda|cpu|macos&gt;.txt</code> followed by
+  <code>pip install -e ".[server]"</code>.</li>
+<li><code>CLEF_LOG_DIR</code> still works as an alias for <code>CLEF_STATE_DIR</code>. The new default location per OS is
+  <code>~/.local/state/clef</code> (Linux, same as before), <code>~/Library/Application Support/clef</code> (macOS) and
+  <code>%LOCALAPPDATA%\clef</code> (Windows).</li>
+<li>Set <code>CLEF_DEVICE=cuda</code> explicitly if you relied on the old default on an NVIDIA/ROCm machine and want an error
+  instead of a fallback; with <code>auto</code> a ROCm build is reported as <code>rocm</code>.</li>
+<li><code>CLEF_API_KEY</code> keeps working (one key named <code>default</code>). Use <code>CLEF_API_KEYS</code> for several named keys.</li>
+<li>Weights: if they are not at <code>~/models/clef-flash</code> or <code>CLEF_MODEL_PATH</code>, run <code>clef download</code>.</li>
+</ul>
+<h2 id="200">2.0.0<a class="headerlink" href="#200" title="Permanent link">&para;</a></h2>
+<h3 id="fixed_1">Fixed<a class="headerlink" href="#fixed_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Media sharding bug</strong>: v1 split a request's images/videos across several records and answered from the last
+  shard only. All media of a request now goes into ONE record, so answers reflect every image and video.</li>
+</ul>
+<h3 id="changed_2">Changed<a class="headerlink" href="#changed_2" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>GPU serialization + micro-batching</strong>: exactly one worker thread touches the GPU; concurrent requests are
+  coalesced (<code>CLEF_MAX_MICROBATCH</code>, <code>CLEF_BATCH_WINDOW_MS</code>). Media records run alone. Responses carry <code>timing</code>
+  (queue, forward, total, batch_size).</li>
+<li><strong>Length grouping + alignment + warmup</strong>: concurrent text records are grouped by length bucket, padded to a
+  multiple of 64 (<code>CLEF_PAD_MULTIPLE</code>; aligned GEMMs are faster on RDNA3), and common shapes are warmed at
+  startup in the background (<code>CLEF_BUCKETS</code>, <code>CLEF_WARMUP</code>). Single-record p50/p95 142/150 ms (v1: 162/222).</li>
+<li><strong>Security hardening</strong>: optional API key (<code>CLEF_API_KEY</code>), loopback bind by default, body-size limit, SSRF-guarded
+  opt-in URL fetching, <code>media_kwargs</code> no longer client-settable, generic 500s with request ids, no request
+  state logged unless <code>CLEF_LOG_STATE=1</code>.</li>
+<li><strong>Strict validation</strong>: pydantic schemas for every route, per-index errors in batches, caps on questions,
+  images, videos, pixels and frames. Uniform <code>{detail, request_id}</code> errors and <code>X-Request-ID</code>.</li>
+<li><strong>Clef Console</strong> at <code>/</code>: playground, live stats, request log (<code>/v1/stats</code>, <code>/v1/log</code>, <code>/v1/events</code>).</li>
+<li><code>/health</code> reports <code>ready|warming|loading|error</code> plus GPU and limits; new <code>/livez</code>.</li>
+</ul>
+<h3 id="ops-packaging">Ops / packaging<a class="headerlink" href="#ops-packaging" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>scripts/env.sh</code> single source of environment; <code>launch_server.sh</code> with pidfile, log rotation and
+  start|stop|restart|status|logs; <code>clef.ps1</code> Windows wrapper; systemd user unit (<code>deploy/</code>).</li>
+<li>Exact dependency pins (<code>requirements/</code>), idempotent setup scripts with pinned model revision, <code>doctor.py</code>.</li>
+<li>Benchmarks rewritten (warm every shape, forward vs end-to-end, proper percentiles); <code>http_bench.py</code> and
+  <code>profile_forward.py</code> added.</li>
+<li><code>clef_client</code> Python package, unit tests, live integration tests, CI (ruff, shellcheck, pytest), pyproject.</li>
+<li>Removed <code>fix_cc.sh</code>, <code>fastpath.py</code>, <code>fla_check.py</code>, <code>gpu_check.py</code> and the <code>server/test_*</code> scripts.</li>
+</ul>
+<h2 id="100">1.0.0<a class="headerlink" href="#100" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Initial local deployment of clef-flash on RX 7900 XTX via WSL2 ROCm 7.2 (torch 2.11.0+rocm7.2,
+  transformers 5.10.2) behind a FastAPI SystemOne-compatible server (<code>/v1/systemone</code>, <code>/v1/batch</code>, <code>/health</code>).</li>
+<li>Verified text/JSON, image, video and batch requests; single-record median 162 ms, peak VRAM 19.6 GB.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../security/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Security">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Security
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../license/" class="md-footer__link md-footer__link--next" aria-label="Next: License">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                License
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Apache-2.0 licensed. The model is Cloudflare clef-flash.
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/MiguelCarrascoB/clef" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.footer", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate", "content.tabs.link", "content.action.edit", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

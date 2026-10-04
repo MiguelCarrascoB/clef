@@ -1,0 +1,2894 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Local server, CLI, clients and web console for Cloudflare's clef-flash decision model.">
+      
+      
+      
+        <link rel="canonical" href="https://miguelcarrascob.github.io/clef/ARCHITECTURE/">
+      
+      
+        <link rel="prev" href="../api-reference/">
+      
+      
+        <link rel="next" href="../troubleshooting/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Architecture - clef</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#clef-v3-architecture-api-contract" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="clef" class="md-header__button md-logo" aria-label="clef" data-md-component="logo">
+      
+  <img src="../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            clef
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Architecture
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/MiguelCarrascoB/clef" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    MiguelCarrascoB/clef
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../getting-started/" class="md-tabs__link">
+          
+  
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../classification/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../cli/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../troubleshooting/" class="md-tabs__link">
+          
+  
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../contributing/" class="md-tabs__link">
+          
+  
+  
+  Project
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="clef" class="md-nav__button md-logo" aria-label="clef" data-md-component="logo">
+      
+  <img src="../assets/logo.svg" alt="logo">
+
+    </a>
+    clef
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/MiguelCarrascoB/clef" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    MiguelCarrascoB/clef
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../first-request/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    First request
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../classification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Classification
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openai-compat/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAI & Hugging Face compatibility
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../jobs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Jobs & webhooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smaller GPUs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../remote-access/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Remote access
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../console/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Console
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api-reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTP API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#package-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Package layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-configpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration (config.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backend-interface-backendpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backend interface (backend.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#engine-interface-enginepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Engine interface (engine.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stats-interface-statspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stats interface (stats.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#feature-modules-appctxpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feature modules (appctx.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#http-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        HTTP API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="HTTP API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#auth-rate-limit-cors-securitypy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auth, rate limit, CORS (security.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#post-v1systemone-post-v1batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        POST /v1/systemone, POST /v1/batch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#classification-api-classifypy-classifierspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Classification API (classify.py, classifiers.py)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Classification API (classify.py, classifiers.py)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#post-v1classify" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        POST /v1/classify
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#post-v1classifybatch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        POST /v1/classify/batch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#post-v1score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        POST /v1/score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#saved-classifiers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Saved classifiers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openai-and-hugging-face-compat-compatpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenAI and Hugging Face compat (compat*.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#evaluation-evaluationpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Evaluation (evaluation.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#async-jobs-and-webhooks-jobspy-webhookspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Async jobs and webhooks (jobs.py, webhooks.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-health" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /health
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-v1statswindow_s300" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /v1/stats?window_s=300
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-v1statstimeserieswindow_s300step_s5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /v1/stats/timeseries?window_s=300&amp;step_s=5
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-v1loglimit100sinceid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /v1/log?limit=100&amp;since=&lt;id&gt;
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-v1eventsstep_s5-sse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /v1/events?step_s=5 (SSE)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openapi" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenAPI
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-clef-clipy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI (clef, cli.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-static" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Console (static/)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hardware-validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hardware validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hardware-results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hardware results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../performance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../license/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    License
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#package-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Package layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-configpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration (config.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backend-interface-backendpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backend interface (backend.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#engine-interface-enginepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Engine interface (engine.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stats-interface-statspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stats interface (stats.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#feature-modules-appctxpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feature modules (appctx.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#http-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        HTTP API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="HTTP API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#auth-rate-limit-cors-securitypy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auth, rate limit, CORS (security.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#post-v1systemone-post-v1batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        POST /v1/systemone, POST /v1/batch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#classification-api-classifypy-classifierspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Classification API (classify.py, classifiers.py)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Classification API (classify.py, classifiers.py)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#post-v1classify" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        POST /v1/classify
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#post-v1classifybatch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        POST /v1/classify/batch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#post-v1score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        POST /v1/score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#saved-classifiers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Saved classifiers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openai-and-hugging-face-compat-compatpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenAI and Hugging Face compat (compat*.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#evaluation-evaluationpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Evaluation (evaluation.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#async-jobs-and-webhooks-jobspy-webhookspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Async jobs and webhooks (jobs.py, webhooks.py)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-health" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /health
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-v1statswindow_s300" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /v1/stats?window_s=300
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-v1statstimeserieswindow_s300step_s5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /v1/stats/timeseries?window_s=300&amp;step_s=5
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-v1loglimit100sinceid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /v1/log?limit=100&amp;since=&lt;id&gt;
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#get-v1eventsstep_s5-sse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GET /v1/events?step_s=5 (SSE)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openapi" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenAPI
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-clef-clipy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI (clef, cli.py)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#console-static" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Console (static/)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/MiguelCarrascoB/clef/edit/main/docs/ARCHITECTURE.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="clef-v3-architecture-api-contract">clef v3 - architecture &amp; API contract<a class="headerlink" href="#clef-v3-architecture-api-contract" title="Permanent link">&para;</a></h1>
+<p>This file is the contract between the server modules, the backends, the CLI, the web console, the clients and the
+tests. Change it first, then the code.</p>
+<h2 id="package-layout">Package layout<a class="headerlink" href="#package-layout" title="Permanent link">&para;</a></h2>
+<p><code>pip install</code> / <code>uv tool install</code> installs two packages from <code>src/</code> and one console script, <code>clef</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Module</th>
+<th>Owns</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>clef_server/__init__.py</code></td>
+<td><code>__version__</code>; calls <code>backend.prepare_environment()</code> once (torch-free, before any torch import)</td>
+</tr>
+<tr>
+<td><code>clef_server/config.py</code></td>
+<td><code>Config</code> dataclass from <code>CLEF_*</code> env vars, <code>VERSION</code>, <code>MODEL_REPO</code>/<code>MODEL_REVISION</code>, <code>parse_api_keys</code></td>
+</tr>
+<tr>
+<td><code>clef_server/paths.py</code></td>
+<td>state dir, log/pid files, classifiers dir, <code>resolve_model_path(cfg)</code> (never downloads)</td>
+</tr>
+<tr>
+<td><code>clef_server/backend.py</code></td>
+<td><strong>the only place with device-specific code</strong>: detection, dtype, sync, OOM, memory, telemetry, preflight, quantization config (bitsandbytes / torchao), device memory cap, pinned host copies (<code>HostCopier</code>)</td>
+</tr>
+<tr>
+<td><code>clef_server/offload.py</code></td>
+<td>CPU offload: <code>plan_layers</code> (which decoder layers stay on the host) and <code>LayerStreamer</code> (async copy-in per forward); pure logic plus a <code>copier</code> supplied by <code>backend.py</code></td>
+</tr>
+<tr>
+<td><code>clef_server/engine.py</code></td>
+<td>background model load (<code>load_model</code>: standard, quantized or offloaded), single GPU worker thread, micro-batching, length bucketing, warmup</td>
+</tr>
+<tr>
+<td><code>clef_server/schemas.py</code></td>
+<td>pydantic v2 SystemOne request/response models + strict validation</td>
+</tr>
+<tr>
+<td><code>clef_server/classify.py</code></td>
+<td>classification API models + translation classify/score &lt;-&gt; SystemOne records/answers</td>
+</tr>
+<tr>
+<td><code>clef_server/classifiers.py</code></td>
+<td>saved-classifier store (JSON files under <code>&lt;state_dir&gt;/classifiers/</code>)</td>
+</tr>
+<tr>
+<td><code>clef_server/security.py</code></td>
+<td>multi-key auth, per-key rate limiting, CORS setup</td>
+</tr>
+<tr>
+<td><code>clef_server/media.py</code></td>
+<td>data-URL / (optional) URL fetching with SSRF guard + caps, image/video decode</td>
+</tr>
+<tr>
+<td><code>clef_server/stats.py</code></td>
+<td>request log ring buffer, latency histogram, counters, forward stats, <strong>time series ring buffer</strong></td>
+</tr>
+<tr>
+<td><code>clef_server/appctx.py</code></td>
+<td><code>AppContext</code>: what a feature module gets from <code>create_app()</code> (config, stats, engine, auth / rate-limit dependencies, inference helpers, lifecycle hooks)</td>
+</tr>
+<tr>
+<td><code>clef_server/main.py</code></td>
+<td>FastAPI app factory <code>create_app(cfg, engine)</code>, core routes, middleware, error mapping, <code>FEATURES</code> (feature modules mounted on the context), <code>run(cfg)</code></td>
+</tr>
+<tr>
+<td><code>clef_server/compat.py</code>, <code>compat_openai.py</code>, <code>compat_hf.py</code>, <code>compat_schema.py</code>, <code>compat_errors.py</code></td>
+<td>OpenAI (<code>/v1/models</code>, <code>/v1/chat/completions</code>) and Hugging Face zero-shot (<code>/hf/models/{id}</code>) routes; JSON-schema -&gt; questions translation; client-shaped errors</td>
+</tr>
+<tr>
+<td><code>clef_server/evaluation.py</code></td>
+<td>metric math (<code>compute_metrics</code>), <code>POST /v1/evaluate</code> and <code>/v1/evaluate/metrics</code>, the <code>evaluate</code> job kind</td>
+</tr>
+<tr>
+<td><code>clef_server/jobs.py</code>, <code>clef_server/webhooks.py</code></td>
+<td>async jobs (SQLite store, FIFO runner, <code>/v1/jobs*</code> routes, built-in kinds) and signed, SSRF-guarded webhook delivery</td>
+</tr>
+<tr>
+<td><code>clef_server/cli.py</code></td>
+<td>the <code>clef</code> command (serve/stop/status/logs/doctor/download/bench/open/version); <code>download</code> is a pinned, resumable <code>snapshot_download</code> with a disk-space check</td>
+</tr>
+<tr>
+<td><code>clef_server/doctor.py</code></td>
+<td>environment checks per backend, including a recommended memory setting; <code>main(argv) -&gt; int</code></td>
+</tr>
+<tr>
+<td><code>clef_server/httpbench.py</code></td>
+<td>the async HTTP load test (<code>clef bench</code>; <code>bench/http_bench.py</code> is a shim)</td>
+</tr>
+<tr>
+<td><code>clef_server/static/</code></td>
+<td>Clef Console (zero-build Preact + htm SPA, vendored uPlot; screens in <code>screens/</code>) served at <code>/</code></td>
+</tr>
+<tr>
+<td><code>clef_client/</code></td>
+<td>sync + async Python client (<code>httpx</code>), typed classify results</td>
+</tr>
+<tr>
+<td><code>clients/js/</code></td>
+<td>dependency-free ESM JS/TS client (<code>fetch</code>), Node 18+ and browsers</td>
+</tr>
+</tbody>
+</table>
+<p>Invariants (unchanged from v2):
+- ONE uvicorn worker per process (one model), ONE thread ever touches the GPU (the engine worker).
+- Python <code>&gt;=3.10</code> (the WSL venv is 3.10): no <code>typing.Self</code>, <code>tomllib</code>, <code>ExceptionGroup</code> or other 3.11+ features.
+- Never edit files in the model directory; wrap or re-implement in the engine.</p>
+<h2 id="configuration-configpy">Configuration (<code>config.py</code>)<a class="headerlink" href="#configuration-configpy" title="Permanent link">&para;</a></h2>
+<p>All settings come from env vars. The CLI flags of <code>clef serve</code> set the same env vars.</p>
+<table>
+<thead>
+<tr>
+<th>Env</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CLEF_MODEL_PATH</code></td>
+<td>unset</td>
+<td>release dir. Unset: <code>~/models/clef-flash</code> if it holds a release, else the pinned HF cache snapshot</td>
+</tr>
+<tr>
+<td><code>CLEF_MODEL_REPO</code> / <code>CLEF_MODEL_REVISION</code></td>
+<td><code>Cloudflare/clef-flash</code> / pinned sha</td>
+<td>what <code>clef download</code> fetches and the cache lookup uses</td>
+</tr>
+<tr>
+<td><code>CLEF_DEVICE</code></td>
+<td><code>auto</code></td>
+<td><code>auto</code>, <code>cuda</code>, <code>rocm</code>, <code>mps</code>, <code>cpu</code> (<code>cuda:1</code> / <code>rocm:1</code> select an index)</td>
+</tr>
+<tr>
+<td><code>CLEF_DTYPE</code></td>
+<td><code>auto</code></td>
+<td><code>auto</code>, <code>bfloat16</code>, <code>float16</code>, <code>float32</code> (auto: see backend dtype rules)</td>
+</tr>
+<tr>
+<td><code>CLEF_QUANT</code></td>
+<td><code>none</code></td>
+<td><code>none</code>, <code>int8</code>, <code>nf4</code>. int8: bitsandbytes on CUDA, torchao on ROCm / MPS / CPU. nf4: bitsandbytes only (CUDA, and ROCm where it is not recommended); refused elsewhere with a clear error</td>
+</tr>
+<tr>
+<td><code>CLEF_QUANT_BACKEND</code></td>
+<td><code>auto</code></td>
+<td><code>auto</code>, <code>bnb</code>, <code>torchao</code>: the library behind <code>CLEF_QUANT</code> (auto: CUDA keeps bitsandbytes, everything else torchao; nf4 is bitsandbytes only)</td>
+</tr>
+<tr>
+<td><code>CLEF_OFFLOAD</code></td>
+<td><code>none</code></td>
+<td><code>none</code> or <code>cpu</code>: keep the embeddings and the layers that do not fit under the device budget in host RAM and stream them in per forward (CUDA and ROCm; a warning and no effect on MPS / CPU, which share one memory pool)</td>
+</tr>
+<tr>
+<td><code>CLEF_MAX_DEVICE_MEMORY_GB</code></td>
+<td><code>0</code></td>
+<td>device memory this process may allocate, applied as a hard allocator limit; <code>0</code> = no cap (offload then plans from free memory). 2.5 GB of it is reserved for activations when planning the split</td>
+</tr>
+<tr>
+<td><code>CLEF_PREFLIGHT</code></td>
+<td><code>1</code></td>
+<td>memory check before loading</td>
+</tr>
+<tr>
+<td><code>CLEF_TELEMETRY</code></td>
+<td><code>1</code></td>
+<td>GPU telemetry via pynvml / amdsmi / rocm-smi when available</td>
+</tr>
+<tr>
+<td><code>CLEF_HOST</code> / <code>CLEF_PORT</code></td>
+<td><code>127.0.0.1</code> / <code>8910</code></td>
+<td>bind address. A non-loopback host without keys logs a loud warning</td>
+</tr>
+<tr>
+<td><code>CLEF_API_KEY</code></td>
+<td>unset</td>
+<td>one key, named <code>default</code></td>
+</tr>
+<tr>
+<td><code>CLEF_API_KEYS</code></td>
+<td>unset</td>
+<td><code>name:key,name2:key2</code> or a path to a file with one <code>name:key</code> per line (<code>#</code> comments)</td>
+</tr>
+<tr>
+<td><code>CLEF_RATE_LIMIT</code></td>
+<td><code>0</code></td>
+<td>requests per minute per key (per client IP when auth is off); 0 = off</td>
+</tr>
+<tr>
+<td><code>CLEF_CORS_ORIGINS</code></td>
+<td>empty</td>
+<td>comma-separated allowed origins (<code>*</code> allowed); empty = CORS off</td>
+</tr>
+<tr>
+<td><code>CLEF_STATE_DIR</code></td>
+<td>per OS</td>
+<td>Linux <code>$XDG_STATE_HOME/clef</code> (<code>~/.local/state/clef</code>), macOS <code>~/Library/Application Support/clef</code>, Windows <code>%LOCALAPPDATA%\clef</code>. Legacy alias <code>CLEF_LOG_DIR</code></td>
+</tr>
+<tr>
+<td><code>CLEF_MAX_LABELS</code></td>
+<td><code>64</code></td>
+<td>labels per classify request / saved classifier</td>
+</tr>
+<tr>
+<td><code>CLEF_MAX_CLASSIFIERS</code></td>
+<td><code>1000</code></td>
+<td>saved classifiers</td>
+</tr>
+<tr>
+<td><code>CLEF_CLASSIFY_THRESHOLD</code></td>
+<td><code>0.5</code></td>
+<td>default multi-label threshold (also used by <code>/v1/chat/completions</code> array properties)</td>
+</tr>
+<tr>
+<td><code>CLEF_MAX_EVAL_ROWS</code></td>
+<td><code>500</code></td>
+<td>rows per <code>POST /v1/evaluate</code> request</td>
+</tr>
+<tr>
+<td><code>CLEF_MAX_JOB_EVAL_ROWS</code></td>
+<td><code>100000</code></td>
+<td>rows per <code>evaluate</code> job and per <code>POST /v1/evaluate/metrics</code> request</td>
+</tr>
+<tr>
+<td><code>CLEF_MAX_JOB_ITEMS</code></td>
+<td><code>100000</code></td>
+<td>items per <code>classify</code> / <code>score</code> / <code>systemone</code> job</td>
+</tr>
+<tr>
+<td><code>CLEF_MAX_JOBS</code></td>
+<td><code>100</code></td>
+<td>queued + running jobs (more: 409 with <code>Retry-After</code>)</td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_TTL_HOURS</code></td>
+<td><code>168</code></td>
+<td>finished jobs and their rows are purged this long after they finish; <code>0</code> keeps them forever</td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_ENGINE_WAIT_S</code></td>
+<td><code>600</code></td>
+<td>how long a job waits for an unavailable engine before failing</td>
+</tr>
+<tr>
+<td><code>CLEF_WEBHOOK_ALLOW</code></td>
+<td>empty</td>
+<td>hosts (<code>hooks.example.com</code>, <code>*.corp.example.net</code>), IPs and CIDRs webhooks may be delivered to; empty = webhooks off</td>
+</tr>
+<tr>
+<td><code>CLEF_WEBHOOK_TIMEOUT_S</code></td>
+<td><code>10</code></td>
+<td>total timeout of one delivery attempt</td>
+</tr>
+<tr>
+<td><code>CLEF_WEBHOOK_ATTEMPTS</code></td>
+<td><code>5</code></td>
+<td>delivery attempts for final events (<code>job.progress</code> is never retried)</td>
+</tr>
+<tr>
+<td><code>CLEF_SAMPLE_INTERVAL_S</code></td>
+<td><code>2</code></td>
+<td>gauge sampling period for the time series (memory, telemetry, queue)</td>
+</tr>
+<tr>
+<td>v2 knobs</td>
+<td>unchanged</td>
+<td><code>CLEF_MAX_TOKENS</code>, <code>CLEF_MAX_BODY_MB</code>, <code>CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES</code>, <code>CLEF_VIDEO_FPS</code>, <code>CLEF_MAX_BATCH</code>, <code>CLEF_MAX_QUESTIONS</code>, <code>CLEF_ALLOW_URL_FETCH</code>, <code>CLEF_URL_FETCH_MAX_MB</code>, <code>CLEF_MAX_MICROBATCH</code>, <code>CLEF_BATCH_WINDOW_MS</code>, <code>CLEF_BUCKETS</code>, <code>CLEF_PAD_MULTIPLE</code> (64, measured on ROCm only), <code>CLEF_PAD_TO_BUCKET</code>, <code>CLEF_WARMUP</code>, <code>CLEF_LOG_STATE</code>, <code>CLEF_LOG_BUFFER</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>Config</code> validates enums (device, dtype, quant, quant backend, offload), <code>CLEF_MAX_DEVICE_MEMORY_GB &gt;= 0</code>, the threshold range and <code>CLEF_RATE_LIMIT &gt;= 0</code> in <code>__post_init__</code> (ValueError on a bad value) and exposes <code>api_keys() -&gt; dict[name, key]</code>,
+<code>auth_required</code>, <code>is_loopback</code>, <code>public_limits()</code>.</p>
+<h2 id="backend-interface-backendpy">Backend interface (<code>backend.py</code>)<a class="headerlink" href="#backend-interface-backendpy" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">BackendError</span><span class="p">(</span><span class="ne">RuntimeError</span><span class="p">):</span> <span class="o">...</span>       <span class="c1"># unavailable explicit device, unsupported quant/dtype combination</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">PreflightError</span><span class="p">(</span><span class="ne">RuntimeError</span><span class="p">):</span> <span class="o">...</span>     <span class="c1"># not enough free memory for the chosen dtype/quant (clear message)</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="k">def</span><span class="w"> </span><span class="nf">prepare_environment</span><span class="p">(</span><span class="n">environ</span><span class="p">:</span> <span class="n">MutableMapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="sd">"""Torch-free. setdefault() the per-platform env BEFORE torch is imported. Returns the names it set.</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="sd">    - torch build is ROCm (importlib.metadata version of torch contains "+rocm"):</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="sd">        TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1, and on WSL (/dev/dxg exists) HSA_ENABLE_DXG_DETECTION=1;</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="sd">        PYTORCH_TUNABLEOP_* only when CLEF_TUNABLEOP=1. HSA_* / AOTriton are NEVER set on other backends.</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="sd">    - macOS: PYTORCH_ENABLE_MPS_FALLBACK=1.</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="sd">    - everywhere: HF_HUB_OFFLINE=1 is NOT set here (the CLI download needs the network; the engine passes</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="sd">      local paths so it never downloads)."""</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="k">def</span><span class="w"> </span><span class="nf">detect</span><span class="p">(</span><span class="n">requested</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"auto"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Backend</span><span class="p">:</span>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">    </span><span class="sd">"""auto: cuda (NVIDIA: torch.cuda.is_available() and torch.version.hip is None) &gt; rocm (torch.version.hip)</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="sd">    &gt; mps (torch.backends.mps.is_available()) &gt; cpu. An explicit request that is unavailable raises BackendError</span>
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="sd">    with a hint (wrong torch build, driver missing, HSA_ENABLE_DXG_DETECTION on WSL, ...)."""</span>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="nd">@dataclass</span>
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="k">class</span><span class="w"> </span><span class="nc">Backend</span><span class="p">:</span>
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span>                     <span class="c1"># "cuda" | "rocm" | "mps" | "cpu"</span>
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="n">device</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">device</span>          <span class="c1"># cuda:N for cuda AND rocm, mps, cpu</span>
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">synchronize</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">empty_cache</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+<a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">is_oom</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">exc</span><span class="p">:</span> <span class="ne">BaseException</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span>       <span class="c1"># torch.OutOfMemoryError / cuda OOM / MPS "out of memory"</span>
+<a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">device_name</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span>                       <span class="c1"># "NVIDIA GeForce RTX 4090", "Apple M3 Max", CPU brand</span>
+<a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">memory</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span>                           <span class="c1"># see below; never raises</span>
+<a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">telemetry</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span>                        <span class="c1"># see below; never raises, "unavailable" elsewhere</span>
+<a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">resolve_dtype</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">requested</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]</span>   <span class="c1"># (dtype, warning or None)</span>
+<a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">versions</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span>                         <span class="c1"># {"torch","cuda","hip","driver","macos"} (None if n/a)</span>
+<a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">fast_path</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span>                        <span class="c1"># {"causal_conv1d": bool, "fla": bool, "expected": bool}</span>
+<a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>
+<a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a><span class="k">def</span><span class="w"> </span><span class="nf">preflight</span><span class="p">(</span><span class="n">backend</span><span class="p">:</span> <span class="n">Backend</span><span class="p">,</span> <span class="n">dtype</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span> <span class="n">quant</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">weights_gb</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+<a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a>              <span class="n">cap_gb</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span> <span class="n">offload</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"none"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a><span class="w">    </span><span class="sd">"""Raise PreflightError when free memory (or the CLEF_MAX_DEVICE_MEMORY_GB cap) is clearly below what the load</span>
+<a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a><span class="sd">    needs; return warnings when close. With offload=cpu on cuda / rocm the engine plans the split itself and only</span>
+<a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a><span class="sd">    the cap is checked here."""</span>
+<a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>
+<a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a><span class="k">def</span><span class="w"> </span><span class="nf">quant_method</span><span class="p">(</span><span class="n">backend</span><span class="p">:</span> <span class="n">Backend</span><span class="p">,</span> <span class="n">quant</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">choice</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"auto"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a><span class="w">    </span><span class="sd">""""bnb" or "torchao". auto: nf4 -&gt; bnb; int8 -&gt; bnb on cuda, torchao on rocm / mps / cpu.</span>
+<a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a><span class="sd">    An explicit choice wins (nf4 + torchao is a BackendError)."""</span>
+<a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a>
+<a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a><span class="k">def</span><span class="w"> </span><span class="nf">quantization_config</span><span class="p">(</span><span class="n">backend</span><span class="p">:</span> <span class="n">Backend</span><span class="p">,</span> <span class="n">quant</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">dtype</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span> <span class="n">choice</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"auto"</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Any</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-43" name="__codelineno-0-43" href="#__codelineno-0-43"></a><span class="w">    </span><span class="sd">"""None for "none". Else a transformers config: BitsAndBytesConfig (int8 / nf4; cuda and rocm only) or</span>
+<a id="__codelineno-0-44" name="__codelineno-0-44" href="#__codelineno-0-44"></a><span class="sd">    TorchAoConfig(Int8WeightOnlyConfig) with the embeddings and the vision tower left in bf16. BackendError with</span>
+<a id="__codelineno-0-45" name="__codelineno-0-45" href="#__codelineno-0-45"></a><span class="sd">    an install hint when the library is missing or the backend cannot run it."""</span>
+<a id="__codelineno-0-46" name="__codelineno-0-46" href="#__codelineno-0-46"></a>
+<a id="__codelineno-0-47" name="__codelineno-0-47" href="#__codelineno-0-47"></a><span class="k">def</span><span class="w"> </span><span class="nf">recommend_memory_setting</span><span class="p">(</span><span class="n">backend</span><span class="p">:</span> <span class="n">Backend</span><span class="p">,</span> <span class="n">weights_gb</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">19.0</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-48" name="__codelineno-0-48" href="#__codelineno-0-48"></a><span class="w">    </span><span class="sd">"""One line of advice from the detected memory (printed by `clef doctor`); None when bf16 fits."""</span>
+</code></pre></div>
+<p>Offload support on <code>Backend</code>: <code>has_discrete_memory</code> (true on cuda / rocm), <code>pin_host(tensor)</code>, <code>host_copier()</code> (a
+<code>HostCopier</code> that copies pinned host tensors on a side stream) and <code>apply_memory_cap(cap_gb)</code>
+(<code>torch.cuda.set_per_process_memory_fraction</code>; returns whether a limit was set). <code>ACTIVATION_RESERVE_GB = 2.5</code>.</p>
+<p>Dtype rules (<code>resolve_dtype("auto")</code>): bf16 on cuda (if <code>torch.cuda.is_bf16_supported()</code>, else fp16 + warning),
+rocm, and mps on macOS &gt;= 14 (fp16 + warning before 14); cpu: bf16 when the CPU supports it, else fp32. An explicit
+dtype the device cannot run falls back the same way with a warning. Any fallback must be validated for probability
+parity against bf16 (<code>bench/parity.py</code>, results in <code>docs/hardware-results.md</code>).</p>
+<p><code>memory()</code>: <code>{"kind": "vram"|"unified"|"system", "total_gb", "allocated_gb", "reserved_gb", "free_gb"}</code> (floats or
+None). cuda/rocm: <code>torch.cuda.mem_get_info/memory_allocated/memory_reserved</code>; mps:
+<code>torch.mps.current_allocated_memory</code>, <code>driver_allocated_memory</code>, <code>recommended_max_memory</code>; cpu: process RSS and
+system memory (psutil if installed, else None).</p>
+<p><code>telemetry()</code>: <code>{"available": bool, "source": "nvml"|"amdsmi"|"rocm-smi"|None, "util_pct", "temp_c", "power_w",
+"mem_used_gb", "mem_total_gb"}</code>; values None when unknown. Imports <code>pynvml</code> / <code>amdsmi</code> lazily; failures are
+logged once at debug level and turn the result into <code>{"available": false, ...}</code>. rocm-smi (subprocess) results are
+cached for &gt;= 2 s. Under WSL (measured, 7900 XTX) amdsmi gives utilization + temperature only; its VRAM usage is impossible (&gt; total) and is dropped.</p>
+<h2 id="engine-interface-enginepy">Engine interface (<code>engine.py</code>)<a class="headerlink" href="#engine-interface-enginepy" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">Record</span> <span class="o">=</span> <span class="nb">dict</span>  <span class="c1"># sanitized: {"model": str, "state": Any, "questions": dict,</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>               <span class="c1">#             "images": list[PIL.Image.Image] | None, "videos": list[np.ndarray] | None}</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="k">class</span><span class="w"> </span><span class="nc">EngineNotReady</span><span class="p">(</span><span class="ne">RuntimeError</span><span class="p">):</span> <span class="o">...</span>          <span class="c1"># -&gt; HTTP 503</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="k">class</span><span class="w"> </span><span class="nc">InputTooLarge</span><span class="p">(</span><span class="ne">ValueError</span><span class="p">):</span> <span class="o">...</span>             <span class="c1"># -&gt; HTTP 413 (e.g. schema alone exceeds max_tokens)</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="k">class</span><span class="w"> </span><span class="nc">GpuOutOfMemory</span><span class="p">(</span><span class="ne">RuntimeError</span><span class="p">):</span> <span class="o">...</span>          <span class="c1"># -&gt; HTTP 503 (after backend.empty_cache())</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="k">class</span><span class="w"> </span><span class="nc">Engine</span><span class="p">:</span>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">cfg</span><span class="p">:</span> <span class="n">Config</span><span class="p">,</span> <span class="n">stats</span><span class="p">:</span> <span class="n">Stats</span><span class="p">,</span> <span class="n">loader</span><span class="p">:</span> <span class="n">Callable</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>                 <span class="n">backend</span><span class="p">:</span> <span class="n">Backend</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span> <span class="o">...</span>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>        <span class="c1"># loader: test injection; default resolves the model dir (paths.resolve_model_path) and imports</span>
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>        <span class="c1">#   joint_schema_model from it. backend: test injection; default backend.detect(cfg.device),</span>
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>        <span class="c1">#   done on the worker thread at load time (so a BackendError becomes status "error", not a crash).</span>
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    <span class="n">status</span><span class="p">:</span> <span class="nb">str</span>             <span class="c1"># "loading" | "warming" | "ready" | "error"</span>
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>    <span class="n">error</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span>
+<a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>    <span class="n">load_seconds</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span>
+<a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">start</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+<a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">decide</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">records</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Record</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Result</span><span class="p">]</span>   <span class="c1"># results in input order</span>
+<a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">info</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span>
+<a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">sample</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span>    <span class="c1"># cheap gauges for the time series, see below; never raises; any thread</span>
+<a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">shutdown</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+</code></pre></div>
+<p><code>info()</code> (also the bulk of <code>/health</code>):
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="p">{</span><span class="nt">"backend"</span><span class="p">:</span><span class="w"> </span><span class="s2">"rocm"</span><span class="p">,</span><span class="w"> </span><span class="nt">"device"</span><span class="p">:</span><span class="w"> </span><span class="s2">"cuda:0"</span><span class="p">,</span><span class="w"> </span><span class="nt">"dtype"</span><span class="p">:</span><span class="w"> </span><span class="s2">"bfloat16"</span><span class="p">,</span><span class="w"> </span><span class="nt">"quant"</span><span class="p">:</span><span class="w"> </span><span class="s2">"none"</span><span class="p">,</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w"> </span><span class="nt">"model_path"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/home/&lt;user&gt;/models/clef-flash"</span><span class="p">,</span><span class="w"> </span><span class="nt">"torch"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2.11.0+rocm7.2"</span><span class="p">,</span><span class="w"> </span><span class="nt">"transformers"</span><span class="p">:</span><span class="w"> </span><span class="s2">"5.10.2"</span><span class="p">,</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w"> </span><span class="nt">"gpu"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"available"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"AMD Radeon RX 7900 XTX"</span><span class="p">,</span><span class="w"> </span><span class="nt">"memory_kind"</span><span class="p">:</span><span class="w"> </span><span class="s2">"vram"</span><span class="p">,</span><span class="w"> </span><span class="nt">"vram_total_gb"</span><span class="p">:</span><span class="w"> </span><span class="mf">23.94</span><span class="p">,</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">         </span><span class="nt">"vram_allocated_gb"</span><span class="p">:</span><span class="w"> </span><span class="mf">17.79</span><span class="p">,</span><span class="w"> </span><span class="nt">"vram_reserved_gb"</span><span class="p">:</span><span class="w"> </span><span class="mf">18.17</span><span class="p">,</span><span class="w"> </span><span class="nt">"vram_free_gb"</span><span class="p">:</span><span class="w"> </span><span class="mf">5.4</span><span class="p">},</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w"> </span><span class="nt">"telemetry"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"available"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"source"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"util_pct"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"temp_c"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"power_w"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">               </span><span class="nt">"mem_used_gb"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"mem_total_gb"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">},</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w"> </span><span class="nt">"fast_path"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"causal_conv1d"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"fla"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">"expected"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">},</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w"> </span><span class="nt">"versions"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"torch"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2.11.0+rocm7.2"</span><span class="p">,</span><span class="w"> </span><span class="nt">"cuda"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"hip"</span><span class="p">:</span><span class="w"> </span><span class="s2">"7.2"</span><span class="p">,</span><span class="w"> </span><span class="nt">"driver"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"macos"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">},</span>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w"> </span><span class="nt">"warnings"</span><span class="p">:</span><span class="w"> </span><span class="p">[]}</span>
+</code></pre></div>
+Before the backend is detected (<code>status == "loading"</code> early) <code>backend</code> is <code>null</code> and the <code>gpu</code> block has
+<code>available: false</code>. <code>gpu</code> keeps the v2 key names for compatibility; on mps <code>memory_kind</code> is <code>"unified"</code> and
+<code>vram_total_gb</code> is <code>recommended_max_memory</code>; on cpu <code>available</code> is false. <code>info()</code> must stay fast (&lt; 5 ms): it
+returns the cached telemetry from the last <code>sample()</code>.</p>
+<p><code>sample()</code> -&gt; <code>{"mem_used_gb": float|None, "mem_total_gb": float|None, "gpu_util_pct": float|None,
+"gpu_temp_c": float|None, "gpu_power_w": float|None}</code> (memory = allocated on cuda/rocm/mps, RSS on cpu).</p>
+<p>Rules (v2 rules kept):
+- Exactly ONE thread ever runs forwards (the worker). <code>decide()</code> enqueues and awaits futures.
+- Text-only records are coalesced for up to <code>batch_window_ms</code> / <code>max_microbatch</code>, grouped by length bucket, one
+  forward per group, right-padded to the next <code>pad_multiple</code>. Media records run alone, unpadded.
+- Warmup: one forward per bucket (&lt;= 1024) at batch sizes {1, max_microbatch}; status "warming" meanwhile.
+- No <code>torch.cuda.*</code> outside <code>backend.py</code>. OOM: <code>backend.is_oom(exc)</code> -&gt; <code>backend.empty_cache()</code> -&gt;
+  <code>GpuOutOfMemory</code>; the worker keeps running. Timing uses <code>backend.synchronize()</code>.
+- Load order on the worker: detect backend -&gt; resolve dtype -&gt; resolve model path -&gt; preflight (if enabled) -&gt;
+  <code>load_model(...)</code>: apply the device cap (<code>CLEF_MAX_DEVICE_MEMORY_GB</code>), build the quantization config, then either
+  the standard path (<code>load_release_model(path, device=..., dtype=..., quantization_config=...)</code>, kwarg only when
+  quantizing) or, with <code>CLEF_OFFLOAD=cpu</code> on cuda / rocm, an offloaded load. Each failure becomes status "error"
+  with a one-line actionable message.
+- Offloaded load (<code>offload.py</code>): token and output embeddings (~4 GB) stay on the host and are gathered on the CPU;
+  decoder layers beyond the device budget (cap or free memory, minus <code>ACTIVATION_RESERVE_GB</code>) are held in pinned
+  host memory, spread evenly through the stack, and copied in on a side stream one or two layers ahead of the
+  compute; the vision tower, final norm, rotary tables and the joint head stay on the device. The weights are the
+  same tensors, so probabilities are identical to a normal run. After a failed forward the streamer puts the layers
+  back on the host. Measured numbers: <a href="../memory/">memory.md</a>.
+- The engine reports <code>stats.record_forward(...)</code> and <code>stats.set_queue_depth(n)</code> as in v2.</p>
+<h2 id="stats-interface-statspy">Stats interface (<code>stats.py</code>)<a class="headerlink" href="#stats-interface-statspy" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Stats</span><span class="p">:</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">buffer</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">1000</span><span class="p">,</span> <span class="n">retention_s</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">3600</span><span class="p">):</span> <span class="o">...</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">record_request</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">entry</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>   <span class="c1"># entry = /v1/log item minus id/ts; may include "key"</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">record_forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n_records</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">n_tokens</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">padded_tokens</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span> <span class="n">ms</span><span class="p">:</span> <span class="nb">float</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">set_queue_depth</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n</span><span class="p">:</span> <span class="nb">int</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">sample</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">gauges</span><span class="p">:</span> <span class="nb">dict</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span>          <span class="c1"># engine.sample() + {"queue_depth"}; called every</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>                                                    <span class="c1"># cfg.sample_interval_s by main; unknown keys ignored</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">in_flight</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ContextManager</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">snapshot</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">window_s</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">300</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span>   <span class="c1"># the /v1/stats body (minus status/gpu, added by main)</span>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">timeseries</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">window_s</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">300</span><span class="p">,</span> <span class="n">step_s</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">latest_point</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">step_s</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">5</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span>   <span class="c1"># the newest (current, partial) step as one point</span>
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">log</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">limit</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">100</span><span class="p">,</span> <span class="n">since</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span>
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">subscribe</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AsyncIterator</span><span class="p">[</span><span class="nb">dict</span><span class="p">]</span>
+</code></pre></div>
+<p>Internally the time series is a ring of 1-second buckets covering <code>retention_s</code> (3600). Each bucket holds:
+request count, error count, successful latencies (capped at 1000 per second), forward count/records/tokens/padded,
+max queue depth seen (from <code>set_queue_depth</code> and <code>sample</code>), and the last gauge sample. Thread-safe (engine thread
++ event loop + sampler).</p>
+<h2 id="feature-modules-appctxpy">Feature modules (<code>appctx.py</code>)<a class="headerlink" href="#feature-modules-appctxpy" title="Permanent link">&para;</a></h2>
+<p>New API surface is added as a <strong>feature module</strong> instead of growing <code>main.py</code>. A module exposes
+<code>router(ctx: AppContext) -&gt; APIRouter</code> and is listed in <code>main.FEATURES</code> (currently <code>["evaluation", "compat",
+"jobs"]</code>, in that order: evaluation registers its job kind before jobs reads the registry). <code>create_app()</code> builds the
+context, imports each module with <code>importlib</code> and includes its router.</p>
+<p><code>AppContext</code> fields:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cfg</code>, <code>stats</code>, <code>engine</code>, <code>store</code></td>
+<td>the <code>Config</code>, <code>Stats</code>, <code>Engine</code> and <code>ClassifierStore</code> of this app</td>
+</tr>
+<tr>
+<td><code>auth</code>, <code>limited</code></td>
+<td>FastAPI dependency lists: <code>auth</code> goes on every router that needs a key, <code>limited</code> adds the rate limit on inference routes</td>
+</tr>
+<tr>
+<td><code>errors</code></td>
+<td>the shared OpenAPI <code>responses</code> for the standard error statuses</td>
+</tr>
+<tr>
+<td><code>infer(request, reqs, batch, label="batch")</code></td>
+<td>the request path: limits, media load, one <code>engine.decide()</code>, and the request log / stats entry</td>
+</tr>
+<tr>
+<td><code>decide(reqs, batch=True, label="batch")</code></td>
+<td>the same without a request, for background work (jobs): limits, media and one <code>engine.decide()</code>; not logged or counted in stats</td>
+</tr>
+<tr>
+<td><code>map_exception(exc)</code>, <code>api_error(status, detail, headers=None)</code>, <code>request_id(request)</code></td>
+<td>the shared error mapping (raise the result <code>from exc</code>)</td>
+</tr>
+<tr>
+<td><code>run_classify</code>, <code>run_classify_batch</code>, <code>run_score</code></td>
+<td>the classification routes' implementations, reusable by other features</td>
+</tr>
+<tr>
+<td><code>on_startup</code>, <code>on_shutdown</code></td>
+<td>lists of async callables run inside the app lifespan after the engine starts / before it stops (jobs start and stop their runner here)</td>
+</tr>
+<tr>
+<td><code>extra</code></td>
+<td>a dict features use to publish objects to each other; <code>extra["job_kinds"]</code> is the job-kind registry</td>
+</tr>
+</tbody>
+</table>
+<p>Rules for a feature: inference goes through <code>ctx.infer</code> or <code>ctx.decide</code> (never straight to the engine), routes carry
+<code>ctx.auth</code> (and <code>ctx.limited</code> when they run the model), and all request / response models are pydantic so the route
+appears in <code>openapi.json</code>.</p>
+<h2 id="http-api">HTTP API<a class="headerlink" href="#http-api" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>Purpose</th>
+<th>Section</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /health</code>, <code>GET /livez</code>, <code>GET /schema-example</code></td>
+<td>status, liveness, copy-paste bodies (open)</td>
+<td><a href="#get-health">below</a></td>
+</tr>
+<tr>
+<td><code>POST /v1/systemone</code>, <code>POST /v1/batch</code></td>
+<td>the original typed questions API</td>
+<td><a href="#post-v1systemone-post-v1batch">below</a></td>
+</tr>
+<tr>
+<td><code>POST /v1/classify</code>, <code>/v1/classify/batch</code>, <code>/v1/score</code>; <code>PUT|GET|DELETE /v1/classifiers/{name}</code>, <code>GET /v1/classifiers</code>, <code>POST /v1/classifiers/{name}[/batch]</code></td>
+<td>classification</td>
+<td><a href="#classification-api-classifypy-classifierspy">below</a></td>
+</tr>
+<tr>
+<td><code>GET /v1/models[/{id}]</code>, <code>POST /v1/chat/completions</code></td>
+<td>OpenAI-compatible structured outputs</td>
+<td><a href="#openai-and-hugging-face-compat-compatpy">Compat</a></td>
+</tr>
+<tr>
+<td><code>POST /hf/models/{id}</code> (and the hidden <code>POST /models/{id}</code>)</td>
+<td>Hugging Face zero-shot classification</td>
+<td><a href="#openai-and-hugging-face-compat-compatpy">Compat</a></td>
+</tr>
+<tr>
+<td><code>POST /v1/evaluate</code>, <code>POST /v1/evaluate/metrics</code></td>
+<td>accuracy, F1, confusion matrix, calibration</td>
+<td><a href="#evaluation-evaluationpy">Evaluation</a></td>
+</tr>
+<tr>
+<td><code>POST /v1/jobs</code>, <code>GET /v1/jobs</code>, <code>GET /v1/jobs/{id}</code>, <code>GET /v1/jobs/{id}/results</code>, <code>POST /v1/jobs/{id}/cancel</code>, <code>DELETE /v1/jobs/{id}</code></td>
+<td>async jobs</td>
+<td><a href="#async-jobs-and-webhooks-jobspy-webhookspy">Jobs</a></td>
+</tr>
+<tr>
+<td><code>GET /v1/stats</code>, <code>/v1/stats/timeseries</code>, <code>/v1/log</code>, <code>/v1/events</code></td>
+<td>observability (console)</td>
+<td>below</td>
+</tr>
+</tbody>
+</table>
+<h3 id="auth-rate-limit-cors-securitypy">Auth, rate limit, CORS (<code>security.py</code>)<a class="headerlink" href="#auth-rate-limit-cors-securitypy" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Keys: <code>CLEF_API_KEY</code> and/or <code>CLEF_API_KEYS</code> (see Configuration). When any key exists every <code>/v1/*</code> route, and the
+  Hugging Face routes (<code>/hf/models/*</code>, <code>/models/*</code>), need <code>X-API-Key: &lt;key&gt;</code> or <code>Authorization: Bearer &lt;key&gt;</code> (401 +
+  <code>WWW-Authenticate: Bearer</code> otherwise; the OpenAI and HF routes render that in their own error shape). For SSE
+  (EventSource cannot set headers) <code>/v1/events?key=&lt;key&gt;</code> is also accepted. Comparison is constant-time over all
+  keys. The matching key's <strong>name</strong> (never the key) is stored on <code>request.state.key_name</code> and written to the request
+  log (<code>"key"</code>) and to <code>/v1/stats</code> (<code>by_key</code>). Auth off -&gt; <code>key</code> is <code>null</code>.</li>
+<li>Open routes: <code>/</code>, static files, <code>/health</code>, <code>/livez</code>, <code>/schema-example</code>, <code>/docs</code>, <code>/openapi.json</code>.</li>
+<li>Rate limit (<code>CLEF_RATE_LIMIT=N</code>): sliding 60 s window per key name (per client IP when auth is off), counted on
+  the POST inference routes only (<code>/v1/systemone</code>, <code>/v1/batch</code>, <code>/v1/classify</code>, <code>/v1/classify/batch</code>, <code>/v1/score</code>,
+  <code>POST /v1/classifiers/{name}[/batch]</code>, <code>/v1/chat/completions</code>, <code>/hf/models/*</code>, <code>/v1/evaluate</code>, <code>POST /v1/jobs</code>).
+  <code>/v1/evaluate/metrics</code> and the job read / cancel / delete routes are not counted. Over the limit: <code>429 {"detail": "rate limit exceeded (N/min)",
+  "request_id"}</code> + <code>Retry-After: &lt;int seconds&gt;</code>. Rejected requests are logged (status 429) but not counted.</li>
+<li>CORS: off by default. <code>CLEF_CORS_ORIGINS=https://a.example,https://b.example</code> (or <code>*</code>) installs Starlette's
+  <code>CORSMiddleware</code> with methods GET/POST/PUT/DELETE/OPTIONS, headers <code>*</code> (X-API-Key, Authorization, Content-Type),
+  exposed headers <code>X-Request-ID</code>, <code>Retry-After</code>; <code>allow_credentials</code> false.</li>
+<li>Binding a non-loopback <code>CLEF_HOST</code> without any key logs a multi-line WARNING at startup (<code>main.run</code>).</li>
+</ul>
+<p>Body limit: Content-Length (or streamed bytes) &gt; <code>max_body_mb</code> -&gt; 413.</p>
+<h3 id="post-v1systemone-post-v1batch"><code>POST /v1/systemone</code>, <code>POST /v1/batch</code><a class="headerlink" href="#post-v1systemone-post-v1batch" title="Permanent link">&para;</a></h3>
+<p>Unchanged from v2 (request, response, validation, error paths). See git history of this file for the full text;
+summary:
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="p">{</span><span class="nt">"model"</span><span class="p">:</span><span class="w"> </span><span class="s2">"clef-flash"</span><span class="p">,</span><span class="w"> </span><span class="nt">"state"</span><span class="p">:</span><span class="w"> </span><span class="s2">"&lt;string or any JSON&gt;"</span><span class="p">,</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w"> </span><span class="nt">"questions"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"&lt;id&gt;"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"choice"</span><span class="p">,</span><span class="w"> </span><span class="nt">"instructions"</span><span class="p">:</span><span class="w"> </span><span class="s2">"optional"</span><span class="p">,</span><span class="w"> </span><span class="nt">"criteria"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"opt"</span><span class="p">:</span><span class="w"> </span><span class="s2">"desc"</span><span class="p">}},</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">               </span><span class="nt">"&lt;id&gt;"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"score"</span><span class="p">,</span><span class="w"> </span><span class="nt">"instructions"</span><span class="p">:</span><span class="w"> </span><span class="s2">"optional"</span><span class="p">,</span><span class="w"> </span><span class="nt">"criteria"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"level0"</span><span class="p">,</span><span class="w"> </span><span class="s2">"level1"</span><span class="p">]},</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">               </span><span class="nt">"&lt;id&gt;"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"noul"</span><span class="p">,</span><span class="w"> </span><span class="nt">"instructions"</span><span class="p">:</span><span class="w"> </span><span class="s2">"optional"</span><span class="p">,</span><span class="w"> </span><span class="nt">"criteria"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"true"</span><span class="p">:</span><span class="w"> </span><span class="s2">"desc"</span><span class="p">,</span><span class="w"> </span><span class="nt">"false"</span><span class="p">:</span><span class="w"> </span><span class="s2">"desc"</span><span class="p">}}},</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w"> </span><span class="nt">"images"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"data:image/...;base64,..."</span><span class="p">],</span><span class="w"> </span><span class="nt">"videos"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"data:video/mp4;base64,..."</span><span class="p">]}</span>
+</code></pre></div>
+-&gt; <code>{"model", "answers": {"&lt;id&gt;": &lt;systemone_answer&gt;}, "usage": {"input_tokens", "output_tokens": 0},
+"timing": {"queue_ms", "forward_ms", "total_ms", "batch_size"}}</code>. Answers: choice
+<code>{"type","choice","confidence","probabilities": {opt: p}}</code>; score <code>{"type","score","confidence","legend":
+{"0": level0, ...},"probabilities": {"0": p, ...}}</code>; noul <code>{"type","noul": p_true}</code>.
+<code>/v1/batch</code>: <code>{"batch": [...]}</code> -&gt; <code>{"batch_ms", "results": [...]}</code>, errors name the index (<code>batch[3].questions...</code>).</p>
+<h3 id="classification-api-classifypy-classifierspy">Classification API (<code>classify.py</code>, <code>classifiers.py</code>)<a class="headerlink" href="#classification-api-classifypy-classifierspy" title="Permanent link">&para;</a></h3>
+<p>The classification routes are a thin, stable layer over the SAME engine: each input is translated into exactly one
+SystemOne record (the same record <code>/v1/systemone</code> would build), so probabilities are identical to the equivalent
+SystemOne call (verified live within 1e-3). All of them are POST inference routes (logged, rate limited, counted in
+stats) and return <code>usage</code>, <code>timing</code> and <code>request_id</code> like the existing routes.</p>
+<p>Labels: either a list of unique non-empty strings (<code>["billing", "technical"]</code>) or an object label -&gt; description
+(<code>{"billing": "Payments or invoices"}</code>); 2..<code>max_labels</code> labels for single-label, 1..<code>max_labels</code> for multi-label.</p>
+<p><strong>Translation (normative - the live parity test rebuilds these exact records):</strong>
+- single-label -&gt; <code>questions = {"label": {"type": "choice", "criteria": C, "instructions": I}}</code> where
+  <code>C = {l: l for l in labels}</code> for a list, the object as given for a dict, and <code>"instructions"</code> is present only
+  when the request has <code>instructions</code>.
+- multi-label -&gt; one noul question per label, question id = the label:
+  <code>{"type": "noul", "instructions": P + 'Does the label "&lt;label&gt;" apply?'}</code> where <code>P = instructions + " "</code> when
+  given, else <code>""</code>; plus <code>"criteria": {"true": desc}</code> when labels is a dict and <code>desc != label</code>.
+- score -&gt; <code>questions = {"score": {"type": "score", "criteria": levels, "instructions": I}}</code> (instructions only when
+  given).
+- <code>state</code> = <code>input</code> verbatim (string or any JSON); <code>images</code>/<code>videos</code> pass through <code>load_media</code> exactly as on
+  <code>/v1/systemone</code>; <code>model</code> defaults to <code>"clef-flash"</code>.</p>
+<h4 id="post-v1classify"><code>POST /v1/classify</code><a class="headerlink" href="#post-v1classify" title="Permanent link">&para;</a></h4>
+<p><div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="p">{</span><span class="nt">"input"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Checkout is down"</span><span class="p">,</span><span class="w"> </span><span class="nt">"labels"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"billing"</span><span class="p">,</span><span class="w"> </span><span class="s2">"technical"</span><span class="p">],</span><span class="w"> </span><span class="nt">"instructions"</span><span class="p">:</span><span class="w"> </span><span class="s2">"optional question"</span><span class="p">,</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w"> </span><span class="nt">"multi_label"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"threshold"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.5</span><span class="p">,</span><span class="w"> </span><span class="nt">"images"</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span><span class="w"> </span><span class="nt">"videos"</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span><span class="w"> </span><span class="nt">"model"</span><span class="p">:</span><span class="w"> </span><span class="s2">"clef-flash"</span><span class="p">}</span>
+</code></pre></div>
+Single-label response:
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span><span class="nt">"model"</span><span class="p">:</span><span class="w"> </span><span class="s2">"clef-flash"</span><span class="p">,</span><span class="w"> </span><span class="nt">"multi_label"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"label"</span><span class="p">:</span><span class="w"> </span><span class="s2">"technical"</span><span class="p">,</span><span class="w"> </span><span class="nt">"confidence"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.96</span><span class="p">,</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w"> </span><span class="nt">"scores"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"billing"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.04</span><span class="p">,</span><span class="w"> </span><span class="nt">"technical"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.96</span><span class="p">},</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w"> </span><span class="nt">"usage"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"input_tokens"</span><span class="p">:</span><span class="w"> </span><span class="mi">120</span><span class="p">,</span><span class="w"> </span><span class="nt">"output_tokens"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">},</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w"> </span><span class="nt">"timing"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"queue_ms"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.4</span><span class="p">,</span><span class="w"> </span><span class="nt">"forward_ms"</span><span class="p">:</span><span class="w"> </span><span class="mf">141.2</span><span class="p">,</span><span class="w"> </span><span class="nt">"total_ms"</span><span class="p">:</span><span class="w"> </span><span class="mf">150.3</span><span class="p">,</span><span class="w"> </span><span class="nt">"batch_size"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">},</span><span class="w"> </span><span class="nt">"request_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"&lt;hex&gt;"</span><span class="p">}</span>
+</code></pre></div>
+(<code>label</code> = the choice answer, <code>confidence</code> = its probability, <code>scores</code> = all options' probabilities.)
+Multi-label response: <code>"multi_label": true</code>, <code>"labels": [...]</code> = every label with score &gt;= <code>threshold</code>, sorted by score
+desc (may be empty), <code>"scores": {label: P(true)}</code>, <code>"threshold": 0.5</code>; no <code>label</code>/<code>confidence</code>. <code>threshold</code> is
+allowed only with <code>multi_label: true</code> (default <code>CLEF_CLASSIFY_THRESHOLD</code>), within [0, 1].</p>
+<h4 id="post-v1classifybatch"><code>POST /v1/classify/batch</code><a class="headerlink" href="#post-v1classifybatch" title="Permanent link">&para;</a></h4>
+<p><code>{"inputs": [&lt;any&gt;, ...] (1..max_batch), "labels": ..., "instructions", "multi_label", "threshold", "model"}</code> (no media
+in batch). Runs through the engine's micro-batching in one <code>decide()</code> call -&gt;
+<code>{"batch_ms": float, "results": [&lt;classify response minus request_id&gt;, ...], "request_id": "&lt;hex&gt;"}</code> in input order.
+Errors name the index: <code>inputs[3]: ...</code>.</p>
+<h4 id="post-v1score"><code>POST /v1/score</code><a class="headerlink" href="#post-v1score" title="Permanent link">&para;</a></h4>
+<p><code>{"input": ..., "levels": ["low", "medium", "high"], "instructions": "optional", "images", "videos", "model"}</code>
+(2..max_labels unique non-empty levels) -&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="p">{</span><span class="nt">"model"</span><span class="p">:</span><span class="w"> </span><span class="s2">"clef-flash"</span><span class="p">,</span><span class="w"> </span><span class="nt">"score"</span><span class="p">:</span><span class="w"> </span><span class="mf">1.78</span><span class="p">,</span><span class="w"> </span><span class="nt">"level"</span><span class="p">:</span><span class="w"> </span><span class="s2">"high"</span><span class="p">,</span><span class="w"> </span><span class="nt">"level_index"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">"confidence"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.86</span><span class="p">,</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w"> </span><span class="nt">"distribution"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"low"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.07</span><span class="p">,</span><span class="w"> </span><span class="nt">"medium"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.07</span><span class="p">,</span><span class="w"> </span><span class="nt">"high"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.86</span><span class="p">},</span><span class="w"> </span><span class="nt">"usage"</span><span class="p">:</span><span class="w"> </span><span class="p">{},</span><span class="w"> </span><span class="nt">"timing"</span><span class="p">:</span><span class="w"> </span><span class="p">{},</span><span class="w"> </span><span class="nt">"request_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"&lt;hex&gt;"</span><span class="p">}</span>
+</code></pre></div>
+(<code>score</code> = expected level index, <code>level</code>/<code>level_index</code> = most likely level, <code>distribution</code> keyed by level text.)</p>
+<h4 id="saved-classifiers">Saved classifiers<a class="headerlink" href="#saved-classifiers" title="Permanent link">&para;</a></h4>
+<ul>
+<li><code>PUT /v1/classifiers/{name}</code> body
+  <code>{"kind": "classify" | "score", "labels": ... (classify), "levels": [...] (score), "instructions": str?,
+  "multi_label": false, "threshold": float?, "description": str?}</code> -&gt; 200 the stored definition +
+  <code>{"name", "created_at", "updated_at"}</code> (ISO-8601 UTC; <code>created_at</code> kept on overwrite). Validation as above.</li>
+<li><code>GET /v1/classifiers</code> -&gt; <code>{"classifiers": [&lt;definition&gt;, ...]}</code> sorted by name.</li>
+<li><code>GET /v1/classifiers/{name}</code> -&gt; the definition, 404 if missing.</li>
+<li><code>DELETE /v1/classifiers/{name}</code> -&gt; <code>{"deleted": "&lt;name&gt;"}</code>, 404 if missing.</li>
+<li><code>POST /v1/classifiers/{name}</code> <code>{"input": ..., "images"?, "videos"?, "threshold"?}</code> -&gt; the classify (or score)
+  response + <code>"classifier": "&lt;name&gt;"</code>.</li>
+<li><code>POST /v1/classifiers/{name}/batch</code> <code>{"inputs": [...]}</code> -&gt; the batch response + <code>"classifier"</code>.</li>
+<li>Names: <code>^[a-z0-9][a-z0-9_-]{0,63}$</code> (400 otherwise). Files: <code>&lt;state_dir&gt;/classifiers/&lt;name&gt;.json</code>, path built only
+  from a validated name, written atomically (temp file + <code>os.replace</code>), at most <code>max_classifiers</code> (409 beyond).
+  Unreadable/corrupt files are skipped in the list and logged.</li>
+</ul>
+<h3 id="openai-and-hugging-face-compat-compatpy">OpenAI and Hugging Face compat (<code>compat*.py</code>)<a class="headerlink" href="#openai-and-hugging-face-compat-compatpy" title="Permanent link">&para;</a></h3>
+<p>Guide: <a href="../openai-compat/">openai-compat.md</a>. Both dialects translate to ONE SystemOne record per request and go
+through <code>ctx.infer</code>, so keys, rate limit, log, stats and limits are shared and the probabilities equal the
+equivalent <code>/v1/systemone</code> call.</p>
+<ul>
+<li><code>GET /v1/models</code> lists <code>clef-flash</code>; <code>GET /v1/models/{id}</code> returns it, any other id is 404 <code>model_not_found</code>.</li>
+<li><code>POST /v1/chat/completions</code>: the schema comes from <code>response_format</code> (<code>json_schema</code>) or from exactly one forced
+  tool. Each top-level property becomes one question (<code>compat_schema.py</code>): string enum -&gt; <code>choice</code>; boolean -&gt;
+  <code>noul</code> (true when P &gt;= 0.5); integer enum, bounded integer (2..64 values) or string enum with <code>x-clef-ordinal</code> -&gt;
+  <code>score</code>; array of string enums -&gt; one <code>noul</code> per option (options with P &gt;= <code>CLEF_CLASSIFY_THRESHOLD</code>). Anything
+  else (free text, numbers, nested objects) is a 400 whose <code>param</code> names the property. <code>messages</code> become the
+  <code>state</code> (a lone user message verbatim, otherwise a readable transcript); <code>image_url</code> / <code>video_url</code> parts become
+  <code>images</code> / <code>videos</code>.</li>
+<li>Response: OpenAI <code>chat.completion</code> with the argmax as JSON in <code>message.content</code> (or a <code>tool_calls</code> entry),
+  <code>logprobs</code> carrying <code>log p</code> (<code>top_logprobs</code> 0..64, floor <code>-9999</code>), <code>usage</code> (<code>completion_tokens</code> always 0) and a
+  non-standard top-level <code>clef</code> object with every probability, <code>timing</code> and <code>request_id</code>. <code>stream: true</code> returns
+  valid SSE (role chunk, one content chunk, finish chunk, optional usage chunk, <code>[DONE]</code>). <code>n &gt; 1</code>, <code>text</code> /
+  <code>json_object</code> response formats and requests without a schema are 400s (<code>missing_schema</code> when no schema was given).</li>
+<li><code>POST /hf/models/{model_id:path}</code>: Inference API zero-shot body <code>{inputs, parameters: {candidate_labels,
+  multi_label, hypothesis_template}}</code>. Response <code>{sequence, labels, scores}</code> sorted by score, or
+  <code>[{label, score}]</code> when the User-Agent is <code>hf_hub/1.x</code> (force with <code>?format=classic|list</code>); <code>inputs</code> may be a
+  list (one micro-batched pass).</li>
+<li>Errors on these routes use the client's shape (<code>compat_errors.py</code>): OpenAI <code>{"error": {message, type, param,
+  code}}</code>, Hugging Face <code>{"error": "message"}</code>; status codes match the rest of the API.</li>
+</ul>
+<h3 id="evaluation-evaluationpy">Evaluation (<code>evaluation.py</code>)<a class="headerlink" href="#evaluation-evaluationpy" title="Permanent link">&para;</a></h3>
+<p>Guide: <a href="../evaluation/">evaluation.md</a>. <code>compute_metrics</code> is the single implementation of the metric math; the console
+and the job kind use it too.</p>
+<ul>
+<li><code>POST /v1/evaluate</code> <code>{labels | classifier, instructions?, multi_label?, threshold?, bins?, rows: [{input, gold}],
+  include_predictions?}</code>: at most <code>CLEF_MAX_EVAL_ROWS</code> rows (400 beyond, pointing at the job kind), classified
+  <code>CLEF_MAX_BATCH</code> at a time through <code>ctx.infer</code>, then scored. A gold label outside the label set is a 400 naming
+  the row, before any inference.</li>
+<li><code>POST /v1/evaluate/metrics</code> <code>{labels, rows: [{gold, scores}], multi_label?, threshold?, bins?,
+  include_predictions?}</code>: no inference, at most <code>CLEF_MAX_JOB_EVAL_ROWS</code> rows, not rate limited.</li>
+<li>Response: <code>n</code>, <code>accuracy</code>, <code>top2_accuracy</code>, <code>macro_f1</code>, <code>micro_f1</code>, <code>weighted_f1</code>, <code>per_label</code>,
+  <code>confusion_matrix {labels, matrix}</code>, <code>calibration {bins, ece, mce, brier, nll, mean_confidence}</code>,
+  <code>coverage_curve</code>, <code>auto_route</code>, optional <code>predictions</code>. Multi-label: <code>exact_match</code>, <code>hamming_loss</code>, per-label
+  <code>tp fp fn tn</code>.</li>
+<li><code>evaluate</code> job kind (registered in <code>ctx.extra["job_kinds"]</code>): same payload as <code>POST /v1/evaluate</code>, up to
+  <code>CLEF_MAX_JOB_EVAL_ROWS</code> rows, one stored item per row, result = the metrics object. Not resumable (it restarts).</li>
+</ul>
+<h3 id="async-jobs-and-webhooks-jobspy-webhookspy">Async jobs and webhooks (<code>jobs.py</code>, <code>webhooks.py</code>)<a class="headerlink" href="#async-jobs-and-webhooks-jobspy-webhookspy" title="Permanent link">&para;</a></h3>
+<p>Guide: <a href="../jobs/">jobs.md</a>.</p>
+<ul>
+<li><code>POST /v1/jobs</code> <code>{kind, payload, webhook?, metadata?}</code> -&gt; 202 with the job and <code>Location: /v1/jobs/{id}</code>. The
+  payload is fully validated at submit (400 with a path); an unknown kind lists the available ones. Kinds:
+  <code>classify</code>, <code>score</code>, <code>systemone</code> (jobs.py) and <code>evaluate</code> (evaluation.py). 409 + <code>Retry-After</code> when
+  <code>CLEF_MAX_JOBS</code> is reached.</li>
+<li><code>GET /v1/jobs?status&amp;kind&amp;limit&amp;offset</code> (newest first), <code>GET /v1/jobs/{id}</code> (status, progress, ETA, result summary,
+  webhook delivery status), <code>GET /v1/jobs/{id}/results</code> (JSON pages with <code>next_offset</code>, or a full stream with
+  <code>?format=ndjson|csv</code>; CSV neutralises cells starting with <code>=</code>, <code>+</code>, <code>-</code>, <code>@</code>), <code>POST /v1/jobs/{id}/cancel</code>,
+  <code>DELETE /v1/jobs/{id}</code> (409 while queued or running).</li>
+<li>Storage: SQLite <code>&lt;state_dir&gt;/jobs.db</code> (jobs, payloads, result rows, webhook deliveries). Statuses: <code>queued</code>,
+  <code>running</code>, <code>succeeded</code>, <code>failed</code>, <code>cancelled</code>, <code>interrupted</code>. One runner, FIFO, one job at a time and ONE
+  micro-batch in flight (<code>CLEF_MAX_MICROBATCH</code> records through <code>ctx.decide</code>), so interactive requests interleave.
+  A job interrupted by a stop or crash resumes after its last stored row on the next start. A row the engine rejects
+  becomes an <code>{"index", "error"}</code> row; the job fails only on systemic errors (engine down for
+  <code>CLEF_JOB_ENGINE_WAIT_S</code>). Finished jobs are purged <code>CLEF_JOB_TTL_HOURS</code> after they finish.</li>
+<li>Ownership: with auth on, a job belongs to the key name that submitted it and other keys get 404 (also in the
+  list); jobs created while auth was off stay visible to every key.</li>
+<li>Webhooks: events <code>job.succeeded</code>, <code>job.failed</code>, <code>job.cancelled</code> (default) and opt-in <code>job.progress</code> (at most one
+  per 10 s, one attempt). Headers <code>X-Clef-Event</code>, <code>X-Clef-Delivery</code>, and with a secret <code>X-Clef-Timestamp</code> and
+  <code>X-Clef-Signature: sha256=</code> HMAC-SHA256 of <code>"&lt;timestamp&gt;.&lt;raw body&gt;"</code>. 2xx = delivered; 408 / 425 / 429 / 5xx and
+  network errors retry with exponential backoff up to <code>CLEF_WEBHOOK_ATTEMPTS</code>; other statuses and all redirects are
+  final. Disabled until <code>CLEF_WEBHOOK_ALLOW</code> is set; the allow-list is checked at submit and on every attempt, the
+  host is resolved then and the connection is pinned to the checked IP (see <a href="../security/">SECURITY.md</a>).</li>
+<li>Jobs are not counted in <code>/v1/stats</code> or the request log (they use <code>ctx.decide</code>).</li>
+<li>Custom kinds: <code>ctx.extra.setdefault("job_kinds", {})[name] = {"validate": fn, "run": async_fn, "resumable": bool}</code>
+  (see <a href="../jobs/#writing-a-job-kind">jobs.md</a>).</li>
+</ul>
+<h3 id="get-health"><code>GET /health</code><a class="headerlink" href="#get-health" title="Permanent link">&para;</a></h3>
+<p>200 when status is ready or warming, 503 otherwise. <code>{"ready", "status", "version": "3.1.0", **engine.info(),
+"load_seconds", "uptime_s", "error", "limits": Config.public_limits()}</code>. <code>GET /livez</code> -&gt; 200 <code>{"ok": true}</code>.</p>
+<h3 id="get-v1statswindow_s300"><code>GET /v1/stats?window_s=300</code><a class="headerlink" href="#get-v1statswindow_s300" title="Permanent link">&para;</a></h3>
+<p>v2 body plus <code>"by_key": {"&lt;name&gt;|anonymous": count}</code> and <code>"by_endpoint": {"/v1/classify": count, ...}</code> over the
+window, plus <code>"status"</code> and <code>"gpu"</code> (<code>vram_allocated_gb</code>, <code>vram_reserved_gb</code>, <code>vram_total_gb</code>, <code>memory_kind</code>) and
+<code>"telemetry"</code> (cached engine telemetry) added by main.</p>
+<h3 id="get-v1statstimeserieswindow_s300step_s5"><code>GET /v1/stats/timeseries?window_s=300&amp;step_s=5</code><a class="headerlink" href="#get-v1statstimeserieswindow_s300step_s5" title="Permanent link">&para;</a></h3>
+<p><code>window_s</code> in 10..3600 (console uses 300 / 900 / 3600); <code>step_s</code> optional, default <code>max(1, window_s // 60)</code>
+(5 / 15 / 60 s), must satisfy <code>1 &lt;= step_s &lt;= window_s</code> and <code>window_s / step_s &lt;= 720</code> (400 otherwise).
+Columnar (uPlot-friendly), oldest first, <code>n = ceil(window_s / step_s)</code> points aligned to multiples of <code>step_s</code>; the
+last point is the current, partial step:
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="p">{</span><span class="nt">"window_s"</span><span class="p">:</span><span class="w"> </span><span class="mi">300</span><span class="p">,</span><span class="w"> </span><span class="nt">"step_s"</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="nt">"now"</span><span class="p">:</span><span class="w"> </span><span class="mf">1759480000.2</span><span class="p">,</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w"> </span><span class="nt">"t"</span><span class="p">:</span><span class="w">             </span><span class="p">[</span><span class="mi">1759479705</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w">      </span><span class="c1">// step start, unix seconds</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w"> </span><span class="nt">"rps"</span><span class="p">:</span><span class="w">           </span><span class="p">[</span><span class="mf">0.8</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w">             </span><span class="c1">// requests completed in the step / step_s (0 when none)</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w"> </span><span class="nt">"p50_ms"</span><span class="p">:</span><span class="w">        </span><span class="p">[</span><span class="mf">141.0</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w">     </span><span class="c1">// successful requests completed in the step; null when none</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w"> </span><span class="nt">"p95_ms"</span><span class="p">:</span><span class="w">        </span><span class="p">[</span><span class="mf">150.2</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="w"> </span><span class="nt">"error_rate"</span><span class="p">:</span><span class="w">    </span><span class="p">[</span><span class="mf">0.0</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w">       </span><span class="c1">// errors / requests; null when no requests</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="w"> </span><span class="nt">"avg_batch"</span><span class="p">:</span><span class="w">     </span><span class="p">[</span><span class="mf">1.6</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w">       </span><span class="c1">// records / forwards; null when no forwards</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="w"> </span><span class="nt">"queue_depth"</span><span class="p">:</span><span class="w">   </span><span class="p">[</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w">               </span><span class="c1">// max seen in the step; null before the first sample</span>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="w"> </span><span class="nt">"padding_ratio"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mf">0.12</span><span class="p">,</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w">      </span><span class="c1">// 1 - tokens / padded tokens over the step's forwards; null when none</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="w"> </span><span class="nt">"mem_used_gb"</span><span class="p">:</span><span class="w">   </span><span class="p">[</span><span class="mf">17.8</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w">            </span><span class="c1">// last gauge sample in the step, else null</span>
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a><span class="w"> </span><span class="nt">"gpu_util_pct"</span><span class="p">:</span><span class="w">  </span><span class="p">[</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w"> </span><span class="nt">"gpu_temp_c"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span><span class="w"> </span><span class="nt">"gpu_power_w"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">]}</span>
+</code></pre></div></p>
+<h3 id="get-v1loglimit100sinceid"><code>GET /v1/log?limit=100&amp;since=&lt;id&gt;</code><a class="headerlink" href="#get-v1loglimit100sinceid" title="Permanent link">&para;</a></h3>
+<p>v2 entries plus <code>"key": "&lt;name&gt;" | null</code>. Endpoint values include the new POST routes (actual path, e.g.
+<code>/v1/classifiers/support-triage</code>).</p>
+<h3 id="get-v1eventsstep_s5-sse"><code>GET /v1/events?step_s=5</code> (SSE)<a class="headerlink" href="#get-v1eventsstep_s5-sse" title="Permanent link">&para;</a></h3>
+<p><code>event: log</code> + <code>data: &lt;log entry&gt;</code> per request; <code>event: stats</code> + <code>data: &lt;stats body&gt;</code> every 2 s. The stats body
+carries <code>"point": stats.latest_point(step_s)</code> (same fields as one time-series column entry, scalars, plus <code>t</code> and
+<code>step_s</code>), so charts append (new <code>t</code>) or replace (same <code>t</code>) their last point without polling. <code>step_s</code> in 1..60,
+default 5.</p>
+<h3 id="errors">Errors<a class="headerlink" href="#errors" title="Permanent link">&para;</a></h3>
+<p>Always <code>{"detail": "&lt;message&gt;", "request_id": "&lt;hex&gt;"}</code>; header <code>X-Request-ID</code> on every response.
+400 invalid input, 401 auth, 404 unknown classifier / model / job, 409 too many classifiers or jobs (or an invalid job
+state transition), 413 too large, 429 rate limited (+ <code>Retry-After</code>), 503 not ready / OOM, 500 internal (generic
+message; traceback only in the server log). The OpenAI and Hugging Face routes use their clients' error shapes (see
+Compat).</p>
+<h3 id="openapi">OpenAPI<a class="headerlink" href="#openapi" title="Permanent link">&para;</a></h3>
+<p><code>openapi.json</code> at the repo root is exported from <code>create_app()</code> by <code>scripts/export_openapi.py</code> (CI checks it is up to
+date). All routes, including the feature modules', have pydantic request/response models so <code>/docs</code> shows them.</p>
+<h2 id="cli-clef-clipy">CLI (<code>clef</code>, <code>cli.py</code>)<a class="headerlink" href="#cli-clef-clipy" title="Permanent link">&para;</a></h2>
+<p><div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>clef serve [--host H] [--port P] [--device D] [--dtype T] [--quant Q] [--offload none|cpu]
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>           [--max-device-memory-gb GB] [--model-path DIR] [--detach] [--timeout S]
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>           # flags set the matching CLEF_* env; foreground by default (Ctrl+C stops)
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>clef stop | clef status [--json] | clef logs [-f] [-n N]
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>clef doctor [--no-gpu] [--smoke] [--json]    # exit 0 ok/warn, 1 on any FAIL
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>clef download [--revision SHA] [--dir DIR] [--yes]
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>clef bench [http_bench args...]              # against the running server
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>clef open                                    # opens http://&lt;host&gt;:&lt;port&gt;/ in the browser
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>clef version
+</code></pre></div>
+- <code>--detach</code>: spawns <code>python -m clef_server.main</code> as a detached process (POSIX <code>start_new_session</code>, Windows
+  <code>DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP</code>), writes <code>paths.pid_file</code>, logs to <code>paths.log_file</code> (rotating the
+  previous log to <code>.1..3</code>), then waits for <code>/livez</code> and for <code>/health</code> status <code>ready|warming</code> (health-gated start,
+  <code>--timeout</code> default 600 s); on exit or <code>status=error</code> prints the last 20 log lines and exits 1. Refuses to start
+  when something already answers on the port.
+- <code>stop</code>: SIGTERM (Windows: <code>taskkill /PID /T</code>), wait 30 s, then kill; removes the pidfile.
+- <code>status</code>: process + <code>/health</code> summary (backend, device, status); exit 0 when healthy.
+- <code>doctor --no-gpu</code>: skips everything that needs a GPU or the weights (CI smoke). On a GPU, <code>doctor</code> also prints a
+  <code>memory setting</code> line (from <code>recommend_memory_setting</code>) when bf16 would not fit comfortably. <code>--smoke</code>: loads the model on
+  the detected backend, runs one fixed record, checks probabilities sum to 1 and prints latency.
+- <code>download</code>: <code>huggingface_hub.snapshot_download(MODEL_REPO, revision=MODEL_REVISION)</code> into the HF cache (or
+  <code>--dir</code> / <code>CLEF_MODEL_PATH</code>), resumable; checks free disk &gt;= 21 GB first and warns about the ~19 GB size.
+- Wrappers: <code>scripts/launch_server.sh</code> and <code>clef.ps1</code> are thin wrappers over the CLI; <code>clef.ps1</code> (Windows -&gt; WSL)
+  keeps the hidden WSL keep-alive session.</p>
+<h2 id="console-static">Console (<code>static/</code>)<a class="headerlink" href="#console-static" title="Permanent link">&para;</a></h2>
+<p>Zero-build Preact + htm; one vendored charting library (<code>static/vendor/uPlot.*</code>, MIT) for time series, everything
+else hand-written SVG. No runtime CDN calls. Screens: Playground (SystemOne + Classify modes), History, Batch, Evaluate (labelled dataset -&gt; <code>/v1/classify/batch</code>
+in chunks -&gt; <code>/v1/evaluate/metrics</code>; confusion heatmap, reliability diagram, coverage curve, mistakes, export), Ops.
+It consumes <code>/health</code>, <code>/v1/stats</code>, <code>/v1/stats/timeseries</code>, <code>/v1/events?step_s=</code>, <code>/v1/log</code>, <code>/v1/systemone</code>,
+<code>/v1/batch</code>, <code>/v1/classify</code>, <code>/v1/classify/batch</code>, <code>/v1/classifiers*</code>, <code>/v1/evaluate/metrics</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../api-reference/" class="md-footer__link md-footer__link--prev" aria-label="Previous: HTTP API">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                HTTP API
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../troubleshooting/" class="md-footer__link md-footer__link--next" aria-label="Next: Troubleshooting">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Troubleshooting
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Apache-2.0 licensed. The model is Cloudflare clef-flash.
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/MiguelCarrascoB/clef" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.footer", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate", "content.tabs.link", "content.action.edit", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

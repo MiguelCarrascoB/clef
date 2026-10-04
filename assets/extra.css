@@ -1,0 +1,30 @@
+:root {
+  --md-primary-fg-color: #4f46e5;
+  --md-primary-fg-color--light: #6d66f0;
+  --md-primary-fg-color--dark: #3730a3;
+  --md-accent-fg-color: #0d9488;
+}
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #4338ca;
+  --md-accent-fg-color: #2dd4bf;
+  --md-hue: 235;
+  --md-typeset-a-color: #9aa0ff;
+  --md-typeset-color: #e4e6f0;
+}
+.md-header__button.md-logo svg { height: 1.6rem; width: 1.6rem; }
+
+.hero { padding: 1.5rem 0 0.5rem; }
+.hero h1 { font-size: 2.6rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.4rem; }
+.hero .tagline { font-size: 1.15rem; max-width: 40rem; opacity: 0.85; }
+.hero .md-button { margin-top: 0.4rem; }
+
+.md-typeset img[src*="screenshots"] {
+  border-radius: 8px;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.12);
+}
+
+.swagger-ui .info { margin: 0 0 1rem; }
+[data-md-color-scheme="slate"] .swagger-ui { filter: invert(0.9) hue-rotate(180deg); }
+[data-md-color-scheme="slate"] .swagger-ui .microlight,
+[data-md-color-scheme="slate"] .swagger-ui img { filter: invert(1) hue-rotate(180deg); }
