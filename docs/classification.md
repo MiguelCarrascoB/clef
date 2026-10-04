@@ -145,6 +145,12 @@ c.classifier("support-triage").classify("My invoice is wrong")
 await c.classifier("support-triage").classify("My invoice is wrong");
 ```
 
+## Related
+
+- Use the OpenAI SDK instead of these routes: [OpenAI & Hugging Face compatibility](openai-compat.md).
+- Check how accurate and well calibrated your labels are on your own data: [Evaluation](evaluation.md).
+- Classify tens of thousands of inputs without holding a connection open: [Jobs & webhooks](jobs.md).
+
 ## Tips
 
 - Write label names the way a person would; add descriptions when two labels could overlap.

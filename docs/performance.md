@@ -18,6 +18,22 @@ tokens, `clef bench`, 100 requests per level. v2 and v3 were run back to back on
     transformers' SDPA masking. Padding text batches to a multiple of 64 beats both raw lengths and full buckets
     (`CLEF_PAD_MULTIPLE`); that was measured on ROCm only. NVIDIA, Mac and CPU numbers are pending hardware.
 
+## Smaller-memory modes
+
+Same GPU, same session, 200 mixed records (`bench/memory_bench.py`). Offload is lossless: the probabilities are
+bit-identical to bf16. Full table, method and caveats: [Smaller GPUs](memory.md).
+
+| Setting | Device GB (peak allocated) | single p50 | req/s at concurrency 8 | Max / mean abs probability difference |
+| --- | --- | --- | --- | --- |
+| bf16 (default) | 18.4 | 152 ms | 4.72 | reference |
+| `CLEF_OFFLOAD=cpu`, cap 15 (16 GB card) | 13.1 | 175 ms | 4.15 | 0 / 0 |
+| `CLEF_OFFLOAD=cpu`, cap 11 (12 GB card) | 9.0 | 343 ms | 3.37 | 0 / 0 |
+| `CLEF_OFFLOAD=cpu`, cap 7 (8 GB card) | 5.1 | 540 ms | 2.59 | 0 / 0 |
+| `CLEF_QUANT=int8` + `CLEF_OFFLOAD=cpu` (12 GB card) | 8.3 | 206 ms | 4.10 | 0.062 / 0.0058 |
+
+Offload latency is the PCIe copy of the layers kept in host RAM, partly hidden behind compute, and it needs host RAM
+(about 6, 11 and 15 GB for the three caps). On NVIDIA and Apple Silicon these modes are untested on hardware.
+
 ## Benchmarks
 
 | Tool | Use |
@@ -26,3 +42,4 @@ tokens, `clef bench`, 100 requests per level. v2 and v3 were run back to back on
 | `bench/bench.py` | in-process, needs the GPU |
 | `bench/profile_forward.py` | `torch.profiler` |
 | `bench/parity.py` | probability parity across dtypes and quantization |
+| `bench/memory_bench.py` | one smaller-memory setting per process: device and host memory, latency, parity against a saved bf16 reference |

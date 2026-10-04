@@ -5,7 +5,7 @@
 
 | Command | What it does |
 | --- | --- |
-| `clef serve [--host --port --device --dtype --quant --model-path --detach --timeout]` | start the server (foreground; `--detach` writes a pidfile and waits until healthy) |
+| `clef serve [--host --port --device --dtype --quant --offload --max-device-memory-gb --model-path --detach --timeout]` | start the server (foreground; `--detach` writes a pidfile and waits until healthy) |
 | `clef stop` / `clef status [--json]` / `clef logs [-f] [-n N]` | manage a detached server |
 | `clef doctor [--no-gpu] [--smoke] [--json]` | environment checks per backend; `--smoke` loads the model and runs one record |
 | `clef download [--revision SHA] [--dir DIR] [--yes]` | pinned, resumable download of the weights with a disk-space check |
@@ -14,6 +14,11 @@
 | `clef version` | print the version |
 
 ## Details
+
+`--quant`, `--offload`, `--max-device-memory-gb`
+:   The smaller-memory settings, equal to `CLEF_QUANT`, `CLEF_OFFLOAD` (`none` or `cpu`) and
+    `CLEF_MAX_DEVICE_MEMORY_GB` (`0` = no cap). For example `clef serve --offload cpu --max-device-memory-gb 15` on a
+    16 GB card. See [Smaller GPUs](memory.md).
 
 `--detach`
 :   Spawns the server as a detached process, writes a pidfile, logs to the state dir (rotating the previous log), then
@@ -28,7 +33,9 @@
 
 `doctor`
 :   Exit 0 on ok or warn, 1 on any FAIL. `--no-gpu` skips everything that needs a GPU or the weights (CI smoke).
-    `--smoke` loads the model, runs one fixed record, checks that probabilities sum to 1 and prints latency.
+    `--smoke` loads the model, runs one fixed record, checks that probabilities sum to 1 and prints latency. When
+    the detected memory is too small for bf16 it prints a `memory setting` line with the option to use
+    (offload, int8) and a preflight check that honours your `--offload` / `--max-device-memory-gb` choice.
 
 `download`
 :   Fetches the pinned revision into the Hugging Face cache (or `--dir` / `CLEF_MODEL_PATH`). Resumable. Checks for

@@ -6,14 +6,23 @@ too. Pick the lock file that matches your hardware from `requirements/`.
 
 ## Hardware requirements
 
-The weights are ~19 GB in bf16 and peak device memory is ~19.5 GB (measured on ROCm).
+The weights are ~19 GB in bf16 and peak device memory is ~19.5 GB (measured on ROCm), so out of the box you need a
+**24 GB GPU** or a **Mac with 32 GB or more of unified memory** (macOS 14+ for bf16). Smaller GPUs work with one
+extra setting. `clef doctor` reads your memory and prints the matching line.
 
-| Setup | Memory | Notes |
+| You have | Use | Cost (measured on the RX 7900 XTX) |
 | --- | --- | --- |
-| NVIDIA / AMD GPU, bf16 | **24 GB VRAM** | the realistic floor |
-| Apple Silicon, bf16 | **32 GB unified memory or more** | macOS 14+ for bf16 |
-| NVIDIA 16 GB with `CLEF_QUANT=int8` or `nf4` | 16 GB VRAM | CUDA only (bitsandbytes). See [smaller GPUs](memory.md) |
+| 24 GB GPU, 32 GB+ Mac | nothing | none |
+| 16 GB GPU | `CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=15` | identical probabilities; p50 152 to 175 ms; ~6 GB host RAM |
+| 12 GB GPU | `CLEF_QUANT=int8 CLEF_OFFLOAD=cpu` | p50 ~206 ms; mean probability error 0.006, 2 of 399 top choices flipped |
+| 12 GB GPU, lossless | `CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=11` | identical probabilities; p50 343 ms; ~11 GB host RAM |
+| 8 GB GPU | `CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=7` | identical probabilities; p50 540 ms; ~15 GB host RAM |
+| 24 GB Mac | `CLEF_QUANT=int8` | ~12 GB; **not validated on Apple Silicon** |
 | CPU | ~40 GB RAM | works, but slow. Meant for development and tests |
+
+These numbers come from one AMD card; the NVIDIA and Apple Silicon paths run the same code but are untested on
+hardware. Set them as environment variables or with `clef serve --offload cpu --max-device-memory-gb 15`. Details,
+caveats and the full measurement table: [Smaller GPUs](memory.md).
 
 Disk: ~19 GB for the weights plus ~21 GB free during `clef download`.
 
@@ -62,8 +71,9 @@ clef doctor && clef download && clef serve
     clef serve
     ```
 
-    16 GB card: `CLEF_QUANT=nf4 clef serve` (or `int8`), after `uv pip install bitsandbytes`. See
-    [troubleshooting](troubleshooting.md#cuda) and [smaller GPUs](memory.md). **Untested on hardware.**
+    Less than 24 GB: see the table above, for example `CLEF_OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=15 clef serve`
+    on a 16 GB card. [Smaller GPUs](memory.md) and [troubleshooting](troubleshooting.md#cuda) have the rest.
+    **Untested on hardware.**
 
 === "Windows + WSL2, AMD ROCm"
 

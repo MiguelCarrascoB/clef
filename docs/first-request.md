@@ -53,7 +53,7 @@ Then ask which label fits an input.
 Saved classifiers (`PUT /v1/classifiers/{name}`) store labels and instructions on the server so callers send only the
 input. More runnable examples live in
 [`examples/`](https://github.com/MiguelCarrascoB/clef/tree/main/examples) (curl, Python, JavaScript, PowerShell, a
-CSV classifier).
+CSV classifier, the OpenAI and Hugging Face clients, an async job).
 
 The original SystemOne API (`POST /v1/systemone`, `POST /v1/batch`, typed `choice` / `score` / `noul` questions,
 images and videos) is unchanged; see [Architecture](ARCHITECTURE.md).
@@ -61,6 +61,10 @@ images and videos) is unchanged; see [Architecture](ARCHITECTURE.md).
 ## Where to go from here
 
 - [Classification guide](classification.md): labels, instructions, multi-label, scoring, saved classifiers.
+- [OpenAI & Hugging Face compatibility](openai-compat.md): use the OpenAI SDK or `huggingface_hub` against your server.
+- [Evaluation](evaluation.md): measure accuracy and calibration on your own labelled data.
+- [Jobs & webhooks](jobs.md): run 100,000 rows in the background.
+- [Smaller GPUs](memory.md): fit the model into 16, 12 or 8 GB.
 - [HTTP API](api-reference.md): every endpoint, interactive.
 - [Console](console.md): open <http://127.0.0.1:8910/> to try inputs in the browser.
 - Something wrong? Run `clef doctor` and see [troubleshooting](troubleshooting.md).
