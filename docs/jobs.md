@@ -71,8 +71,9 @@ Built-in kinds:
 | `classify` | `inputs` (up to `CLEF_MAX_JOB_ITEMS`), either `labels` or `classifier` (a saved classify classifier), optional `instructions`, `multi_label`, `threshold`, `model` | `{index, label, confidence, scores, input_tokens}` (multi-label: `labels`, `threshold` instead of `label`, `confidence`) |
 | `score` | `inputs`, either `levels` or `classifier` (a saved score classifier), optional `instructions`, `model` | `{index, score, level, level_index, confidence, distribution, input_tokens}` |
 | `systemone` | `requests`: a list of `/v1/systemone` bodies (media allowed, same per-request limits) | `{index, model, answers, input_tokens}` |
+| `evaluate` | the same body as `POST /v1/evaluate` (up to `CLEF_MAX_JOB_EVAL_ROWS` rows), see [evaluation](evaluation.md#as-a-job) | `{index, input, gold, predicted, confidence, correct, scores}`; the job `result` is the metrics object |
 
-Other kinds can be registered by feature modules (for example an evaluation job); `POST` with an unknown
+Other kinds can be registered by feature modules (`evaluate` is one); `POST` with an unknown
 kind answers `400` and lists the available ones. A saved `classifier` is **copied into the job at submit**: the
 stored payload carries its labels / levels, instructions, `multi_label` and threshold (and `snapshot_of` with
 the name). Editing or deleting the classifier afterwards does not affect the job, queued, running or resumed,
@@ -136,7 +137,8 @@ curl -sS -o results.csv 'http://127.0.0.1:8910/v1/jobs/job_3f9c1e7a5b2d4c60e8a1/
 ```
 
 CSV columns are the flattened row (`index`, `label`, `confidence`, `scores.billing`, ...) and `error` last;
-`labels` lists are joined with `|`. Row `index` is the position of the input, so you can join back to your data.
+`labels` lists are joined with `|`. Cells that start with `=`, `+`, `-` or `@` get a leading quote so a spreadsheet
+does not run them as formulas. Row `index` is the position of the input, so you can join back to your data.
 
 ### Python
 
@@ -293,12 +295,13 @@ and do not see it in `GET /v1/jobs`. There is no admin view: stop the server and
 one. Jobs submitted while auth was off stay visible to all keys after you turn it on. Webhook URLs and
 metadata are visible to the owner.
 
-**Persistence and restart.** Jobs and result rows live in SQLite (`<state dir>/jobs.db`) and survive restarts.
+**Persistence and restart.** Jobs, their submitted payloads (your inputs) and result rows live in SQLite
+(`<state dir>/jobs.db`, in clear text) and survive restarts.
 Rows are written after every chunk. If the server stops while a job runs it is marked `interrupted` and, on the
 next start, **resumed** from the last stored row (`resumes` counts how often), ahead of queued jobs. A job that
 keeps killing the process would otherwise be resumed forever, so after `CLEF_JOB_MAX_RESUMES` interruptions
-(default 3) it is failed with `interrupted N times, giving up` and a WARNING is logged. The three built-in kinds
-resume exactly; a custom kind that does not declare itself resumable restarts from item 0. Resuming re-reads
+(default 3) it is failed with `interrupted N times, giving up` and a WARNING is logged. The built-in kinds (including
+`evaluate`) resume exactly; a custom kind that does not declare itself resumable restarts from item 0. Resuming re-reads
 the stored payload, which already holds the saved classifier as it was at submit. Finished jobs are purged on
 their own timer (every ten minutes), also while a job is running. Delete the file to drop all jobs (an older
 `jobs.db` is upgraded in place).

@@ -72,7 +72,7 @@ embeddings, the output embedding and the vision tower stay bf16. Needs `pip inst
 `CLEF_OFFLOAD=cpu` to also move the 4 GB of embeddings to the host: that is the 12 GB setting.
 
 `CLEF_QUANT=nf4` (bitsandbytes 4-bit) loads on ROCm too, but is **not recommended**: it flipped the top choice on
-~10% of questions in our set. Use it only if nothing else fits.
+35 of 399 questions (~9%) in our set. Use it only if nothing else fits.
 
 ### Why not 4-bit, GGUF, AWQ, GPTQ
 
@@ -116,7 +116,7 @@ one record per forward (399 questions).
 | *fp16 (noise floor, separate run, 200 text records)* | *18.2 / 18.4* | | *159 ms (bf16 that run: 176)* | | *0.021 / 0.0019* | *0 / 399* |
 
 - The cap is enforced on the PyTorch allocator. The whole process (reserved memory + driver context) measured about
-  0.65 GB above the cap, so use `N - 0.5` GB for an `N` GB card: 15 for 16 GB, 11 for 12 GB, 7 for 8 GB.
+  0.65 GB above the cap, so use `N - 1` GB for an `N` GB card: 15 for 16 GB, 11 for 12 GB, 7 for 8 GB.
 - Host RAM after load is the process RSS once the model is in place: the pinned copies of everything that was moved
   off the GPU. During loading RSS peaks higher (up to ~19 GB) because the safetensors files are memory-mapped; those
   pages are reclaimable page cache.
