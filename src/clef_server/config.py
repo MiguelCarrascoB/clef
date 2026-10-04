@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 
 # Hugging Face release the server is pinned to (`clef download` fetches exactly this revision).
 MODEL_REPO = "Cloudflare/clef-flash"
@@ -21,20 +21,29 @@ OFFLOADS = ("none", "cpu")
 KEY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
+def _env(name: str) -> str | None:
+    """The variable's value, or None when unset or blank (WSLENV passes unset Windows variables as "")."""
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+
 def _int(name: str, default: int) -> int:
-    return int(os.environ.get(name, default))
+    value = _env(name)
+    return default if value is None else int(value)
 
 
 def _float(name: str, default: float) -> float:
-    return float(os.environ.get(name, default))
+    value = _env(name)
+    return default if value is None else float(value)
 
 
 def _bool(name: str, default: bool) -> bool:
-    return os.environ.get(name, "1" if default else "0").strip().lower() in ("1", "true", "yes", "on")
+    value = _env(name)
+    return default if value is None else value.lower() in ("1", "true", "yes", "on")
 
 
 def _str(name: str, default: str) -> str:
-    return os.environ.get(name, default).strip()
+    return _env(name) or default
 
 
 def _buckets(raw: str) -> tuple[int, ...]:
@@ -172,7 +181,7 @@ class Config:
     batch_window_ms: float = field(default_factory=lambda: _float("CLEF_BATCH_WINDOW_MS", 4.0))
     buckets: tuple[int, ...] = field(
         default_factory=lambda: _buckets(
-            os.environ.get("CLEF_BUCKETS", "128,192,256,384,512,768,1024,1536,2048,3072,4096")
+            _env("CLEF_BUCKETS") or "128,192,256,384,512,768,1024,1536,2048,3072,4096"
         )
     )
     # Buckets group similar lengths into one forward. Text batches are padded to the next pad_multiple: on the

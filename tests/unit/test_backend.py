@@ -643,3 +643,21 @@ def test_memory_bench_sampler_failure_is_unavailable_not_zero():
     assert "no cuda" in m["device_sampler_error"]
     s = types.SimpleNamespace(samples=3, peak_used=9.123, baseline=1.0, error=None)
     assert mod.sampler_metrics(s) == {"peak_device_used_gb": 9.12, "device_baseline_gb": 1.0}
+
+
+def test_blank_env_values_mean_unset(monkeypatch):
+    """WSLENV forwards Windows variables that are unset as empty strings; they must not break config."""
+    from clef_server.config import Config
+
+    for name in (
+        "CLEF_QUANT",
+        "CLEF_PORT",
+        "CLEF_RATE_LIMIT",
+        "CLEF_TELEMETRY",
+        "CLEF_MAX_DEVICE_MEMORY_GB",
+        "CLEF_BUCKETS",
+    ):
+        monkeypatch.setenv(name, " ")
+    cfg = Config()
+    assert cfg.quant == "none" and cfg.port == 8910 and cfg.rate_limit == 0 and cfg.telemetry is True
+    assert cfg.max_device_memory_gb == 0 and cfg.buckets[0] == 128
