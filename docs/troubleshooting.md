@@ -21,6 +21,11 @@ Untested on hardware at the time of writing; these are the known failure modes o
 - **`causal-conv1d` fails to build**: it compiles CUDA code and needs `nvcc` matching the torch CUDA version, a C++
   compiler and `ninja`. Prefer a prebuilt wheel matching your torch/CUDA/Python, or install the CUDA toolkit of the same
   major.minor as `torch.version.cuda`. If it cannot be built, run without it; correctness is unchanged.
+  Built from source on WSL2 + Ubuntu 24.04 with `cuda-toolkit-12-8` (do not install the `cuda` or `cuda-drivers`
+  metapackages inside WSL), `uv pip install ninja setuptools wheel`, then `CUDA_HOME=/usr/local/cuda-12.8
+  TORCH_CUDA_ARCH_LIST=8.9 MAX_JOBS=6 uv pip install causal-conv1d --no-build-isolation` (set the arch list to your
+  card; it took about 23 minutes). On an RTX 4070 Ti it did not change speed measurably (p50 170.3 to 167.5 ms), so
+  skipping it costs little there.
 - **`CLEF_QUANT` errors**: on CUDA `int8` and `nf4` use `bitsandbytes` (`pip install bitsandbytes`, part of the `cuda`
   extra); if it cannot find the CUDA libraries, check `python -m bitsandbytes`. `CLEF_QUANT_BACKEND=torchao` needs
   `pip install "clef-local[quant]"`. `nf4` exists only in bitsandbytes. Quantized probabilities differ slightly from

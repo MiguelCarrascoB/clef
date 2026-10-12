@@ -130,7 +130,11 @@ HTTP, `clef bench --requests 100` (500 requests per mode, no errors):
   answers and 36% slower than torchao. See the note in [memory.md](memory.md).
 - The lossless modes need more host RAM than a default 15 GB WSL2: `OFFLOAD=cpu` was refused at caps of 10 and 11 GB
   ("11.0 GB of weights stay in host memory, 13.0 GB free"), and the cap 10 run peaked at 17.1 GB of RSS while loading.
-- Not run: plain bf16 (needs 24 GB), `nf4`, `CLEF_PAD_MULTIPLE` variants, native Ubuntu.
+- `causal-conv1d` 1.7.0, built from source (the `cuda-fast` extra, ~23 min): `clef doctor` no longer warns about the fast
+  path. `memory_bench` int8 torchao + offload went from p50 170.3 / p95 488.7 ms and 5.03 req/s to 167.5 / 481.2 ms and
+  5.11 req/s (about 1.6%, inside the ~5% same-day drift), parity unchanged (mean 0.0054, 2 of 399 flips), and the
+  integration tests still pass (22). `clef bench`: c=1 6.2 req/s, p50 161 ms; c=16 8.9 req/s.
+- Not run: plain bf16 (needs 24 GB), `nf4`, native Ubuntu.
 
 ### `CLEF_PAD_MULTIPLE` on CUDA (RTX 4070 Ti, int8 torchao + offload, 2026-10-12)
 
