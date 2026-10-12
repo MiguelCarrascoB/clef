@@ -15,6 +15,11 @@ import time
 import urllib.request
 from pathlib import Path
 
+_BENCH_DIR = Path(__file__).resolve().parent
+if str(_BENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(_BENCH_DIR))
+from _model import default_model_path  # noqa: E402
+
 _HERE = Path(__file__).resolve().parent
 
 _spec = importlib.util.spec_from_file_location("clef_bench", _HERE / "bench.py")
@@ -59,9 +64,7 @@ def server_running(port: int) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--model-path", default=os.environ.get("CLEF_MODEL_PATH", str(Path.home() / "models" / "clef-flash"))
-    )
+    ap.add_argument("--model-path", default=default_model_path())
     ap.add_argument("--out", default=str(_HERE / "out"))
     ap.add_argument("--port", type=int, default=int(os.environ.get("CLEF_PORT", "8910")))
     ap.add_argument("--batch", type=int, default=8)

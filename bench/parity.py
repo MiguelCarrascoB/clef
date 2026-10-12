@@ -26,6 +26,10 @@ import urllib.request
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+from _model import default_model_path  # noqa: E402
+
 _SRC = _HERE.parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:  # run from a checkout without `pip install -e .`
     sys.path.insert(0, str(_SRC))
@@ -196,9 +200,7 @@ def run_setting(
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument(
-        "--model-path", default=os.environ.get("CLEF_MODEL_PATH", str(Path.home() / "models" / "clef-flash"))
-    )
+    ap.add_argument("--model-path", default=default_model_path())
     ap.add_argument("--device", default=os.environ.get("CLEF_DEVICE", "auto"))
     ap.add_argument("--dtype", default=os.environ.get("CLEF_DTYPE", "float16"), help="candidate dtype")
     ap.add_argument("--quant", default=os.environ.get("CLEF_QUANT", "none"), help="candidate quantization")

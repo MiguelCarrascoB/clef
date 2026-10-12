@@ -35,6 +35,7 @@ if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 sys.path.insert(0, str(_HERE))
 
+from _model import default_model_path  # noqa: E402
 from parity import build_eval_set, compare, server_running  # noqa: E402
 
 GB = 1024**3
@@ -214,9 +215,7 @@ async def run(args) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument(
-        "--model-path", default=os.environ.get("CLEF_MODEL_PATH", str(Path.home() / "models" / "clef-flash"))
-    )
+    ap.add_argument("--model-path", default=default_model_path())
     ap.add_argument("--label", required=True)
     ap.add_argument("--device", default=os.environ.get("CLEF_DEVICE", "auto"))
     ap.add_argument("--dtype", default=os.environ.get("CLEF_DTYPE", "auto"))

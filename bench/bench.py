@@ -20,6 +20,11 @@ import time
 import urllib.request
 from pathlib import Path
 
+_BENCH_DIR = Path(__file__).resolve().parent
+if str(_BENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(_BENCH_DIR))
+from _model import default_model_path  # noqa: E402
+
 PARAMS = 9e9  # clef-flash parameter count, for the FLOPs estimate
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:  # run from a checkout without `pip install -e .`
@@ -139,9 +144,7 @@ def server_running(port: int) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument(
-        "--model-path", default=os.environ.get("CLEF_MODEL_PATH", str(Path.home() / "models" / "clef-flash"))
-    )
+    ap.add_argument("--model-path", default=default_model_path())
     ap.add_argument("--singles", type=int, default=100, help="timed single-record runs (>=100 recommended)")
     ap.add_argument("--batches", type=int, default=30, help="timed runs per batch size (>=30 recommended)")
     ap.add_argument("--batch-sizes", default="1,2,4,8,16")
