@@ -132,3 +132,17 @@ HTTP, `clef bench --requests 100` (500 requests per mode, no errors):
   ("11.0 GB of weights stay in host memory, 13.0 GB free"), and the cap 10 run peaked at 17.1 GB of RSS while loading.
 - Not run: plain bf16 (needs 24 GB), `nf4`, `CLEF_PAD_MULTIPLE` variants, native Ubuntu.
 
+### `CLEF_PAD_MULTIPLE` on CUDA (RTX 4070 Ti, int8 torchao + offload, 2026-10-12)
+
+The default of 64 was chosen on ROCm. `clef bench --requests 100 --concurrency 1,8`, ~330-token records, a fresh server
+per run; the default (64) was measured twice and a multiple of 8 three times.
+
+| `CLEF_PAD_MULTIPLE` | c=1 req/s, p50 | c=8 req/s, p50 |
+| --- | --- | --- |
+| 8 | 6.0, 165.5 / 166.5 / 166.1 ms | 9.5, 880 / 866 / 869 ms |
+| 64 (default) | 5.9, 169.3 / 168.9 ms | 8.5, 942 / 949 ms |
+| 128 | 5.9, 169.6 ms | 8.5, 956 ms |
+
+A multiple of 8 was about 12% faster at concurrency 8 and 2% faster at concurrency 1, consistently across the three runs.
+Only one mode and one record length were measured; the bf16 and mixed-length workloads are untested, so the default is unchanged.
+

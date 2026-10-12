@@ -97,7 +97,7 @@ r = client.chat.completions.create(
 print(r.choices[0].message.content)  # {"team": "technical", "outage": true}
 ```
 
-`huggingface_hub`'s `InferenceClient.zero_shot_classification` also works (`POST /hf/models/{id}`). LangChain is untested.
+`huggingface_hub`'s `InferenceClient.zero_shot_classification` also works (`POST /hf/models/{id}`). LangChain's `ChatOpenAI.with_structured_output` works too (`json_schema` and `function_calling`).
 
 ### Evaluate before you automate
 
@@ -287,7 +287,7 @@ The repository has 500+ unit tests covering the API, engine, offload planning, e
 - [ ] Publish to PyPI (`clef-local`)
 - [ ] Remove the device sync in SDPA masking to unblock graph capture / `torch.compile`, since about 50% of a single-record forward is host overhead
 - [ ] Quantization accuracy table on CUDA (int8 / nf4 vs bf16)
-- [ ] Test the LangChain integration
+- [x] Test the LangChain integration
 
 ## License
 
