@@ -32,6 +32,8 @@ torch from the right index. `constraints-rocm.txt` holds the hand-picked ROCm pi
 
 Known gaps: `causal-conv1d` has no wheels for any platform, so it is left out of every lock (install it with the
 `cuda-fast` extra on a machine with the CUDA toolkit). `bitsandbytes` is only in `cuda.txt` (its nf4 also loads on ROCm: `pip install bitsandbytes`, not recommended); `torchao` is in `rocm.txt`, `macos.txt`, `cpu.txt` and `dev.txt`.
+With `uv pip install -r requirements/cuda.txt`, add `--index-strategy unsafe-best-match`: the PyTorch index also hosts a
+(older) `certifi`, and uv's default "first index wins" rule then reports the pinned PyPI version as unsatisfiable. `pip` is not affected.
 No lock is provided for native Windows + CUDA: use `--torch-backend` (below) or install CUDA torch first.
 
 ### Regenerate

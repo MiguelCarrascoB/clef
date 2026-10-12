@@ -63,7 +63,7 @@ clef doctor && clef download && clef serve
     ```bash
     git clone https://github.com/MiguelCarrascoB/clef && cd clef
     uv venv --python 3.12 && source .venv/bin/activate
-    uv pip install -r requirements/cuda.txt
+    uv pip install -r requirements/cuda.txt --index-strategy unsafe-best-match
     uv pip install -e ".[server]"
     clef doctor
     clef download
