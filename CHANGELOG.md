@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **CUDA install**: `accelerate` and `torchvision` are now declared in the `cuda` extra and pinned in
+  `requirements/cuda.txt` (the model code imports both, and loading crashed without them). The uv commands for the CUDA
+  lock use `--index-strategy unsafe-best-match`, because uv otherwise reports the pinned `certifi` as unsatisfiable.
+- `bench/*.py` find the weights in the Hugging Face cache like `clef serve` does, instead of requiring `--model-path`.
+
+### Validated
+- **CUDA on hardware** (RTX 4070 Ti 12 GB, WSL2, torch 2.11.0+cu128): smoke test, serving, `pytest -m gpu` (22 passed
+  with torchao), `clef bench` and `bench/memory_bench.py` in the int8 and CPU-offload modes. Numbers in
+  `docs/hardware-results.md`. Plain bf16, `nf4`, padding variants and native Ubuntu are still untested.
+- On CUDA, int8 with torchao is more accurate and faster than the default bitsandbytes (mean error 0.0057 against
+  0.0172; 3 against 22 flipped answers of 399; p50 170 against 232 ms). The default is unchanged; see
+  `docs/memory.md`.
+
 ## 3.1.0 (2026-10-04)
 
 Four features on top of 3.0.0, plus the public-release sweep. Everything was run on the verified Windows + WSL2 +

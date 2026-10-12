@@ -199,7 +199,7 @@ Profiling shows the model is **compute-bound**: GEMMs take about 83% of GPU kern
 | 24 GB Mac | `CLEF_QUANT=int8` | ~12 GB; **not validated on Apple Silicon** |
 | CPU | ~40 GB RAM | works, but slow; for development and tests |
 
-`CLEF_QUANT=nf4` also loads, but it flipped about 9% of top choices in our set, so it is not recommended. `clef doctor` reads your memory and prints the matching setting.
+On **NVIDIA**, int8 defaults to bitsandbytes, which flipped 22 of 399 top choices on an RTX 4070 Ti; set `CLEF_QUANT_BACKEND=torchao` (`pip install torchao`) for 3 of 399 and a faster p50 (170 ms against 232 ms). `CLEF_QUANT=nf4` also loads, but it flipped about 9% of top choices in our set, so it is not recommended. `clef doctor` reads your memory and prints the matching setting.
 
 ### Platform support
 
@@ -207,7 +207,8 @@ Profiling shows the model is **compute-bound**: GEMMs take about 83% of GPU kern
 | --- | --- | --- |
 | Windows + WSL2, AMD RX 7900 XTX | ROCm 7.2 | ✅ verified (all tests and benchmarks) |
 | Any OS, no GPU | CPU | ✅ unit-tested on Ubuntu, macOS and Windows |
-| Ubuntu / WSL2, NVIDIA | CUDA | ⚠️ untested on hardware (code paths unit-tested with mocks) |
+| WSL2, NVIDIA RTX 4070 Ti (12 GB) | CUDA 12.8 | ✅ verified for int8 and CPU-offload modes ([results](docs/hardware-results.md)); ⚠️ plain bf16 (24 GB) not run |
+| Ubuntu (native), other NVIDIA cards | CUDA | ⚠️ untested on hardware (code paths unit-tested with mocks) |
 | macOS, Apple Silicon | MPS | ⚠️ untested on hardware |
 
 **Have an NVIDIA card or a Mac?** Running [docs/hardware-validation.md](docs/hardware-validation.md) and contributing the results is the most useful help right now.
