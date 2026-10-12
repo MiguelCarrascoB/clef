@@ -286,7 +286,7 @@ The repository has 500+ unit tests covering the API, engine, offload planning, e
 - [ ] Validate on NVIDIA and Apple Silicon hardware, then publish the numbers
 - [ ] Publish to PyPI (`clef-local`)
 - [ ] Remove the device sync in SDPA masking to unblock graph capture / `torch.compile`, since about 50% of a single-record forward is host overhead
-- [ ] Quantization accuracy table on CUDA (int8 / nf4 vs bf16)
+- [x] Quantization accuracy table on CUDA (int8 / nf4, measured against lossless offload because bf16 does not fit in 12 GB)
 - [x] Test the LangChain integration
 
 ## License

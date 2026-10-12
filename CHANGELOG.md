@@ -11,7 +11,7 @@
 ### Validated
 - **CUDA on hardware** (RTX 4070 Ti 12 GB, WSL2, torch 2.11.0+cu128): smoke test, serving, `pytest -m gpu` (22 passed
   with torchao), `clef bench` and `bench/memory_bench.py` in the int8 and CPU-offload modes. Numbers in
-  `docs/hardware-results.md`. `CLEF_PAD_MULTIPLE` 8 was ~12% faster than the default 64 at concurrency 8 on this card (default unchanged). `causal-conv1d` (built from source) made no measurable difference (1.6%, within noise). Plain bf16, `nf4` and native Ubuntu are still untested.
+  `docs/hardware-results.md`. `CLEF_PAD_MULTIPLE` 8 was ~12% faster than the default 64 at concurrency 8 on this card (default unchanged). `causal-conv1d` (built from source) made no measurable difference (1.6%, within noise). `nf4` matches the ROCm run (36 of 399 flips, still not recommended). Plain bf16 and native Ubuntu are still untested.
 - **LangChain** (`langchain-openai` 1.7.1): `with_structured_output` works with the `json_schema` and `function_calling`
   methods against the compat routes; `json_mode` and plain chat return the documented `400 missing_schema`.
 - On CUDA, int8 with torchao is more accurate and faster than the default bitsandbytes (mean error 0.0057 against

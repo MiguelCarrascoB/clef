@@ -140,7 +140,7 @@ backends. If you run int8 on an NVIDIA card, set `CLEF_QUANT_BACKEND=torchao`
 - One machine, one day, one model. Same-day drift is ~5%; every row was measured back to back in one session
   against the bf16 reference of that session.
 - CUDA was run on one card, an RTX 4070 Ti (12 GB, WSL2), in the int8 and offload modes: see
-  [hardware-results.md](hardware-results.md). Plain bf16, `nf4` and other CUDA cards are untested, and so are
+  [hardware-results.md](hardware-results.md). `nf4` matched the ROCm numbers (36 of 399 flips on CUDA). Plain bf16 and other CUDA cards are untested, and so are
   Apple Silicon, MPS and CPU torchao. Please run `bench/memory_bench.py` there and add the rows to `docs/hardware-results.md`.
 - A 12 GB card is shared with the desktop (about 1.2 GB on Windows), so the usable cap there is lower than `N - 1`.
 - `bench/memory_bench.py` needs a reference run for parity. Without a card big enough for bf16, use the lossless

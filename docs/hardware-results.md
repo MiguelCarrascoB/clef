@@ -59,10 +59,10 @@ bf16 (0 / 0 on ROCm); that was not re-checked on CUDA.
 | --- | --- | --- | --- | --- |
 | int8, torchao (`CLEF_QUANT_BACKEND=torchao`) | 0.066 | 0.0057 | 396 / 399 (99.2%) | p50 170 ms vs 572 ms |
 | int8, bitsandbytes (CUDA default) | 0.209 | 0.0172 | 377 / 399 (94.5%) | p50 232 ms vs 572 ms |
-| nf4 | pending hardware | pending | pending | pending |
+| nf4 (bitsandbytes) | 0.444 | 0.0333 | 363 / 399 (91.0%) | p50 153 ms vs 572 ms |
 
 The numbers match the ROCm run of the same two backends (torchao 0.0058 / 2 flips, bitsandbytes 0.0175 / 22 flips).
-Only `nf4` is still pending, and plain bf16 needs a 24 GB card.
+`nf4` also matches ROCm (0.0329 / 35 flips) and stays not recommended. Plain bf16 needs a 24 GB card and was not run.
 
 ## Smaller-memory options on ROCm (offload, int8, nf4), 2026-10-03
 
@@ -115,6 +115,7 @@ plus the two dependencies added in this change, clef 3.1.0. Same workload and me
 | `OFFLOAD=cpu` cap 10 (reference) | 7.7 / 10.0 | 11.4 GB | 12.3 / 17.1 GB | 572 / 631 ms | 2.67 | reference | - |
 | `QUANT=int8 OFFLOAD=cpu` (torchao) | 8.1 / 9.8 | 11.3 GB | 2.9 / 15.5 GB | 170 / 489 ms | 5.03 | 0.066 / 0.0057 | 3 / 399 |
 | `QUANT=int8 OFFLOAD=cpu` (bitsandbytes) | 7.9 / 10.9 | 12.0 GB | 5.8 / 19.4 GB | 232 / 446 ms | 4.81 | 0.209 / 0.0172 | 22 / 399 |
+| `QUANT=nf4 OFFLOAD=cpu` (bitsandbytes) | 4.4 / 7.6 | 8.9 GB | 5.8 / 19.3 GB | 153 / 445 ms | 5.50 | 0.444 / 0.0333 | 36 / 399 |
 
 HTTP, `clef bench --requests 100` (500 requests per mode, no errors):
 
@@ -134,7 +135,7 @@ HTTP, `clef bench --requests 100` (500 requests per mode, no errors):
   path. `memory_bench` int8 torchao + offload went from p50 170.3 / p95 488.7 ms and 5.03 req/s to 167.5 / 481.2 ms and
   5.11 req/s (about 1.6%, inside the ~5% same-day drift), parity unchanged (mean 0.0054, 2 of 399 flips), and the
   integration tests still pass (22). `clef bench`: c=1 6.2 req/s, p50 161 ms; c=16 8.9 req/s.
-- Not run: plain bf16 (needs 24 GB), `nf4`, native Ubuntu.
+- Not run: plain bf16 (needs 24 GB) and native Ubuntu.
 
 ### `CLEF_PAD_MULTIPLE` on CUDA (RTX 4070 Ti, int8 torchao + offload, 2026-10-12)
 
