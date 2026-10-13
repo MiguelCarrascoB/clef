@@ -13,6 +13,8 @@ the server); parity = max absolute probability difference against the bf16 refer
 | Windows 11 + WSL2 | AMD RX 7900 XTX (24 GB) | rocm 7.2 | bf16 | 140.7 / 147.3 ms | 7.0 | 9.0 | ~19.5 GB | ~45-100 s (page cache) | reference | v2, 2026-10-03 |
 | Windows 11 + WSL2 | AMD RX 7900 XTX (24 GB) | rocm 7.2 | bf16 | 150.1 / 155.4 ms | 6.6 | 8.1 | ~19.5 GB | 66-79 s | reference | v2 A/B, 2026-10-03 |
 | Windows 11 + WSL2 | AMD RX 7900 XTX (24 GB) | rocm 7.2 | bf16 | 149.0 / 159.2 ms (149.3 / 153.6) | 6.6 / 6.7 | 8.8 / 8.9 | ~19.5 GB | 76-110 s | reference | v3, 2026-10-03 (two runs) |
+| Windows 11 + WSL2 | NVIDIA RTX 4070 Ti (12 GB) | cuda 12.8 | int8 (torchao) + `OFFLOAD=cpu` | 160.1 / 164.3 ms | 6.2 | 8.7 | 8.1 GB allocated, 11.3 GB device used (1.2 GB is the desktop) | 12.8 s + 9.5 s warmup | mean 0.0057, max 0.066, 3 of 399 flips (vs lossless offload) | v3.1.0, 2026-10-12 |
+| Windows 11 + WSL2 | NVIDIA RTX 4070 Ti (12 GB) | cuda 12.8 | int8 (bitsandbytes, the CUDA default) + `OFFLOAD=cpu` | 228.2 / 259.4 ms | 4.4 | 9.4 | 7.9 GB allocated, 12.0 GB device used | 26-38 s + 10 s warmup | mean 0.0172, max 0.209, 22 of 399 flips (vs lossless offload) | v3.1.0, 2026-10-12 |
 | Ubuntu | NVIDIA 24 GB class | cuda | bf16 | pending (run docs/hardware-validation.md) | pending | pending | pending | pending | pending | - |
 | Ubuntu | NVIDIA 16 GB class | cuda | int8 | pending | pending | pending | pending | pending | pending | - |
 | Ubuntu | NVIDIA 16 GB class | cuda | nf4 | pending | pending | pending | pending | pending | pending | - |
@@ -49,13 +51,18 @@ noisy tail (p95 2873 ms).
 
 ## Quantization accuracy (CUDA only)
 
-| Mode | Max abs prob diff vs bf16 | Mean abs diff | Argmax agreement | Latency vs bf16 |
-| --- | --- | --- | --- | --- |
-| int8 | pending hardware | pending | pending | pending |
-| nf4 | pending hardware | pending | pending | pending |
+Measured on the RTX 4070 Ti (12 GB) against the **lossless offload run** (`OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=10`),
+not against plain bf16, because bf16 does not fit in 12 GB. Offload is documented to give identical probabilities to
+bf16 (0 / 0 on ROCm); that was not re-checked on CUDA.
 
-These rows are still pending: the bitsandbytes-on-CUDA path was not measured (no NVIDIA GPU). On the AMD GPU,
-int8 / nf4 (bitsandbytes and torchao) and CPU offload were measured; see the last section.
+| Mode | Max abs prob diff | Mean abs diff | Argmax agreement | Latency vs reference |
+| --- | --- | --- | --- | --- |
+| int8, torchao (`CLEF_QUANT_BACKEND=torchao`) | 0.066 | 0.0057 | 396 / 399 (99.2%) | p50 170 ms vs 572 ms |
+| int8, bitsandbytes (CUDA default) | 0.209 | 0.0172 | 377 / 399 (94.5%) | p50 232 ms vs 572 ms |
+| nf4 (bitsandbytes) | 0.444 | 0.0333 | 363 / 399 (91.0%) | p50 153 ms vs 572 ms |
+
+The numbers match the ROCm run of the same two backends (torchao 0.0058 / 2 flips, bitsandbytes 0.0175 / 22 flips).
+`nf4` also matches ROCm (0.0329 / 35 flips) and stays not recommended. Plain bf16 needs a 24 GB card and was not run.
 
 ## Smaller-memory options on ROCm (offload, int8, nf4), 2026-10-03
 
@@ -95,3 +102,52 @@ one record per forward (399 questions).
   probability error 0.006 is ~3x the fp16/bf16 noise floor.
 
 Background: [docs/memory.md](memory.md). Reproduce with `bench/memory_bench.py`. CUDA and Apple Silicon rows are still pending hardware.
+
+## RTX 4070 Ti (12 GB) on WSL2, CUDA 12.8, 2026-10-12
+
+Setup: i5-13600K, 32 GB host (WSL2 limited to 21 GB; 15 GB is not enough for the lossless modes), RTX 4070 Ti 12 GB
+shared with the Windows desktop (1.2 GB in use before the model loads), torch 2.11.0+cu128, `requirements/cuda.txt`
+plus the two dependencies added in this change, clef 3.1.0. Same workload and method as the ROCm section above
+(`bench/memory_bench.py`, one configuration per process). The parity reference is the lossless offload run, not bf16.
+
+| Setting | Device GB, peak allocated / reserved | Peak device used | Host RSS after load / peak | single p50 / p95 | req/s c=8 | Max / mean abs prob diff | Top-1 flips |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `OFFLOAD=cpu` cap 10 (reference) | 7.7 / 10.0 | 11.4 GB | 12.3 / 17.1 GB | 572 / 631 ms | 2.67 | reference | - |
+| `QUANT=int8 OFFLOAD=cpu` (torchao) | 8.1 / 9.8 | 11.3 GB | 2.9 / 15.5 GB | 170 / 489 ms | 5.03 | 0.066 / 0.0057 | 3 / 399 |
+| `QUANT=int8 OFFLOAD=cpu` (bitsandbytes) | 7.9 / 10.9 | 12.0 GB | 5.8 / 19.4 GB | 232 / 446 ms | 4.81 | 0.209 / 0.0172 | 22 / 399 |
+| `QUANT=nf4 OFFLOAD=cpu` (bitsandbytes) | 4.4 / 7.6 | 8.9 GB | 5.8 / 19.3 GB | 153 / 445 ms | 5.50 | 0.444 / 0.0333 | 36 / 399 |
+
+HTTP, `clef bench --requests 100` (500 requests per mode, no errors):
+
+| Mode | c=1 req/s, p50 / p95 | c=4 req/s, p50 | c=8 req/s, p50 | c=16 req/s, p50 / p95 |
+| --- | --- | --- | --- | --- |
+| int8 torchao + offload | 6.2, 160 / 164 ms | 8.7, 458 ms | 8.7, 814 ms | 8.7, 1830 / 2084 ms |
+| int8 bitsandbytes + offload | 4.4, 228 / 259 ms | 8.8, 428 ms | 8.4, 968 ms | 9.4, 1674 / 1897 ms |
+
+- `pytest -m gpu tests/integration`: 22 passed with torchao. With bitsandbytes, 21 passed and
+  `test_batch_matches_single` failed (`noul` 0.7469 batched against 0.7931 single, tolerance 0.02): bitsandbytes int8
+  gives different results for the same record in a batch.
+- On CUDA, bitsandbytes is the `auto` choice for int8, and it is the worse one here: 3x the error, 7x the flipped
+  answers and 36% slower than torchao. See the note in [memory.md](memory.md).
+- The lossless modes need more host RAM than a default 15 GB WSL2: `OFFLOAD=cpu` was refused at caps of 10 and 11 GB
+  ("11.0 GB of weights stay in host memory, 13.0 GB free"), and the cap 10 run peaked at 17.1 GB of RSS while loading.
+- `causal-conv1d` 1.7.0, built from source (the `cuda-fast` extra, ~23 min): `clef doctor` no longer warns about the fast
+  path. `memory_bench` int8 torchao + offload went from p50 170.3 / p95 488.7 ms and 5.03 req/s to 167.5 / 481.2 ms and
+  5.11 req/s (about 1.6%, inside the ~5% same-day drift), parity unchanged (mean 0.0054, 2 of 399 flips), and the
+  integration tests still pass (22). `clef bench`: c=1 6.2 req/s, p50 161 ms; c=16 8.9 req/s.
+- Not run: plain bf16 (needs 24 GB) and native Ubuntu.
+
+### `CLEF_PAD_MULTIPLE` on CUDA (RTX 4070 Ti, int8 torchao + offload, 2026-10-12)
+
+The default of 64 was chosen on ROCm. `clef bench --requests 100 --concurrency 1,8`, ~330-token records, a fresh server
+per run; the default (64) was measured twice and a multiple of 8 three times.
+
+| `CLEF_PAD_MULTIPLE` | c=1 req/s, p50 | c=8 req/s, p50 |
+| --- | --- | --- |
+| 8 | 6.0, 165.5 / 166.5 / 166.1 ms | 9.5, 880 / 866 / 869 ms |
+| 64 (default) | 5.9, 169.3 / 168.9 ms | 8.5, 942 / 949 ms |
+| 128 | 5.9, 169.6 ms | 8.5, 956 ms |
+
+A multiple of 8 was about 12% faster at concurrency 8 and 2% faster at concurrency 1, consistently across the three runs.
+Only one mode and one record length were measured; the bf16 and mixed-length workloads are untested, so the default is unchanged.
+

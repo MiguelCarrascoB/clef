@@ -73,8 +73,10 @@ curl -s http://127.0.0.1:8910/v1/chat/completions -H 'Content-Type: application/
           "timing": {"forward_ms": 141.2, "total_ms": 150.3}, "request_id": "..."}}
 ```
 
-LangChain and similar frameworks only need the base URL and a structured-output call (this uses the same wire
-format the OpenAI SDK sends; it was verified with the SDK, not with LangChain itself):
+LangChain and similar frameworks only need the base URL and a structured-output call. Verified with
+`langchain-openai` 1.7.1 and `langchain-core` 1.6.10 (2026-10-12) against a live server: `with_structured_output(Triage)`
+(the default `json_schema` method) and `method="function_calling"` both return the right object. `method="json_mode"` and
+a plain `invoke()` carry no schema, so they get the `400 missing_schema` described above:
 
 ```python
 from langchain_openai import ChatOpenAI

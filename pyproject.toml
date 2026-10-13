@@ -53,7 +53,8 @@ server = [
   "psutil",
 ]
 # Backends: torch + the optional fast paths for that backend.
-cuda = ["torch>=2.6", "flash-linear-attention", "nvidia-ml-py", "bitsandbytes"]
+# accelerate (device_map) and torchvision (video processor) are imported by the model code on load.
+cuda = ["torch>=2.6", "torchvision", "accelerate", "flash-linear-attention", "nvidia-ml-py", "bitsandbytes"]
 # causal-conv1d only ships an sdist: building it needs nvcc / the CUDA toolkit. Optional extra speed.
 cuda-fast = ["causal-conv1d"]
 # torchao: weight-only int8 for CLEF_QUANT=int8 off CUDA (docs/memory.md); optional on cuda (`quant` extra).

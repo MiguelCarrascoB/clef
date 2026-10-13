@@ -3,6 +3,8 @@
 --index-url https://pypi.org/simple
 --extra-index-url https://download.pytorch.org/whl/cu128
 
+accelerate==1.15.0
+    # via clef-local (pyproject.toml)
 annotated-doc==0.0.5
     # via
     #   fastapi
@@ -67,6 +69,7 @@ httpx==0.28.1
 huggingface-hub==1.33.0
     # via
     #   clef-local (pyproject.toml)
+    #   accelerate
     #   tokenizers
     #   transformers
 idna==3.20
@@ -92,8 +95,10 @@ networkx==3.4.2
 numpy==2.2.6
     # via
     #   clef-local (pyproject.toml)
+    #   accelerate
     #   bitsandbytes
     #   imageio
+    #   torchvision
     #   transformers
 nvidia-cublas-cu12==12.8.4.1
     # via
@@ -140,6 +145,7 @@ opentelemetry-api==1.45.0
     # via fastapi
 packaging==26.3
     # via
+    #   accelerate
     #   bitsandbytes
     #   huggingface-hub
     #   transformers
@@ -147,8 +153,11 @@ pillow==12.3.0
     # via
     #   clef-local (pyproject.toml)
     #   imageio
+    #   torchvision
 psutil==7.2.2
-    # via clef-local (pyproject.toml)
+    # via
+    #   clef-local (pyproject.toml)
+    #   accelerate
 pydantic==2.13.5
     # via
     #   clef-local (pyproject.toml)
@@ -161,6 +170,7 @@ python-dotenv==1.2.4
     # via uvicorn
 pyyaml==6.0.3
     # via
+    #   accelerate
     #   huggingface-hub
     #   transformers
     #   uvicorn
@@ -171,6 +181,7 @@ rich==15.0.0
 safetensors==0.8.0
     # via
     #   clef-local (pyproject.toml)
+    #   accelerate
     #   transformers
 setuptools==81.0.0
     # via torch
@@ -187,7 +198,11 @@ tomli==2.4.1
 torch==2.11.0+cu128
     # via
     #   clef-local (pyproject.toml)
+    #   accelerate
     #   bitsandbytes
+    #   torchvision
+torchvision==0.26.0+cu128
+    # via clef-local (pyproject.toml)
 tqdm==4.70.1
     # via
     #   huggingface-hub

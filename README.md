@@ -97,7 +97,7 @@ r = client.chat.completions.create(
 print(r.choices[0].message.content)  # {"team": "technical", "outage": true}
 ```
 
-`huggingface_hub`'s `InferenceClient.zero_shot_classification` also works (`POST /hf/models/{id}`). LangChain is untested.
+`huggingface_hub`'s `InferenceClient.zero_shot_classification` also works (`POST /hf/models/{id}`). LangChain's `ChatOpenAI.with_structured_output` works too (`json_schema` and `function_calling`).
 
 ### Evaluate before you automate
 
@@ -199,7 +199,7 @@ Profiling shows the model is **compute-bound**: GEMMs take about 83% of GPU kern
 | 24 GB Mac | `CLEF_QUANT=int8` | ~12 GB; **not validated on Apple Silicon** |
 | CPU | ~40 GB RAM | works, but slow; for development and tests |
 
-`CLEF_QUANT=nf4` also loads, but it flipped about 9% of top choices in our set, so it is not recommended. `clef doctor` reads your memory and prints the matching setting.
+On **NVIDIA**, int8 defaults to bitsandbytes, which flipped 22 of 399 top choices on an RTX 4070 Ti; set `CLEF_QUANT_BACKEND=torchao` (`pip install torchao`) for 3 of 399 and a faster p50 (170 ms against 232 ms). `CLEF_QUANT=nf4` also loads, but it flipped about 9% of top choices in our set, so it is not recommended. `clef doctor` reads your memory and prints the matching setting.
 
 ### Platform support
 
@@ -207,7 +207,8 @@ Profiling shows the model is **compute-bound**: GEMMs take about 83% of GPU kern
 | --- | --- | --- |
 | Windows + WSL2, AMD RX 7900 XTX | ROCm 7.2 | ✅ verified (all tests and benchmarks) |
 | Any OS, no GPU | CPU | ✅ unit-tested on Ubuntu, macOS and Windows |
-| Ubuntu / WSL2, NVIDIA | CUDA | ⚠️ untested on hardware (code paths unit-tested with mocks) |
+| WSL2, NVIDIA RTX 4070 Ti (12 GB) | CUDA 12.8 | ✅ verified for int8 and CPU-offload modes ([results](docs/hardware-results.md)); ⚠️ plain bf16 (24 GB) not run |
+| Ubuntu (native), other NVIDIA cards | CUDA | ⚠️ untested on hardware (code paths unit-tested with mocks) |
 | macOS, Apple Silicon | MPS | ⚠️ untested on hardware |
 
 **Have an NVIDIA card or a Mac?** Running [docs/hardware-validation.md](docs/hardware-validation.md) and contributing the results is the most useful help right now.
@@ -221,7 +222,7 @@ Every path ends the same way: `clef download` once, then `clef serve`, then open
 ```bash
 git clone https://github.com/MiguelCarrascoB/clef && cd clef
 uv venv --python 3.12 && source .venv/bin/activate
-uv pip install -r requirements/cuda.txt && uv pip install -e ".[server]"
+uv pip install -r requirements/cuda.txt --index-strategy unsafe-best-match && uv pip install -e ".[server]"
 clef doctor && clef download && clef serve
 ```
 </details>
@@ -285,8 +286,8 @@ The repository has 500+ unit tests covering the API, engine, offload planning, e
 - [ ] Validate on NVIDIA and Apple Silicon hardware, then publish the numbers
 - [ ] Publish to PyPI (`clef-local`)
 - [ ] Remove the device sync in SDPA masking to unblock graph capture / `torch.compile`, since about 50% of a single-record forward is host overhead
-- [ ] Quantization accuracy table on CUDA (int8 / nf4 vs bf16)
-- [ ] Test the LangChain integration
+- [x] Quantization accuracy table on CUDA (int8 / nf4, measured against lossless offload because bf16 does not fit in 12 GB)
+- [x] Test the LangChain integration
 
 ## License
 

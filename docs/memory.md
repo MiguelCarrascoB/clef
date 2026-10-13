@@ -62,7 +62,7 @@ Settings that cannot take full effect no longer fail silently. They are logged a
 
 | Backend | Library | Notes |
 | --- | --- | --- |
-| CUDA | bitsandbytes (unchanged) | `CLEF_QUANT_BACKEND=torchao` selects the torchao path instead (untested on CUDA) |
+| CUDA | bitsandbytes (unchanged) | `CLEF_QUANT_BACKEND=torchao` selects torchao instead (`pip install torchao`). Measured on an RTX 4070 Ti: torchao is the better choice, see below |
 | ROCm | **torchao** | measured: 2x faster and 3x closer to bf16 than bitsandbytes int8 on the same GPU |
 | MPS, CPU | torchao | loads through the same code; **not validated on hardware** |
 
@@ -127,13 +127,26 @@ one record per forward (399 questions).
 - int8 flips: 2 of 399 questions changed their top option, against 0 for fp16 vs bf16. The mean
   probability error 0.006 is ~3x the fp16/bf16 noise floor.
 
+### int8 on CUDA: torchao measured better than the default
+
+On an RTX 4070 Ti (12 GB, WSL2, `QUANT=int8 OFFLOAD=cpu`, 200 records, against the lossless offload run) torchao gave a
+mean probability error of 0.0057 and 3 of 399 flipped answers at p50 170 ms. The `auto` choice, bitsandbytes, gave 0.0172
+and 22 of 399 at p50 232 ms, and failed the batch-versus-single integration test. These match the ROCm numbers for the same
+backends. If you run int8 on an NVIDIA card, set `CLEF_QUANT_BACKEND=torchao`
+([results](hardware-results.md#rtx-4070-ti-12-gb-on-wsl2-cuda-128-2026-10-12)).
+
 ## Caveats
 
 - One machine, one day, one model. Same-day drift is ~5%; every row was measured back to back in one session
   against the bf16 reference of that session.
-- CUDA and Apple Silicon paths were written to the same interfaces but could **not be run**: the bitsandbytes
-  behaviour on CUDA is unchanged code, torchao on CUDA / MPS / CPU and the cap / pinned-memory code on CUDA are
-  untested on hardware. Please run `bench/memory_bench.py` there and add the rows to `docs/hardware-results.md`.
+- CUDA was run on one card, an RTX 4070 Ti (12 GB, WSL2), in the int8 and offload modes: see
+  [hardware-results.md](hardware-results.md). `nf4` matched the ROCm numbers (36 of 399 flips on CUDA). Plain bf16 and other CUDA cards are untested, and so are
+  Apple Silicon, MPS and CPU torchao. Please run `bench/memory_bench.py` there and add the rows to `docs/hardware-results.md`.
+- A 12 GB card is shared with the desktop (about 1.2 GB on Windows), so the usable cap there is lower than `N - 1`.
+- `bench/memory_bench.py` needs a reference run for parity. Without a card big enough for bf16, use the lossless
+  offload run (`--offload cpu --max-device-gb <N-2>`) as `--save-reference`.
+- `OFFLOAD=cpu` refuses to start unless the free host RAM exceeds the weights kept on the host by about 2 GB. On WSL2
+  with 32 GB, raise `memory=` in `.wslconfig` (21 GB worked for the lossless modes on a 12 GB card).
 - The cap limits what PyTorch allocates, not the driver context (~0.5-1 GB) or other processes.
 - Offload needs host RAM (table). On WSL2, size the VM (`.wslconfig` `memory=`) accordingly.
 - Offload and long inputs: activations for a very long record (thousands of tokens, batch 8) can exceed the 2.5 GB
