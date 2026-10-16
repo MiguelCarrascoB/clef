@@ -366,14 +366,6 @@ class JobStore:
         with self._lock:
             self._db.execute("UPDATE jobs SET cancel_requested=1 WHERE id=? AND status='running'", (job_id,))
 
-    def interrupt(self, job_id: str) -> None:
-        """Runner error: park a job left 'running' (counts as a resume, like a crash)."""
-        with self._lock:
-            self._db.execute(
-                "UPDATE jobs SET status='interrupted', resumes=resumes+1 WHERE id=? AND status='running'",
-                (job_id,),
-            )
-
     def _cancel_now(self, job_id: str) -> str | None:
         """Inside a transaction: a job whose cancel was requested ends cancelled (never resumed)."""
         self._db.execute(
@@ -383,7 +375,7 @@ class JobStore:
         return self._terminal_event(job_id, "cancelled")
 
     def park(self, job_id: str, cancel: bool = False) -> str | None:
-        """Clean stop: running -> interrupted WITHOUT counting a resume (only a crash counts).
+        """Clean stop or runner error: running -> interrupted WITHOUT counting a resume (only a crash counts).
 
         A job whose cancel was requested (in the row, or ``cancel`` from the runner's memory) ends
         ``cancelled`` instead, with its pending event in the same transaction; that event is returned.
@@ -831,7 +823,10 @@ class JobRunner:
             job_id = row["id"]
             n = self._failures[job_id] = self._failures.get(job_id, 0) + 1
             try:
-                await asyncio.to_thread(self.store.interrupt, job_id)  # left 'running'? park it again
+                # Left 'running'? Park it again (not a crash: RUNNER_MAX_FAILURES is the budget here).
+                event = await asyncio.to_thread(self.store.park, job_id, job_id in self.cancel_ids)
+                if event:
+                    self.dispatcher.enqueue(job_id, event)
                 if n >= RUNNER_MAX_FAILURES:
                     self._failures.pop(job_id, None)
                     log.error("jobs: job %s failed %d times in the runner; failing it", job_id, n)

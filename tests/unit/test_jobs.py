@@ -1039,3 +1039,22 @@ def test_clean_restarts_do_not_count_toward_max_resumes():
         job = wait(client2, jid)
         assert job["status"] == "succeeded" and job["resumes"] == 3, job
         assert [r["index"] for r in all_rows(client2, jid)] == list(range(n))
+
+
+def test_runner_error_is_not_counted_as_a_crash(monkeypatch):
+    monkeypatch.setattr("clef_server.jobs.RUNNER_RETRY_PAUSE_S", 0.01)
+    client, _, app = make()
+    runner = app.state.ctx.extra["jobs"]
+    real = runner.store.mark_running
+    boom = [True]
+
+    def mark_running(job_id: str, resume_done: int) -> bool:
+        ok = real(job_id, resume_done)
+        if boom.pop() if boom else False:
+            raise RuntimeError("transient")  # the runner fails with the job left 'running'
+        return ok
+
+    monkeypatch.setattr(runner.store, "mark_running", mark_running)
+    with client:
+        job = wait(client, submit(client).json()["id"])
+        assert job["status"] == "succeeded" and job["resumes"] == 0, job
