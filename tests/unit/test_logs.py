@@ -165,6 +165,7 @@ def test_lifespan_installs_access_filter():
 
 
 def test_config_log_format(monkeypatch):
+    monkeypatch.delenv("CLEF_LOG_FORMAT", raising=False)
     assert Config().log_format == "text"
     monkeypatch.setenv("CLEF_LOG_FORMAT", "JSON")
     assert Config().log_format == "json"
