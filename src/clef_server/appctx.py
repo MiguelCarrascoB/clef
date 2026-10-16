@@ -2,9 +2,9 @@
 
 A feature module exposes ``router(ctx: AppContext) -> APIRouter`` and is listed in ``main.FEATURES``.
 Routes that call the model go through ``ctx.infer`` (with a request: logged, counted in stats) or
-``ctx.decide`` (no request, for background work). Long-lived tasks register async callables in
-``ctx.on_startup`` / ``ctx.on_shutdown``; they run inside the app lifespan after the engine starts and
-before it shuts down.
+``ctx.decide`` (no request, for background work: the engine's background lane, served after interactive
+work). Long-lived tasks register async callables in ``ctx.on_startup`` / ``ctx.on_shutdown``; they run
+inside the app lifespan after the engine starts and before it shuts down.
 """
 
 from __future__ import annotations
@@ -35,7 +35,8 @@ class AppContext:
     errors: dict[int | str, dict[str, Any]]
     # infer(request, reqs, batch, label="batch") -> results; the request path (logged, stats, limits).
     infer: Callable[..., Awaitable[list[dict[str, Any]]]]
-    # decide(reqs, label="batch") -> results; limits + media + ONE engine.decide(), no request needed.
+    # decide(reqs, batch=True, label="batch", priority="background") -> results; limits + media + ONE
+    # engine.decide() in the background lane (infer uses the interactive one), no request needed.
     decide: Callable[..., Awaitable[list[dict[str, Any]]]]
     # map_exception(exc) -> ApiError (raise it `from exc`).
     # api_error(status, detail, headers=None) -> ApiError.

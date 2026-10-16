@@ -372,14 +372,17 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         }
         if cfg.log_state:
             rec["state_preview"] = json.dumps(reqs[0].state, default=str, ensure_ascii=False)[:200]
-        results = await decide(reqs, batch=batch, label=label)
+        results = await decide(reqs, batch=batch, label=label, priority="interactive")
         rec["input_tokens"] = sum(int(r.get("usage", {}).get("input_tokens", 0)) for r in results)
         return results
 
     async def decide(
-        reqs: list[SystemOneRequest], batch: bool = True, label: str = "batch"
+        reqs: list[SystemOneRequest], batch: bool = True, label: str = "batch", priority: str = "background"
     ) -> list[dict[str, Any]]:
-        """Limits, media load (threadpool), ONE engine.decide(). No request needed (background work)."""
+        """Limits, media load (threadpool), ONE engine.decide(). No request needed (background work).
+
+        ``priority`` picks the engine lane: background by default (jobs), interactive from ``infer``.
+        """
         for i, r in enumerate(reqs):
             check_limits(r, cfg, f"{label}[{i}]." if batch else "")
         gpu_ready()
@@ -395,7 +398,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             return records
 
         records = await run_in_threadpool(build)
-        return await eng.decide(records)
+        return await eng.decide(records, priority=priority)
 
     def with_total(res: dict[str, Any], total_ms: float) -> dict[str, Any]:
         return {**res, "timing": {**res.get("timing", {}), "total_ms": round(total_ms, 1)}}

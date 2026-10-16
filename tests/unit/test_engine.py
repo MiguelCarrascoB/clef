@@ -51,17 +51,20 @@ class FakeStats:
     def __init__(self):
         self.forwards = []
         self.depths = []
+        self.by_class = []
 
     def record_forward(self, n_records, n_tokens, padded_tokens, ms):
         self.forwards.append((n_records, n_tokens, padded_tokens, ms))
 
-    def set_queue_depth(self, n):
+    def set_queue_depth(self, n, by_class=None):
         self.depths.append(n)
+        self.by_class.append(by_class)
 
 
 class FakeModel:
     def __init__(self):
         self.calls = []  # (batch_size, seq_len, has_media)
+        self.lengths = []  # real record lengths per forward, to tell forwards (and lanes) apart
         self.gate: threading.Event | None = None
         self.entered = threading.Event()
 
@@ -71,6 +74,7 @@ class FakeModel:
     def __call__(self, batch):
         recs = batch["records"]
         self.calls.append((len(recs), batch["input_ids"].shape[1], any(r.media for r in recs)))
+        self.lengths.append(sorted(len(r.input_ids) for r in recs))
         self.entered.set()
         if self.gate is not None:
             self.gate.wait(5)
@@ -620,6 +624,120 @@ async def test_pads_to_multiple_by_default(started):
     await asyncio.gather(*(eng.decide([rec(s)]) for s in ["a", "bb cc"]))
     assert model.calls == [(2, 8, False)]  # longest is 5 tokens -> next multiple of 4
     assert eng.padded_length(8) == 8 and eng.padded_length(9) == 12
+
+
+# ---------------------------------------------------------------- priority lanes
+def words(n):
+    """A record of length 3 + n (the fake encoder adds a 3-token prefix)."""
+    return " ".join(["w"] * n)
+
+
+async def _block_worker(eng, model, n=1, priority="background"):
+    """Start a decide whose forward blocks on model.gate; returns its task once the worker is inside it."""
+    model.gate = threading.Event()
+    task = asyncio.create_task(eng.decide([rec(words(n))], priority=priority))
+    assert await asyncio.to_thread(model.entered.wait, 5)
+    return task
+
+
+def lanes_cfg(**kw):
+    return make_cfg(pad_to_bucket=False, pad_multiple=1, buckets=(64,), **kw)
+
+
+@pytest.mark.asyncio
+async def test_interactive_jumps_ahead_of_queued_background(started):
+    eng, model = started(lanes_cfg(max_microbatch=1, batch_window_ms=0.0))
+    first = await _block_worker(eng, model)  # length 4
+    bg = asyncio.create_task(eng.decide([rec(words(2)), rec(words(3))], priority="background"))
+    assert await asyncio.to_thread(wait_for, lambda: eng.stats.depths[-1:] == [2])
+    inter = asyncio.create_task(eng.decide([rec(words(6))]))  # default: interactive
+    want = {"interactive": 1, "background": 2}
+    assert await asyncio.to_thread(wait_for, lambda: eng.stats.by_class[-1:] == [want])
+    model.gate.set()
+    bg_out, inter_out, _ = await asyncio.gather(bg, inter, first)
+    assert model.lengths == [[4], [9], [5], [6]]
+    assert [o["answers"]["d"]["probs"] for o in bg_out] == [expected(words(2)), expected(words(3))]
+    assert inter_out[0]["answers"]["d"]["probs"] == expected(words(6))
+    assert await asyncio.to_thread(wait_for, lambda: eng.stats.depths[-1] == 0)
+    assert eng.stats.by_class[-1] == {"interactive": 0, "background": 0}
+
+
+@pytest.mark.asyncio
+async def test_interactive_arriving_during_a_background_window_goes_first(started):
+    eng, model = started(lanes_cfg(max_microbatch=8, batch_window_ms=400.0))
+    bg = asyncio.create_task(eng.decide([rec(words(1)), rec(words(2))], priority="background"))
+    assert await asyncio.to_thread(wait_for, lambda: eng.stats.depths[-1:] == [2])  # window is open
+    inter = await eng.decide([rec(words(5))])
+    await bg
+    assert model.lengths == [[8], [4, 5]]
+    assert inter[0]["timing"]["batch_size"] == 1
+
+
+@pytest.mark.asyncio
+async def test_classes_are_not_mixed_in_one_forward(started):
+    eng, model = started(lanes_cfg(max_microbatch=8, batch_window_ms=50.0))
+    first = await _block_worker(eng, model)  # length 4
+    bg = asyncio.create_task(eng.decide([rec(words(n)) for n in (1, 2, 3)], priority="background"))
+    inter = asyncio.create_task(eng.decide([rec(words(5)), rec(words(6))]))
+    assert await asyncio.to_thread(wait_for, lambda: eng.stats.depths[-1:] == [5])
+    model.gate.set()
+    bg_out, inter_out, _ = await asyncio.gather(bg, inter, first)
+    assert model.lengths == [[4], [8, 9], [4, 5, 6]]  # room for 8, yet one class per forward
+    assert [o["timing"]["batch_size"] for o in inter_out] == [2, 2]
+    assert [o["timing"]["batch_size"] for o in bg_out] == [3, 3, 3]
+
+
+@pytest.mark.asyncio
+async def test_starvation_bound_serves_background_after_a_burst(started):
+    eng, model = started(lanes_cfg(max_microbatch=1, batch_window_ms=0.0, interactive_burst=2))
+    first = await _block_worker(eng, model, priority="interactive")  # length 4
+    bg = asyncio.create_task(eng.decide([rec(words(20))], priority="background"))
+    assert await asyncio.to_thread(wait_for, lambda: eng.stats.depths[-1:] == [1])
+    inter = asyncio.create_task(eng.decide([rec(words(n)) for n in (2, 3, 4, 5)]))
+    assert await asyncio.to_thread(wait_for, lambda: eng.stats.depths[-1:] == [5])
+    model.gate.set()
+    _, inter_out, bg_out = await asyncio.gather(first, inter, bg)
+    # two interactive micro-batches while background waited, then one background, then interactive again
+    assert model.lengths == [[4], [5], [6], [23], [7], [8]]
+    assert [o["usage"]["input_tokens"] for o in inter_out] == [5, 6, 7, 8]  # input order
+    assert bg_out[0]["answers"]["d"]["probs"] == expected(words(20))
+
+
+@pytest.mark.asyncio
+async def test_background_results_in_input_order_across_buckets(started):
+    eng, model = started()
+    states = ["x", words(11), "zz zz", words(20)]
+    out = await eng.decide([rec(s) for s in states], priority="background")
+    assert [o["answers"]["d"]["probs"] for o in out] == [expected(s) for s in states]
+    assert len(model.calls) == 3  # buckets 8, 16 and 32 still split the background micro-batch
+
+
+@pytest.mark.asyncio
+async def test_unknown_priority_is_rejected(started):
+    eng, model = started()
+    with pytest.raises(ValueError, match="priority"):
+        await eng.decide([rec("a")], priority="urgent")
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_fails_both_lanes(started):
+    eng, model = started(lanes_cfg(max_microbatch=1, batch_window_ms=0.0))
+    first = await _block_worker(eng, model)
+    bg = asyncio.create_task(eng.decide([rec(words(2))], priority="background"))
+    inter = asyncio.create_task(eng.decide([rec(words(3))]))
+    assert await asyncio.to_thread(wait_for, lambda: eng.stats.depths[-1:] == [2])
+    stopping = asyncio.create_task(asyncio.to_thread(eng.shutdown))
+    await asyncio.sleep(0.05)
+    model.gate.set()  # the running forward finishes; nothing queued runs after it
+    await stopping
+    assert (await first)[0]["answers"]["d"]["probs"] == expected(words(1))
+    for task in (bg, inter):
+        with pytest.raises(EngineNotReady):
+            await task
+    assert model.lengths == [[4]]
+    with pytest.raises(EngineNotReady):
+        await eng.decide([rec("a")], priority="background")
 
 
 def test_memory_cap_is_applied_before_load():

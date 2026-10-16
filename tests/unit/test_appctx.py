@@ -54,6 +54,7 @@ def test_feature_router_and_hooks(monkeypatch) -> None:
             r = c.post("/v1/_feature")
             assert r.status_code == 200, r.text
             assert r.json() == {"choice": "technical"}
+            assert app.state.ctx.engine.priorities == ["background"]  # ctx.decide -> background lane
         assert events == ["startup", "shutdown"]
 
 

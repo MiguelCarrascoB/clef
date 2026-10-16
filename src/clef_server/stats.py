@@ -74,6 +74,7 @@ class Stats:
         self._token_reqs = 0
         self._in_flight = 0
         self._queue_depth = 0
+        self._queue_by_class: dict[str, int] = {"interactive": 0, "background": 0}
         self._fwd_count = 0
         self._fwd_records = 0
         self._fwd_ms = 0.0
@@ -148,9 +149,12 @@ class Stats:
         with self._lock:
             return self._queue_depth
 
-    def set_queue_depth(self, n: int) -> None:
+    def set_queue_depth(self, n: int, by_class: dict[str, int] | None = None) -> None:
+        """Total engine queue depth, optionally split by priority lane (interactive / background)."""
         with self._lock:
             self._queue_depth = n
+            if by_class is not None:
+                self._queue_by_class = {str(k): int(v) for k, v in by_class.items()}
             self._note_queue(self._bucket(self._clock()), n)
 
     def sample(self, gauges: dict[str, Any]) -> None:
@@ -208,6 +212,7 @@ class Stats:
                 "errors": self._errors,
                 "in_flight": self._in_flight,
                 "queue_depth": self._queue_depth,
+                "queue_depth_by_class": dict(self._queue_by_class),
                 "window_s": window_s,
                 "rps": round(len(recent) / span, 3),
                 "by_key": by_key,

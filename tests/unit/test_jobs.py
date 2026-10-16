@@ -32,7 +32,9 @@ class SlowEngine(FakeEngine):
         self._lock: asyncio.Lock | None = None
         self.sizes: list[int] = []
 
-    async def decide(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def decide(
+        self, records: list[dict[str, Any]], priority: str = "interactive"
+    ) -> list[dict[str, Any]]:
         if self._lock is None:
             self._lock = asyncio.Lock()  # fair (FIFO) like the engine queue
         async with self._lock:
