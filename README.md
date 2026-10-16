@@ -70,7 +70,7 @@ c = ClefClient("http://127.0.0.1:8910")
 c.classify("Refund me, the app also crashes", ["billing", "technical", "feature"], multi_label=True).labels
 c.classify_many(["...", "..."], ["billing", "technical"])
 c.score("Server has been down for two hours", ["low", "medium", "high"]).score
-c.classifier("support-triage").classify("My invoice is wrong")   # labels + instructions stored server-side
+c.classifier("support-triage").classify("My invoice is wrong")  # labels + instructions stored server-side
 ```
 
 ```bash
@@ -86,9 +86,13 @@ Describe the decision as a JSON schema. Enums become choices, booleans become ye
 from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8910/v1", api_key="not-needed")
-schema = {"type": "object", "properties": {
-    "team": {"type": "string", "enum": ["billing", "technical", "account"]},
-    "outage": {"type": "boolean"}}}
+schema = {
+    "type": "object",
+    "properties": {
+        "team": {"type": "string", "enum": ["billing", "technical", "account"]},
+        "outage": {"type": "boolean"},
+    },
+}
 r = client.chat.completions.create(
     model="clef-flash",
     messages=[{"role": "user", "content": "Checkout is down, orders blocked"}],
