@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from collections import Counter
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -277,34 +277,64 @@ class JobStore:
         with self._lock:
             self._db.execute("UPDATE jobs SET total=? WHERE id=?", (int(total), job_id))
 
-    def add_items(self, job_id: str, items: list[dict[str, Any]]) -> int:
-        """Append rows after the last persisted one (one transaction); returns the new ``done``."""
+    @contextlib.contextmanager
+    def _tx(self) -> Iterator[None]:
+        """One write transaction (under the lock): all of its statements land, or none does."""
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
-                row = self._db.execute("SELECT done FROM jobs WHERE id=?", (job_id,)).fetchone()
-                if row is None:
-                    raise KeyError(job_id)
-                start = row["done"]
-                self._db.executemany(
-                    "INSERT INTO items (job_id, idx, data) VALUES (?, ?, ?)",
-                    [
-                        (job_id, start + i, json.dumps(it, separators=(",", ":"), default=str))
-                        for i, it in enumerate(items)
-                    ],
-                )
-                failed = sum(1 for it in items if isinstance(it, dict) and "error" in it)
-                self._db.execute(
-                    "UPDATE jobs SET done=done+?, failed=failed+? WHERE id=?", (len(items), failed, job_id)
-                )
+                yield
                 self._db.execute("COMMIT")
             except BaseException:
                 self._db.execute("ROLLBACK")
                 raise
-            return start + len(items)
 
-    def finish(self, job_id: str, status: str, error: str | None = None, result: Any = None) -> bool:
-        with self._lock:
+    def add_items(self, job_id: str, items: list[dict[str, Any]]) -> int:
+        """Append rows after the last persisted one (one transaction); returns the new ``done``.
+
+        ``done`` is read inside the transaction, so a chunk is stored whole at the right offset or not at
+        all: whatever interrupts the job, the rows stay gap-free and a resume recomputes only what is missing.
+        """
+        with self._tx():
+            row = self._db.execute("SELECT done FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            start = row["done"]
+            self._db.executemany(
+                "INSERT INTO items (job_id, idx, data) VALUES (?, ?, ?)",
+                [
+                    (job_id, start + i, json.dumps(it, separators=(",", ":"), default=str))
+                    for i, it in enumerate(items)
+                ],
+            )
+            failed = sum(1 for it in items if isinstance(it, dict) and "error" in it)
+            self._db.execute(
+                "UPDATE jobs SET done=done+?, failed=failed+? WHERE id=?", (len(items), failed, job_id)
+            )
+        return start + len(items)
+
+    def _terminal_event(self, job_id: str, status: str) -> str | None:
+        """Inside a transaction: mark ``job.<status>`` pending (if subscribed) so a restart retries it.
+
+        Written in the same transaction as the status change, so a crash cannot leave a finished job without
+        its event. The delivery id is minted here, so every retry (also after a crash) carries the same
+        X-Clef-Delivery. Returns the event, or None when the job has no webhook for it.
+        """
+        row = self._db.execute("SELECT webhook, deliveries FROM jobs WHERE id=?", (job_id,)).fetchone()
+        hook = row and _loads(row["webhook"])
+        event = f"job.{status}"
+        if not hook or event not in (hook.get("events") or DEFAULT_EVENTS):
+            return None
+        deliveries = json.loads(row["deliveries"] or "{}")
+        deliveries[event] = {"id": uuid.uuid4().hex, "event": event, "status": "pending", "attempts": 0}
+        self._db.execute("UPDATE jobs SET deliveries=? WHERE id=?", (json.dumps(deliveries), job_id))
+        return event
+
+    def finish(
+        self, job_id: str, status: str, error: str | None = None, result: Any = None
+    ) -> tuple[bool, str | None]:
+        """Active -> ``status`` plus its pending webhook event, in ONE transaction; ``(changed, event)``."""
+        with self._tx():
             cur = self._db.execute(
                 "UPDATE jobs SET status=?, finished_at=?, error=?, result=?, total=COALESCE(total, done)"
                 " WHERE id=? AND status IN ('queued','running','interrupted')",
@@ -316,54 +346,99 @@ class JobStore:
                     job_id,
                 ),
             )
-            return cur.rowcount == 1
+            if cur.rowcount != 1:
+                return False, None
+            return True, self._terminal_event(job_id, status)
 
-    def cancel_queued(self, job_id: str) -> bool:
-        with self._lock:
+    def cancel_queued(self, job_id: str) -> tuple[bool, str | None]:
+        """queued/interrupted -> cancelled plus its pending event (one transaction); ``(changed, event)``."""
+        with self._tx():
             cur = self._db.execute(
                 "UPDATE jobs SET status='cancelled', finished_at=?, total=COALESCE(total, done)"
                 " WHERE id=? AND status IN ('queued','interrupted')",
                 (time.time(), job_id),
             )
-            return cur.rowcount == 1
+            if cur.rowcount != 1:
+                return False, None
+            return True, self._terminal_event(job_id, "cancelled")
 
     def flag_cancel(self, job_id: str) -> None:
         with self._lock:
             self._db.execute("UPDATE jobs SET cancel_requested=1 WHERE id=? AND status='running'", (job_id,))
 
     def interrupt(self, job_id: str) -> None:
+        """Runner error: park a job left 'running' (counts as a resume, like a crash)."""
         with self._lock:
             self._db.execute(
                 "UPDATE jobs SET status='interrupted', resumes=resumes+1 WHERE id=? AND status='running'",
                 (job_id,),
             )
 
-    def recover(self, max_resumes: int = 0) -> tuple[int, list[str]]:
-        """Startup: whatever was running when the process died is interrupted (and will be resumed).
+    def _cancel_now(self, job_id: str) -> str | None:
+        """Inside a transaction: a job whose cancel was requested ends cancelled (never resumed)."""
+        self._db.execute(
+            "UPDATE jobs SET status='cancelled', finished_at=?, total=COALESCE(total, done) WHERE id=?",
+            (time.time(), job_id),
+        )
+        return self._terminal_event(job_id, "cancelled")
 
-        A job already resumed ``max_resumes`` times (> 0) is failed instead: a poison item that kills the
-        process would otherwise be resumed forever ahead of every other job. Returns ``(resumed, given_up)``
-        where ``given_up`` are the ids that were failed.
+    def park(self, job_id: str, cancel: bool = False) -> str | None:
+        """Clean stop: running -> interrupted WITHOUT counting a resume (only a crash counts).
+
+        A job whose cancel was requested (in the row, or ``cancel`` from the runner's memory) ends
+        ``cancelled`` instead, with its pending event in the same transaction; that event is returned.
         """
+        with self._tx():
+            row = self._db.execute(
+                "SELECT cancel_requested FROM jobs WHERE id=? AND status='running'", (job_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if cancel or row["cancel_requested"]:
+                return self._cancel_now(job_id)
+            self._db.execute("UPDATE jobs SET status='interrupted' WHERE id=?", (job_id,))
+            return None
+
+    def park_running(self) -> list[str]:
+        """Clean stop safety net: park every job still 'running' (there is one runner). Returns their ids."""
         with self._lock:
-            rows = self._db.execute("SELECT id, resumes FROM jobs WHERE status='running'").fetchall()
-            resumed, given_up = 0, []
+            ids = [r["id"] for r in self._db.execute("SELECT id FROM jobs WHERE status='running'")]
+            for job_id in ids:
+                self.park(job_id)
+            return ids
+
+    def recover(self, max_resumes: int = 0) -> tuple[int, list[str], list[str]]:
+        """Startup: whatever was running when the process died crashed; it is interrupted (and resumed).
+
+        That counts as a resume. A job whose cancel was requested before the crash is cancelled instead. A job
+        already resumed ``max_resumes`` times (> 0) is failed: a poison item that kills the process would
+        otherwise be resumed forever ahead of every other job. The terminal events are recorded pending in
+        the same transaction (``pending_deliveries`` sends them). Returns ``(resumed, given_up, cancelled)``.
+        """
+        with self._tx():
+            rows = self._db.execute(
+                "SELECT id, status, resumes, cancel_requested FROM jobs"
+                " WHERE status='running' OR (status='interrupted' AND cancel_requested=1)"
+            ).fetchall()
+            resumed, given_up, cancelled = 0, [], []
             for r in rows:
-                if max_resumes > 0 and r["resumes"] + 1 > max_resumes:
+                if r["cancel_requested"]:  # the user's cancel wins over resuming or giving up
+                    self._cancel_now(r["id"])
+                    cancelled.append(r["id"])
+                elif max_resumes > 0 and r["resumes"] + 1 > max_resumes:
                     self._db.execute(
                         "UPDATE jobs SET status='failed', finished_at=?, error=?, resumes=resumes+1,"
-                        " cancel_requested=0, total=COALESCE(total, done) WHERE id=?",
+                        " total=COALESCE(total, done) WHERE id=?",
                         (time.time(), f"interrupted {r['resumes'] + 1} times, giving up", r["id"]),
                     )
+                    self._terminal_event(r["id"], "failed")
                     given_up.append(r["id"])
                 else:
                     self._db.execute(
-                        "UPDATE jobs SET status='interrupted', resumes=resumes+1, cancel_requested=0"
-                        " WHERE id=?",
-                        (r["id"],),
+                        "UPDATE jobs SET status='interrupted', resumes=resumes+1 WHERE id=?", (r["id"],)
                     )
                     resumed += 1
-            return resumed, given_up
+            return resumed, given_up, cancelled
 
     def reset_items(self, job_id: str) -> None:
         with self._lock:
@@ -677,17 +752,20 @@ class JobRunner:
     # ---- lifecycle
     async def start(self) -> None:
         self.wake = asyncio.Event()
-        resumed, given_up = await asyncio.to_thread(self.store.recover, int(self.ctx.cfg.job_max_resumes))
+        # recover() records the terminal events itself (same transaction); pending_deliveries() sends them.
+        resumed, given_up, cancelled = await asyncio.to_thread(
+            self.store.recover, int(self.ctx.cfg.job_max_resumes)
+        )
         if resumed:
-            log.info("jobs: %d job(s) interrupted by the last shutdown will be resumed", resumed)
+            log.info("jobs: %d job(s) interrupted by a crash will be resumed", resumed)
+        for job_id in cancelled:
+            log.info("jobs: job %s was cancelled before the last shutdown; not resuming it", job_id)
         for job_id in given_up:
             log.warning(
                 "jobs: job %s was interrupted too many times (CLEF_JOB_MAX_RESUMES=%d); giving up",
                 job_id,
                 self.ctx.cfg.job_max_resumes,
             )
-            # Only record the event: pending_deliveries() below picks it up (no double delivery).
-            await asyncio.to_thread(self._record_event, job_id, "failed")
         await asyncio.to_thread(self._purge)
         for job_id, event in await asyncio.to_thread(self.store.pending_deliveries):
             self.dispatcher.enqueue(job_id, event)
@@ -699,6 +777,10 @@ class JobRunner:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        # Safety net for a clean stop that landed outside the kind (e.g. right after mark_running): park the
+        # job without counting a resume. A store call still in a worker thread holds the lock: this waits.
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(self.store.park_running)
         await self.dispatcher.close()
         self.store.close()
 
@@ -775,34 +857,15 @@ class JobRunner:
                 await asyncio.to_thread(self.store.flag_cancel, job_id)
         return await asyncio.to_thread(self.store.get, job_id) or row
 
-    def _record_event(self, job_id: str, status: str) -> str | None:
-        """Mark the terminal webhook pending (if subscribed) so a restart retries it; returns the event.
-
-        The delivery id is minted here, so every retry (also after a crash) carries the same X-Clef-Delivery.
-        """
-        row = self.store.get(job_id)
-        hook = row and row["webhook"]
-        event = f"job.{status}"
-        if not hook or event not in (hook.get("events") or DEFAULT_EVENTS):
-            return None
-        self.store.set_delivery(
-            job_id, event, {"id": uuid.uuid4().hex, "event": event, "status": "pending", "attempts": 0}
-        )
-        return event
-
     def _finish_sync(
         self, job_id: str, status: str, error: str | None, result: Any
     ) -> tuple[bool, str | None]:
-        """State change + pending event in ONE thread call: cancelling the awaiting task (shutdown) cannot
-        land between them, so a terminal event is never lost."""
-        if not self.store.finish(job_id, status, error, result):
-            return False, None
-        return True, self._record_event(job_id, status)
+        """State change + pending event in ONE SQLite transaction (``JobStore.finish``): neither a cancelled
+        awaiting task (shutdown) nor a hard crash can land between them, so a terminal event is never lost."""
+        return self.store.finish(job_id, status, error, result)
 
     def _cancel_queued_sync(self, job_id: str) -> tuple[bool, str | None]:
-        if not self.store.cancel_queued(job_id):
-            return False, None
-        return True, self._record_event(job_id, "cancelled")
+        return self.store.cancel_queued(job_id)
 
     def notify_progress(self, job_id: str) -> None:
         if self._wants_progress:
@@ -847,7 +910,10 @@ class JobRunner:
         try:
             result = await spec["run"](self.ctx, parsed, handle)
         except asyncio.CancelledError:
-            self.store.interrupt(job_id)  # shutdown: resumed on the next start
+            # Clean shutdown: park without counting a resume (a requested cancel ends it cancelled; its
+            # event is sent on the next start). An add_items still in its worker thread holds the store
+            # lock, so this waits for that chunk to commit; a chunk not yet written is recomputed on resume.
+            self.store.park(job_id, cancel=job_id in self.cancel_ids)
             raise
         except JobCancelled:
             result = None
