@@ -25,8 +25,9 @@ Interactive requests (`/v1/classify`, `/v1/systemone`, ...) stay responsive whil
 processes one job at a time and keeps **one chunk** (`CLEF_MAX_MICROBATCH` records, 8 by default) in flight
 at the engine, and the engine queue has a **priority lane**: job chunks go in the background lane, requests in
 the interactive one, and the next micro-batch is always interactive when any request is waiting. A request
-arriving mid-job therefore waits only for the forward already running (it is never preempted). Cancellation
-also takes effect between chunks.
+arriving mid-job therefore waits only for the job micro-batch already being computed (it is never preempted):
+one forward when the chunk shares a length bucket, more when it spans several buckets or carries media (one
+forward per media record). Cancellation also takes effect between chunks.
 
 ## Endpoints
 
@@ -322,8 +323,8 @@ in the background lane and requests (`ctx.infer`) in the interactive lane:
 
 Measured on the RX 7900 XTX (bf16, short tickets) before the lane existed: a 500-item `classify` job ran at
 ~15 items/s (32 s); meanwhile interactive `/v1/classify` calls took p50 422 / p95 458 ms instead of 109 / 118 ms
-idle. With the lane the wait is bounded by the one job forward already running; the new numbers are pending a
-GPU run.
+idle. With the lane the wait is bounded by the job micro-batch already being computed; the new numbers are pending
+a GPU run.
 
 ## Writing a job kind
 

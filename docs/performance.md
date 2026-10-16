@@ -23,7 +23,8 @@ tokens, `clef bench`, 100 requests per level. v2 and v3 were run back to back on
 Requests and jobs share one model and one worker thread. The engine queue has two lanes: requests are
 interactive, job chunks are background, and the next micro-batch is interactive whenever a request waits (one
 class per forward; after `CLEF_INTERACTIVE_BURST` interactive micro-batches in a row, one job micro-batch runs).
-A request during a job still waits for the job forward already running. Before the lane, interactive p50 was
+A request during a job still waits for the job micro-batch already being computed (one forward per length
+bucket or media record in it). Before the lane, interactive p50 was
 422 ms during a job vs 109 ms idle ([Jobs](jobs.md)).
 
 ## Smaller-memory modes

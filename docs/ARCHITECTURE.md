@@ -212,7 +212,8 @@ Rules (v2 rules kept):
   forward time; running it alone first costs the job one extra host overhead (~50% of a single forward).
 - Starvation bound: after `CLEF_INTERACTIVE_BURST` (default 8) interactive micro-batches in a row while background
   work was waiting, the next micro-batch is background. A steady interactive load therefore leaves jobs at least
-  1 of every N+1 micro-batches. A forward already running is never preempted.
+  1 of every N+1 micro-batches. A micro-batch already taken is never preempted: all of its groups (one forward
+  per length bucket, one per media record) run before the worker looks at the lanes again.
 - Warmup: one forward per bucket (<= 1024) at batch sizes {1, max_microbatch}; status "warming" meanwhile.
 - No `torch.cuda.*` outside `backend.py`. OOM: `backend.is_oom(exc)` -> `backend.empty_cache()` ->
   `GpuOutOfMemory`; the worker keeps running. Timing uses `backend.synchronize()`.
