@@ -40,14 +40,17 @@ machines on your local network, and what to add if you expose it further.
 All `/v1/*` routes, and the Hugging Face routes (`/hf/models/*`), then require a key (401 otherwise); the OpenAI SDKs
 send it as `Authorization: Bearer` from their `api_key` setting. Open routes: `/`, static files, `/health`, `/livez`, `/readyz`, `/docs`,
 `/openapi.json`. The console is served without a key, but its API calls need one: enter it in the console settings. The
-live event stream accepts `?key=` because browsers cannot set headers on `EventSource`; this puts the key in the URL,
-so on untrusted networks use TLS.
+console sends the key in the `X-API-Key` header, also for the live event stream. `/v1/events` still accepts `?key=`
+for plain `EventSource` clients (they cannot set headers); this puts the key in the URL, so on untrusted networks
+use TLS.
 
 ## Keys and logging
 
 - Each key has a name. The name (never the key) is stored on every request in `/v1/log` and counted in `/v1/stats`
   (`by_key`), so you can see who is calling.
-- Keys are compared in constant time. They are never logged.
+- Keys are compared in constant time. clef never logs them: `?key=` values are written as `REDACTED` in the access
+  log. If you turn on the access log of a reverse proxy, mask the key there too; see
+  [Keys in proxy logs](security.md#keys-in-proxy-logs) for Caddy and nginx.
 - Rotate by editing the keys file and restarting `clef serve` (keys are read at startup).
 
 ## Rate limit
@@ -122,6 +125,7 @@ clef.example.com {
         max_size 64MB
     }
 
+    # no `log` directive: if you add one, mask X-Api-Key and ?key= (security.md#keys-in-proxy-logs)
     reverse_proxy 127.0.0.1:8910 {
         # server-sent events (/v1/events) must not be buffered
         flush_interval -1

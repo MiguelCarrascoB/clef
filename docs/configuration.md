@@ -69,6 +69,7 @@ See [Jobs & webhooks](jobs.md).
 | `CLEF_LOG_STATE` | `0` | store a 200-character preview of each request's input in the request log |
 | `CLEF_LOG_BUFFER` | `1000` | request log ring buffer size |
 | `CLEF_SAMPLE_INTERVAL_S` | `2` | gauge sampling period for the console charts |
+| `CLEF_LOG_FORMAT` | `text` | `text` or `json`. json writes the app, uvicorn and access log lines as one JSON object per line (`ts`, `level`, `logger`, `msg`, plus `request_id` inside a request and `exc` for a traceback). `--log-format` |
 
 Example for LAN access:
 

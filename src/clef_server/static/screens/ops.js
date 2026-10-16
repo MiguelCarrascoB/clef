@@ -164,7 +164,7 @@ export function Ops() {
   const setWindow = (w) => { setWin(w); try { localStorage.setItem('clef.opsWindow', JSON.stringify(w)); } catch { /* ignore */ } };
 
   useEffect(() => {
-    let dead = false, es = null, pollTimer = null, retryTimer = null;
+    let dead = false, sse = null, pollTimer = null, retryTimer = null, sseTimer = null;
     setTs(null); setMode('connecting');
     const addLog = (entries) => {
       if (dead || !entries.length) return;
@@ -188,21 +188,33 @@ export function Ops() {
       if (!dead) pollTimer = setTimeout(poll, 3000);
     };
     const startPolling = () => { if (dead || pollTimer) return; setMode('poll'); poll(); };
-    const startSse = () => {
-      const key = api.getKey();
-      try { es = new EventSource(`/v1/events?step_s=${step}${key ? `&key=${encodeURIComponent(key)}` : ''}`); } catch { startPolling(); return; }
-      let opened = false;
-      es.onopen = () => { opened = true; setMode('sse'); };
-      es.addEventListener('stats', (e) => {
-        try {
-          const b = JSON.parse(e.data);
+    // Live stream: fetch() + X-API-Key (never ?key= in the URL). Same rules as EventSource had: a stream that
+    // never opened (or an HTTP error) falls back to polling; one that opened and then dropped reconnects in 3 s.
+    const startSse = (wasOpen = false) => {
+      if (dead) return;
+      const ctrl = new AbortController();
+      sse = ctrl;
+      let opened = wasOpen;
+      const ended = (err) => {
+        if (dead || ctrl.signal.aborted || (err && err.name === 'AbortError')) return;
+        if (!opened || (err && err.status)) { startPolling(); return; }
+        setMode('connecting');
+        sseTimer = setTimeout(() => startSse(true), 3000);
+      };
+      api.streamEvents(`/v1/events?step_s=${step}`, {
+        signal: ctrl.signal,
+        onOpen: () => { opened = true; if (!dead) setMode('sse'); },
+        onEvent: (event, data) => {
           if (dead) return;
-          setSt(b);
-          if (b.point) setTs((old) => applyPoint(old, b.point, maxPts));
-        } catch { /* ignore */ }
-      });
-      es.addEventListener('log', (e) => { try { addLog([JSON.parse(e.data)]); } catch { /* ignore */ } });
-      es.onerror = () => { if (!opened || es.readyState === 2) { es.close(); startPolling(); } };
+          try {
+            const b = JSON.parse(data);
+            if (event === 'stats') {
+              setSt(b);
+              if (b.point) setTs((old) => applyPoint(old, b.point, maxPts));
+            } else if (event === 'log') addLog([b]);
+          } catch { /* ignore */ }
+        },
+      }).then(() => ended(null), ended);
     };
     (async () => {
       try {
@@ -215,7 +227,7 @@ export function Ops() {
         retryTimer = setTimeout(() => { if (!dead) startPolling(); }, 6000);
       }
     })();
-    return () => { dead = true; if (es) es.close(); clearTimeout(pollTimer); clearTimeout(retryTimer); };
+    return () => { dead = true; if (sse) sse.abort(); clearTimeout(pollTimer); clearTimeout(retryTimer); clearTimeout(sseTimer); };
   }, [win]);
 
   const hd = health.data || {};

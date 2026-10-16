@@ -18,6 +18,7 @@ DEVICES = ("auto", "cuda", "rocm", "mps", "cpu")
 DTYPES = ("auto", "bfloat16", "float16", "float32")
 QUANTS = ("none", "int8", "nf4")
 OFFLOADS = ("none", "cpu")
+LOG_FORMATS = ("text", "json")  # CLEF_LOG_FORMAT, see logs.py
 KEY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
@@ -198,6 +199,9 @@ class Config:
     log_state: bool = field(default_factory=lambda: _bool("CLEF_LOG_STATE", False))
     log_buffer: int = field(default_factory=lambda: _int("CLEF_LOG_BUFFER", 1000))
     sample_interval_s: float = field(default_factory=lambda: _float("CLEF_SAMPLE_INTERVAL_S", 2.0))
+    log_format: str = field(
+        default_factory=lambda: _str("CLEF_LOG_FORMAT", "text").lower()
+    )  # see LOG_FORMATS
 
     def __post_init__(self) -> None:
         for name, value, allowed in (
@@ -205,6 +209,7 @@ class Config:
             ("CLEF_DTYPE", self.dtype, DTYPES),
             ("CLEF_QUANT", self.quant, QUANTS),
             ("CLEF_QUANT_BACKEND", self.quant_backend, ("auto", "bnb", "torchao")),
+            ("CLEF_LOG_FORMAT", self.log_format, LOG_FORMATS),
         ):
             if value not in allowed:
                 raise ValueError(f"{name}={value!r} is not one of {', '.join(allowed)}")

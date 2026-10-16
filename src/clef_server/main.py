@@ -56,6 +56,7 @@ from .classify import (
 )
 from .config import VERSION, Config
 from .engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge
+from .logs import install_access_filter, request_id_var, setup_logging, uvicorn_log_config
 from .media import MediaError, load_media
 from .paths import classifiers_dir
 from .schemas import (
@@ -90,17 +91,6 @@ ERRORS: dict[int | str, dict[str, Any]] = {
 }
 # Feature modules: each exposes router(ctx: AppContext) -> APIRouter (see appctx.py). One line each.
 FEATURES: list[str] = ["evaluation", "compat", "jobs"]
-
-
-def setup_logging() -> None:
-    root = logging.getLogger()
-    if not any(getattr(h, "_clef", False) for h in root.handlers):
-        handler = logging.StreamHandler()
-        handler._clef = True  # type: ignore[attr-defined]
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s %(message)s"))
-        root.addHandler(handler)
-    if root.level in (logging.NOTSET, logging.WARNING):
-        root.setLevel(logging.INFO)
 
 
 class ApiError(Exception):
@@ -162,6 +152,7 @@ class GuardMiddleware:
         rid = rid if _RID_OK.match(rid) else uuid.uuid4().hex
         state = scope.setdefault("state", {})
         state.update(request_id=rid, t0=time.perf_counter(), rec={}, error=None)
+        rid_token = request_id_var.set(rid)  # log records (incl. uvicorn's access line) carry it in json mode
         tracked = is_tracked(scope["method"], scope["path"])
         status = 500
         received = 0
@@ -192,6 +183,7 @@ class GuardMiddleware:
                 else:
                     await self.app(scope, receive_wrap, send_wrap)
         finally:
+            request_id_var.reset(rid_token)
             if tracked:
                 self._record(scope["path"], status, state)
 
@@ -255,8 +247,8 @@ async def sse_events(
 
 
 def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
-    setup_logging()
     cfg = cfg or config_mod.load()
+    setup_logging(cfg.log_format)
     stats = Stats(cfg.log_buffer)
     eng = engine if engine is not None else Engine(cfg, stats)
     started = time.time()
@@ -283,6 +275,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
+        install_access_filter()  # after uvicorn's dictConfig; covers launchers other than run()
         log.info("starting clef server %s (model load runs in background)", VERSION)
         app_.state.draining = False
         eng.start()
@@ -833,10 +826,12 @@ def run(cfg: Config | None = None) -> None:
     cfg = cfg or config_mod.load()
     warning = bind_warning(cfg)
     if warning:
-        setup_logging()
+        setup_logging(cfg.log_format)
         for line in warning.splitlines():
             log.warning(line)
-    uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port, workers=1)
+    # log_config: redact ?key= in the access log and apply CLEF_LOG_FORMAT to uvicorn's own loggers
+    log_config = uvicorn_log_config(cfg.log_format)
+    uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port, workers=1, log_config=log_config)
 
 
 if __name__ == "__main__":
