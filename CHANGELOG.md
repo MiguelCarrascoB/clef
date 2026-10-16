@@ -12,7 +12,8 @@
 
 ### Fixed
 - **API key in the access log**: the uvicorn access log wrote `/v1/events?key=<key>` (the console's live stream),
-  so the key ended up in `clef.log`. The `key`, `api_key` and `token` query values are now logged as `REDACTED`,
+  so the key ended up in `clef.log`. The `key`, `api_key` and `token` query values are now logged as `REDACTED`
+  (names are percent-decoded first, as auth reads them, and matched case-insensitively, so `?k%65y=` is masked too),
   and the console reads the stream with `fetch()` and the `X-API-Key` header. `?key=` still works for other
   clients. SECURITY.md has Caddy / nginx snippets for masking keys in proxy logs.
 - **CUDA install**: `accelerate` and `torchvision` are now declared in the `cuda` extra and pinned in
