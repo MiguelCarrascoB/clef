@@ -11,6 +11,9 @@
   line (`ts`, `level`, `logger`, `msg`, `request_id`). The default `text` output is unchanged.
 
 ### Fixed
+- **Lost cancel**: a cancel that raced a runner error could be dropped (the job was parked `interrupted` just
+  before the cancel flag was written, which only matched `running` jobs) and the job was later resumed. An
+  `interrupted` job is now cancelled at once, with its `job.cancelled` event, in one transaction.
 - **API key in the access log**: the uvicorn access log wrote `/v1/events?key=<key>` (the console's live stream),
   so the key ended up in `clef.log`. The `key`, `api_key` and `token` query values are now logged as `REDACTED`
   (names are percent-decoded first, as auth reads them, and matched case-insensitively, so `?k%65y=` is masked too),

@@ -468,8 +468,11 @@ Guide: [jobs.md](jobs.md).
   no duplicate). A clean stop (lifespan shutdown) parks the running job as `interrupted` without counting it;
   only a job found still `running` at startup (a crash) increments `resumes`, and more than
   `CLEF_JOB_MAX_RESUMES` crashes fail it. A job whose cancel was requested before the stop or crash ends
-  `cancelled` at that point (or at the next start), never resumed. Every terminal transition (finish, cancel
-  while queued, cancel / give-up at recovery) writes the status and the pending terminal webhook record in ONE
+  `cancelled` at that point (or at the next start), never resumed. Cancel is atomic per state:
+  `JobStore.cancel_queued` (queued / interrupted -> cancelled), else `JobStore.flag_cancel` in one transaction
+  (running -> `cancel_requested=1`; interrupted, i.e. parked meanwhile by a stop or runner error -> cancelled at
+  once), so a park racing the cancel cannot drop it. Every terminal transition (finish, cancel while queued or
+  interrupted, cancel / give-up at recovery) writes the status and the pending terminal webhook record in ONE
   SQLite transaction, so a crash cannot lose the event. A row the engine rejects
   becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
   `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
