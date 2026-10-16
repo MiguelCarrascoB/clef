@@ -38,7 +38,7 @@ machines on your local network, and what to add if you expose it further.
    `Authorization: Bearer <key>` works too. The Python and JS clients take the key as `api_key=` / `apiKey`.
 
 All `/v1/*` routes, and the Hugging Face routes (`/hf/models/*`), then require a key (401 otherwise); the OpenAI SDKs
-send it as `Authorization: Bearer` from their `api_key` setting. Open routes: `/`, static files, `/health`, `/livez`, `/docs`,
+send it as `Authorization: Bearer` from their `api_key` setting. Open routes: `/`, static files, `/health`, `/livez`, `/readyz`, `/docs`,
 `/openapi.json`. The console is served without a key, but its API calls need one: enter it in the console settings. The
 live event stream accepts `?key=` because browsers cannot set headers on `EventSource`; this puts the key in the URL,
 so on untrusted networks use TLS.

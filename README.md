@@ -70,7 +70,7 @@ c = ClefClient("http://127.0.0.1:8910")
 c.classify("Refund me, the app also crashes", ["billing", "technical", "feature"], multi_label=True).labels
 c.classify_many(["...", "..."], ["billing", "technical"])
 c.score("Server has been down for two hours", ["low", "medium", "high"]).score
-c.classifier("support-triage").classify("My invoice is wrong")   # labels + instructions stored server-side
+c.classifier("support-triage").classify("My invoice is wrong")  # labels + instructions stored server-side
 ```
 
 ```bash
@@ -86,9 +86,13 @@ Describe the decision as a JSON schema. Enums become choices, booleans become ye
 from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8910/v1", api_key="not-needed")
-schema = {"type": "object", "properties": {
-    "team": {"type": "string", "enum": ["billing", "technical", "account"]},
-    "outage": {"type": "boolean"}}}
+schema = {
+    "type": "object",
+    "properties": {
+        "team": {"type": "string", "enum": ["billing", "technical", "account"]},
+        "outage": {"type": "boolean"},
+    },
+}
 r = client.chat.completions.create(
     model="clef-flash",
     messages=[{"role": "user", "content": "Checkout is down, orders blocked"}],
@@ -128,7 +132,8 @@ Jobs survive restarts and share the GPU fairly with interactive calls. Results c
 | `POST /hf/models/{id}` | Hugging Face zero-shot |
 | `POST /v1/evaluate`, `/v1/evaluate/metrics` | evaluation metrics |
 | `/v1/jobs…` | async jobs (create, list, get, results, cancel, delete) |
-| `GET /health`, `/v1/stats`, `/v1/log`, `/v1/events` | status and observability (SSE) |
+| `GET /health`, `/livez`, `/readyz` | status, liveness, readiness (open, no key) |
+| `GET /v1/stats`, `/v1/log`, `/v1/events` | observability (SSE) |
 
 Full schema: [openapi.json](openapi.json), or `/docs` on a running server.
 
@@ -257,7 +262,8 @@ Then from PowerShell, run `.\clef.ps1 start`, `.\clef.ps1 open` and `.\clef.ps1 
 docker compose --profile cuda up -d     # or --profile rocm (Linux host)
 ```
 
-Ports are published on `127.0.0.1`. For LAN access, set `CLEF_BIND=0.0.0.0` together with `CLEF_API_KEYS`.
+Ports are published on `127.0.0.1`. For LAN access, set `CLEF_BIND=0.0.0.0` together with `CLEF_API_KEYS`. The
+container turns healthy only once the model has loaded (the healthcheck uses `/readyz`).
 </details>
 
 <details><summary><b>🖥️ CPU only</b></summary>

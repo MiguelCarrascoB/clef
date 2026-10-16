@@ -5,7 +5,7 @@ See docs/ARCHITECTURE.md for the API contract. Run: clef serve (one uvicorn work
   POST /v1/systemone  {model?, state, questions, images?, videos?} -> {model, answers, usage, timing}
   POST /v1/batch      {"batch": [<systemone request>, ...]}        -> {batch_ms, results}
   POST /v1/classify[/batch], /v1/score, /v1/classifiers/{name}[/batch]; PUT|GET|DELETE /v1/classifiers[/n]
-  GET  /health /livez /v1/stats /v1/stats/timeseries /v1/log /v1/events /schema-example   console at /
+  GET  /health /livez /readyz /v1/stats /v1/stats/timeseries /v1/log /v1/events /schema-example   console at /
 """
 
 from __future__ import annotations
@@ -282,8 +282,9 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             await asyncio.sleep(interval)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
         log.info("starting clef server %s (model load runs in background)", VERSION)
+        app_.state.draining = False
         eng.start()
         task = asyncio.create_task(sampler())
         for hook in ctx.on_startup:
@@ -291,6 +292,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         try:
             yield
         finally:
+            app_.state.draining = True  # /readyz 503 first: the LB stops routing before the engine stops
             for hook in reversed(ctx.on_shutdown):
                 try:
                     await hook()
@@ -311,6 +313,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         ),
     )
     app.state.cfg, app.state.stats, app.state.engine = cfg, stats, eng
+    app.state.draining = False
     app.add_middleware(GuardMiddleware, cfg=cfg, stats=stats)
     install_cors(app, cfg)  # added last = outermost, so preflights never reach auth
 
@@ -774,6 +777,13 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     @app.get("/livez", summary="Process liveness")
     async def livez() -> dict[str, bool]:
         return {"ok": True}
+
+    @app.get("/readyz", summary="Readiness (503 until the model is ready, and while draining)")
+    async def readyz() -> JSONResponse:
+        status = "draining" if app.state.draining else eng.status
+        if status == "ready":
+            return JSONResponse({"ready": True})
+        return JSONResponse({"ready": False, "status": status, "error": eng.error}, status_code=503)
 
     @app.get("/schema-example", summary="Copy-paste ready request bodies")
     async def schema_example() -> dict[str, Any]:

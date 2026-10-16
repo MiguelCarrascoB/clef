@@ -13,4 +13,8 @@ UI at `/docs`. Use the schema to generate a client in any language.
 <http://127.0.0.1:8910/docs> to call the API for real, or see the [classification guide](classification.md) and
 [first request](first-request.md) for curl examples.
 
+Open routes (no API key): `/health` (model and GPU status), `/livez` (process up), `/readyz` (200 only when the
+model is ready and the server is not shutting down; for load balancers and container health), `/schema-example`,
+`/docs`, `/openapi.json`.
+
 <swagger-ui src="openapi.json"/>

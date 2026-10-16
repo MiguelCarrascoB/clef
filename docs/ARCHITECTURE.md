@@ -268,7 +268,7 @@ appears in `openapi.json`.
 
 | Route | Purpose | Section |
 | --- | --- | --- |
-| `GET /health`, `GET /livez`, `GET /schema-example` | status, liveness, copy-paste bodies (open) | [below](#get-health) |
+| `GET /health`, `GET /livez`, `GET /readyz`, `GET /schema-example` | status, liveness, readiness, copy-paste bodies (open) | [below](#get-health) |
 | `POST /v1/systemone`, `POST /v1/batch` | the original typed questions API | [below](#post-v1systemone-post-v1batch) |
 | `POST /v1/classify`, `/v1/classify/batch`, `/v1/score`; `PUT|GET|DELETE /v1/classifiers/{name}`, `GET /v1/classifiers`, `POST /v1/classifiers/{name}[/batch]` | classification | [below](#classification-api-classifypy-classifierspy) |
 | `GET /v1/models[/{id}]`, `POST /v1/chat/completions` | OpenAI-compatible structured outputs | [Compat](#openai-and-hugging-face-compat-compatpy) |
@@ -285,7 +285,7 @@ appears in `openapi.json`.
   (EventSource cannot set headers) `/v1/events?key=<key>` is also accepted. Comparison is constant-time over all
   keys. The matching key's **name** (never the key) is stored on `request.state.key_name` and written to the request
   log (`"key"`) and to `/v1/stats` (`by_key`). Auth off -> `key` is `null`.
-- Open routes: `/`, static files, `/health`, `/livez`, `/schema-example`, `/docs`, `/openapi.json`.
+- Open routes: `/`, static files, `/health`, `/livez`, `/readyz`, `/schema-example`, `/docs`, `/openapi.json`.
 - Rate limit (`CLEF_RATE_LIMIT=N`): sliding 60 s window per key name (per client IP when auth is off), counted on
   the POST inference routes only (`/v1/systemone`, `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/score`,
   `POST /v1/classifiers/{name}[/batch]`, `/v1/chat/completions`, `/hf/models/*`, `/v1/evaluate`, `POST /v1/jobs`).
@@ -461,6 +461,15 @@ Guide: [jobs.md](jobs.md).
 ### `GET /health`
 200 when status is ready or warming, 503 otherwise. `{"ready", "status", "version": "3.1.0", **engine.info(),
 "load_seconds", "uptime_s", "error", "limits": Config.public_limits()}`. `GET /livez` -> 200 `{"ok": true}`.
+
+### `GET /readyz`
+Readiness for load balancers and orchestrators (open, like `/livez`). 200 `{"ready": true}` only when the engine
+status is `ready` and the app is not draining; otherwise 503 `{"ready": false, "status":
+"loading|warming|error|draining", "error": <engine error or null>}`. Unlike `/health`, `warming` is not ready.
+Draining: the lifespan sets `app.state.draining = True` as the first step of shutdown, before the `on_shutdown` hooks
+and `engine.shutdown()`, so `/readyz` flips to 503 while the engine is still serving. Draining does not reject
+requests: inference keeps working until the engine stops. Liveness stays on `/livez` (process up); the Docker
+HEALTHCHECK uses `/readyz` with a long start period so a container whose model failed to load turns unhealthy.
 
 ### `GET /v1/stats?window_s=300`
 v2 body plus `"by_key": {"<name>|anonymous": count}` and `"by_endpoint": {"/v1/classify": count, ...}` over the

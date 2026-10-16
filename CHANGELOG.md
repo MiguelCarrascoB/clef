@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
+  503 with `status` `loading|warming|error|draining`. Shutdown flips it to draining before the engine stops. The
+  Docker images and compose file now health-check `/readyz` (start period 600 s), so a container whose model failed
+  to load is reported unhealthy; `/livez` stays the process-up probe.
+
 ### Fixed
 - **CUDA install**: `accelerate` and `torchvision` are now declared in the `cuda` extra and pinned in
   `requirements/cuda.txt` (the model code imports both, and loading crashed without them). The uv commands for the CUDA
