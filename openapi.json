@@ -2127,6 +2127,22 @@
         "summary": "Process liveness"
       }
     },
+    "/readyz": {
+      "get": {
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Readiness (503 until the model is ready, and while draining)"
+      }
+    },
     "/schema-example": {
       "get": {
         "operationId": "schema_example_schema_example_get",

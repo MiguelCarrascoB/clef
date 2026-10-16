@@ -264,7 +264,7 @@ def test_auth_on():
             == 200
         )
         assert client.get("/v1/log?key=s3cret").status_code == 401  # ?key= only for /v1/events
-        for open_path in ("/health", "/livez", "/schema-example", "/docs"):
+        for open_path in ("/health", "/livez", "/readyz", "/schema-example", "/docs"):
             assert client.get(open_path).status_code == 200, open_path
     assert len(eng.calls) == 2
 
@@ -377,6 +377,47 @@ def test_health_ready_warming_and_down():
         eng.status, eng.error = "error", "no gpu"
         r = client.get("/health")
         assert r.status_code == 503 and r.json()["error"] == "no gpu"
+
+
+def test_readyz_ready_loading_warming_error():
+    eng = FakeEngine()
+    client, _, _ = make(eng, api_key="s3cret")  # open route: no key needed
+    with client:
+        r = client.get("/readyz")
+        assert r.status_code == 200 and r.json() == {"ready": True}
+        eng.status = "loading"
+        r = client.get("/readyz")
+        assert r.status_code == 503 and r.json() == {"ready": False, "status": "loading", "error": None}
+        eng.status = "warming"  # /health accepts warming, /readyz does not
+        assert client.get("/readyz").json()["status"] == "warming"
+        eng.status, eng.error = "error", "no gpu"
+        r = client.get("/readyz")
+        assert r.status_code == 503 and r.json() == {"ready": False, "status": "error", "error": "no gpu"}
+
+
+def test_readyz_draining():
+    eng = FakeEngine()
+    client, _, app = make(eng)
+    with client:
+        app.state.draining = True
+        r = client.get("/readyz")
+        assert r.status_code == 503 and r.json() == {"ready": False, "status": "draining", "error": None}
+        assert client.post("/v1/systemone", json=GOOD).status_code == 200  # draining does not reject work
+        assert client.get("/health").status_code == 200
+
+
+def test_lifespan_sets_draining_before_engine_stops():
+    eng = FakeEngine()
+    client, _, app = make(eng)
+    seen: list[tuple[bool, bool]] = []
+
+    async def hook() -> None:
+        seen.append((app.state.draining, eng.stopped))
+
+    app.state.ctx.on_shutdown.append(hook)
+    with client:
+        assert client.get("/readyz").status_code == 200 and app.state.draining is False
+    assert seen == [(True, False)] and eng.stopped
 
 
 # ------------------------------------------------------------------ media in one record

@@ -19,6 +19,16 @@ x-clef-env: &clef-env
   CLEF_RATE_LIMIT: ${CLEF_RATE_LIMIT:-0}
   CLEF_CORS_ORIGINS: ${CLEF_CORS_ORIGINS:-}
 
+# Same check as the images' HEALTHCHECK: healthy only once the model is loaded (/readyz, 503 while loading, after a
+# failed load, or while draining at shutdown). /livez is the plain "process up" probe. The long start_period covers
+# the minutes the weights take to load; the first success ends it early.
+x-clef-healthcheck: &clef-healthcheck
+  test: ["CMD", "python3", "-c", "import os,urllib.request as u; u.urlopen('http://127.0.0.1:%s/readyz' % os.environ.get('CLEF_PORT','8910'), timeout=3)"]
+  interval: 30s
+  timeout: 5s
+  start_period: 600s
+  retries: 3
+
 services:
   clef-cuda:
     profiles: ["cuda"]
@@ -32,6 +42,7 @@ services:
     volumes:
       - clef-models:/models   # HF cache: the weights
       - clef-data:/data       # logs, saved classifiers
+    healthcheck: *clef-healthcheck
     deploy:
       resources:
         reservations:
@@ -53,6 +64,7 @@ services:
     volumes:
       - clef-models:/models
       - clef-data:/data
+    healthcheck: *clef-healthcheck
     devices:
       - /dev/kfd
       - /dev/dri

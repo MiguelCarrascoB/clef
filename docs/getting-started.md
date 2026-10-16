@@ -111,6 +111,8 @@ clef doctor && clef download && clef serve
     The compose file mounts a volume for the weights; download them once with
     `docker compose --profile cuda run --rm clef-cuda clef download --yes` (or `--profile rocm ... clef-rocm`).
     Ports are published on `127.0.0.1`; for LAN access set `CLEF_BIND=0.0.0.0` together with `CLEF_API_KEYS`.
+    The healthcheck calls `/readyz`, so `docker ps` shows the container as `healthy` only once the model has loaded
+    (`starting` for up to 10 minutes while the weights load, `unhealthy` if the load failed).
 
     !!! warning
         GPU containers on Docker Desktop for Windows/macOS are not supported. Use the WSL2 or native paths.
