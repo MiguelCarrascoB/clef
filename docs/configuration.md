@@ -59,7 +59,7 @@ See [Jobs & webhooks](jobs.md).
 | `CLEF_INTERACTIVE_BURST` | `8` | interactive micro-batches in a row before waiting job work gets one (the engine's priority lane; `>= 1`) |
 | `CLEF_WEBHOOK_ALLOW` | empty | hosts (`hooks.example.com`, `*.corp.example.net`), IPs and CIDRs webhooks may be sent to. **Empty = webhooks off** |
 | `CLEF_WEBHOOK_TIMEOUT_S` | `10` | total timeout of one delivery attempt |
-| `CLEF_WEBHOOK_ATTEMPTS` | `5` | delivery attempts for final events |
+| `CLEF_WEBHOOK_ATTEMPTS` | `10` | delivery attempts for final events |
 
 ## Observability
 

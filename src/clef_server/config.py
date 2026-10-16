@@ -165,7 +165,8 @@ class Config:
     )  # 0 = keep forever
     max_jobs: int = field(default_factory=lambda: _int("CLEF_MAX_JOBS", 100))  # queued + running jobs
     job_engine_wait_s: float = field(default_factory=lambda: _float("CLEF_JOB_ENGINE_WAIT_S", 600.0))
-    # A job interrupted (crash / restart) more often than this is failed instead of resumed (0 = no limit).
+    # A job found still running at startup (a crash, not a clean stop) more often than this is failed instead of
+    # resumed (0 = no limit).
     job_max_resumes: int = field(default_factory=lambda: _int("CLEF_JOB_MAX_RESUMES", 3))
     # Hosts / IPs / CIDRs webhooks may be delivered to. Empty (default) = webhooks are OFF.
     webhook_allow: tuple[str, ...] = field(
