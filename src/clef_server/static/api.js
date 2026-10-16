@@ -66,6 +66,61 @@ export async function request(path, { method = 'GET', body, signal, okStatuses =
   return { data, ms, status: res.status, requestId };
 }
 
+/**
+ * Server-sent events over fetch(), so the key travels in the X-API-Key header and never in the URL
+ * (EventSource cannot set headers). streamEvents(path, {onOpen, onEvent(name, data), signal}) resolves when
+ * the stream ends, rejects with ApiError (status 0 = network) on a failed connect or a lost stream.
+ */
+export async function streamEvents(path, { onOpen, onEvent, signal } = {}) {
+  const headers = { Accept: 'text/event-stream' };
+  const key = getKey();
+  if (key) headers['X-API-Key'] = key;
+  let res;
+  try {
+    res = await fetch(path, { headers, signal, cache: 'no-store' });
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw e;
+    throw new ApiError(`Network error: ${e && e.message ? e.message : e}`, { status: 0 });
+  }
+  if (!res.ok || !res.body) {
+    if (res.status === 401) window.dispatchEvent(new CustomEvent('clef:unauthorized'));
+    throw new ApiError(`HTTP ${res.status}`, { status: res.status || 0 });
+  }
+  if (onOpen) onOpen();
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  const dispatch = (block) => {
+    let event = 'message';
+    const data = [];
+    for (const line of block.split('\n')) {
+      if (!line || line[0] === ':') continue;
+      const i = line.indexOf(':');
+      const field = i < 0 ? line : line.slice(0, i);
+      let value = i < 0 ? '' : line.slice(i + 1);
+      if (value[0] === ' ') value = value.slice(1);
+      if (field === 'event') event = value;
+      else if (field === 'data') data.push(value);
+    }
+    if (data.length && onEvent) onEvent(event, data.join('\n'));
+  };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true }).replace(/\r\n?/g, '\n');
+      let cut;
+      while ((cut = buf.indexOf('\n\n')) >= 0) {
+        dispatch(buf.slice(0, cut));
+        buf = buf.slice(cut + 2);
+      }
+    }
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw e;
+    throw new ApiError(`Stream lost: ${e && e.message ? e.message : e}`, { status: 0 });
+  }
+}
+
 export const health = () => request('/health', { okStatuses: [503] });
 export const stats = (windowS) => request(`/v1/stats${windowS ? `?window_s=${windowS}` : ''}`);
 export const timeseries = (windowS, stepS, signal) => request(`/v1/stats/timeseries?window_s=${windowS}${stepS ? `&step_s=${stepS}` : ''}`, { signal });
