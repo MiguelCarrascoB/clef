@@ -11,6 +11,8 @@
   line (`ts`, `level`, `logger`, `msg`, `request_id`). The default `text` output is unchanged.
 
 ### Fixed
+- **Console live stream**: a CRLF split across two network chunks was read as a blank line, which could split one
+  server-sent event in two. A trailing `\r` is now held back until the next chunk.
 - **Lost cancel**: a cancel that raced a runner error could be dropped (the job was parked `interrupted` just
   before the cancel flag was written, which only matched `running` jobs) and the job was later resumed. An
   `interrupted` job is now cancelled at once, with its `job.cancelled` event, in one transaction.
