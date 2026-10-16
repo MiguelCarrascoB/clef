@@ -511,8 +511,8 @@ in the access log).
   `"exc"` (the formatted traceback) when there is one. Stdlib only.
 - Redaction: `RedactSecretsFilter` rewrites the values of the `key`, `api_key` and `token` query parameters to
   `REDACTED` in every string of `record.args` (keeping the args tuple's shape, which uvicorn's `AccessFormatter`
-  unpacks) and in `record.msg`. It sits on uvicorn's `access` handler (via `log_config`) and, from the lifespan, on
-  the `uvicorn.access` logger, which covers servers started with plain `uvicorn`. Keys therefore never reach
+  unpacks) and in `record.msg`. It sits on uvicorn's handlers (via `log_config`), on clef's root handler and, from
+  the lifespan, on the `uvicorn.access` logger, which covers servers started with plain `uvicorn`. Keys therefore never reach
   clef's logs; reverse-proxy logs are the operator's (SECURITY.md has Caddy / nginx masking snippets).
 
 ### Errors

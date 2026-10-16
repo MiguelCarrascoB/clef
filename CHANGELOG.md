@@ -2,7 +2,15 @@
 
 ## Unreleased
 
+### Added
+- `CLEF_LOG_FORMAT=json` (`clef serve --log-format json`): app, uvicorn and access log lines as one JSON object per
+  line (`ts`, `level`, `logger`, `msg`, `request_id`). The default `text` output is unchanged.
+
 ### Fixed
+- **API key in the access log**: the uvicorn access log wrote `/v1/events?key=<key>` (the console's live stream),
+  so the key ended up in `clef.log`. The `key`, `api_key` and `token` query values are now logged as `REDACTED`,
+  and the console reads the stream with `fetch()` and the `X-API-Key` header. `?key=` still works for other
+  clients. SECURITY.md has Caddy / nginx snippets for masking keys in proxy logs.
 - **CUDA install**: `accelerate` and `torchvision` are now declared in the `cuda` extra and pinned in
   `requirements/cuda.txt` (the model code imports both, and loading crashed without them). The uv commands for the CUDA
   lock use `--index-strategy unsafe-best-match`, because uv otherwise reports the pinned `certifi` as unsatisfiable.

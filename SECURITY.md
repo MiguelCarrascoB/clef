@@ -17,9 +17,10 @@ most, trusted callers on a local network.
 - **Local by default.** `CLEF_HOST` defaults to `127.0.0.1`. Binding any other address without API keys logs a loud
   warning at startup.
 - **API keys.** `CLEF_API_KEY` or `CLEF_API_KEYS` (named keys, from a list or a file) protect every `/v1/*` route and the Hugging Face compatibility routes (`/hf/models/*`).
-  The OpenAI-compatible routes read the same keys as `Authorization: Bearer`, so the official SDKs work unchanged. Keys are compared in constant time, never logged, and only the key name is recorded in the request log and stats.
-  Keep the keys file out of version control and readable only by you (`chmod 600`). The SSE endpoint also accepts
-  `?key=`, which puts the key in the URL; do not use it across untrusted networks without TLS.
+  The OpenAI-compatible routes read the same keys as `Authorization: Bearer`, so the official SDKs work unchanged. Keys are compared in constant time, and only the key name is recorded in the request log and stats.
+  Keep the keys file out of version control and readable only by you (`chmod 600`). The SSE endpoint `/v1/events`
+  also accepts `?key=` for plain `EventSource` clients, which puts the key in the URL; do not use it across
+  untrusted networks without TLS. The console sends the `X-API-Key` header instead.
 - **Rate limit.** `CLEF_RATE_LIMIT` limits inference requests per minute per key (per IP when auth is off) and returns
   429 with `Retry-After`. It is a safety net against accidents and noisy clients, not a DDoS defence.
 - **Rate limit scope.** Besides the classification routes, `POST /v1/chat/completions`, `POST /hf/models/*`,
@@ -56,7 +57,10 @@ most, trusted callers on a local network.
   Protect the state directory like the API keys file, and delete `jobs.db` to drop everything. Job results exported as
   CSV neutralise cells that start with `=`, `+`, `-` or `@`, so opening them in a spreadsheet does not run formulas.
 - **No secrets in logs.** Request state (the text you classify) is not logged unless `CLEF_LOG_STATE=1`, but jobs do
-  store it on disk (see above). Keys are never logged. Saved classifier names are validated and never used to build paths from raw input.
+  store it on disk (see above). clef's own logs never contain a key: headers are not logged, and the values of the
+  `key`, `api_key` and `token` query parameters are replaced with `REDACTED` in the uvicorn access log (also with
+  `CLEF_LOG_FORMAT=json`). A reverse proxy in front of clef keeps its own logs; see
+  [Keys in proxy logs](#keys-in-proxy-logs). Saved classifier names are validated and never used to build paths from raw input.
 - **Console and vendored code.** The console is a zero-build app served by the server with no runtime CDN calls. Its
   three vendored libraries (Preact, htm, uPlot) and their licences are listed in
   [`THIRD_PARTY_NOTICES.md`](src/clef_server/static/vendor/THIRD_PARTY_NOTICES.md).
@@ -66,3 +70,37 @@ most, trusted callers on a local network.
 
 Out of scope / not provided: TLS (use a reverse proxy, see [docs/remote-access.md](docs/remote-access.md)), per-user
 authorization (all keys have the same access to the model; job ownership only scopes job visibility), multi-tenant isolation, protection against a malicious model directory.
+
+## Keys in proxy logs
+
+clef masks keys in its own logs, but a reverse proxy writes its own access log. Keep the key out of it too: drop the
+`X-API-Key` and `Authorization` headers and mask (or drop) the query string.
+
+**Caddy** logs every request header when a `log` directive is on, and redacts only `Authorization`, `Cookie` and
+`Proxy-Authorization` by default, so `X-Api-Key` would be written in clear text:
+
+```caddyfile
+clef.example.com {
+    log {
+        format filter {
+            request>uri query {
+                replace key REDACTED
+                replace api_key REDACTED
+                replace token REDACTED
+            }
+            request>headers>X-Api-Key delete
+        }
+    }
+    reverse_proxy 127.0.0.1:8910
+}
+```
+
+**nginx** logs no request headers by default (do not add `$http_x_api_key` or `$http_authorization` to a
+`log_format`), but the default `combined` format logs `$request`, which includes the query. Log `$uri` (the path
+without the query) instead:
+
+```nginx
+log_format clef '$remote_addr - $remote_user [$time_local] "$request_method $uri $server_protocol" '
+                '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
+access_log /var/log/nginx/clef.access.log clef;
+```
