@@ -179,6 +179,8 @@ class Config:
     # engine / performance
     max_microbatch: int = field(default_factory=lambda: _int("CLEF_MAX_MICROBATCH", 8))
     batch_window_ms: float = field(default_factory=lambda: _float("CLEF_BATCH_WINDOW_MS", 4.0))
+    # Interactive micro-batches in a row before waiting background (job) work gets one (starvation bound).
+    interactive_burst: int = field(default_factory=lambda: _int("CLEF_INTERACTIVE_BURST", 8))
     buckets: tuple[int, ...] = field(
         default_factory=lambda: _buckets(
             _env("CLEF_BUCKETS") or "128,192,256,384,512,768,1024,1536,2048,3072,4096"
@@ -214,6 +216,8 @@ class Config:
             raise ValueError("CLEF_CLASSIFY_THRESHOLD must be within [0, 1]")
         if self.rate_limit < 0:
             raise ValueError("CLEF_RATE_LIMIT must be >= 0 (0 disables it)")
+        if self.interactive_burst < 1:
+            raise ValueError("CLEF_INTERACTIVE_BURST must be >= 1")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
 
     def api_keys(self) -> dict[str, str]:

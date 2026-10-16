@@ -661,3 +661,12 @@ def test_blank_env_values_mean_unset(monkeypatch):
     cfg = Config()
     assert cfg.quant == "none" and cfg.port == 8910 and cfg.rate_limit == 0 and cfg.telemetry is True
     assert cfg.max_device_memory_gb == 0 and cfg.buckets[0] == 128
+
+
+def test_interactive_burst_must_be_positive(monkeypatch):
+    from clef_server.config import Config
+
+    assert Config().interactive_burst == 8
+    monkeypatch.setenv("CLEF_INTERACTIVE_BURST", "0")
+    with pytest.raises(ValueError, match="CLEF_INTERACTIVE_BURST"):
+        Config()

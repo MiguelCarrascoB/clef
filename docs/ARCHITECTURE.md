@@ -73,9 +73,10 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_WEBHOOK_TIMEOUT_S` | `10` | total timeout of one delivery attempt |
 | `CLEF_WEBHOOK_ATTEMPTS` | `5` | delivery attempts for final events (`job.progress` is never retried) |
 | `CLEF_SAMPLE_INTERVAL_S` | `2` | gauge sampling period for the time series (memory, telemetry, queue) |
+| `CLEF_INTERACTIVE_BURST` | `8` | interactive micro-batches in a row before waiting background (job) work gets one; `>= 1` |
 | v2 knobs | unchanged | `CLEF_MAX_TOKENS`, `CLEF_MAX_BODY_MB`, `CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES`, `CLEF_VIDEO_FPS`, `CLEF_MAX_BATCH`, `CLEF_MAX_QUESTIONS`, `CLEF_ALLOW_URL_FETCH`, `CLEF_URL_FETCH_MAX_MB`, `CLEF_MAX_MICROBATCH`, `CLEF_BATCH_WINDOW_MS`, `CLEF_BUCKETS`, `CLEF_PAD_MULTIPLE` (64, measured on ROCm only), `CLEF_PAD_TO_BUCKET`, `CLEF_WARMUP`, `CLEF_LOG_STATE`, `CLEF_LOG_BUFFER` |
 
-`Config` validates enums (device, dtype, quant, quant backend, offload), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range and `CLEF_RATE_LIMIT >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
+`Config` validates enums (device, dtype, quant, quant backend, offload), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range, `CLEF_RATE_LIMIT >= 0` and `CLEF_INTERACTIVE_BURST >= 1` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
 `auth_required`, `is_loopback`, `public_limits()`.
 
 ## Backend interface (`backend.py`)
@@ -170,7 +171,8 @@ class Engine:
     error: str | None
     load_seconds: float | None
     def start(self) -> None
-    async def decide(self, records: list[Record]) -> list[Result]   # results in input order
+    async def decide(self, records: list[Record], priority: str = "interactive") -> list[Result]
+        # results in input order; priority is "interactive" (default) or "background" (ValueError otherwise)
     def info(self) -> dict
     def sample(self) -> dict    # cheap gauges for the time series, see below; never raises; any thread
     def shutdown(self) -> None
@@ -200,6 +202,18 @@ Rules (v2 rules kept):
 - Exactly ONE thread ever runs forwards (the worker). `decide()` enqueues and awaits futures.
 - Text-only records are coalesced for up to `batch_window_ms` / `max_microbatch`, grouped by length bucket, one
   forward per group, right-padded to the next `pad_multiple`. Media records run alone, unpadded.
+- Two priority lanes: `interactive` (everything through `ctx.infer`, and direct `engine.decide()` calls) and
+  `background` (`ctx.decide`: jobs, the `evaluate` job kind). Each lane is FIFO. The worker waits for the first item
+  of either lane, lets the batch window run, and only then picks the lane for the micro-batch, so an interactive
+  item that arrives during a window opened by background work still goes first. A micro-batch holds ONE class:
+  interactive whenever any is queued, else background. Micro-batching and bucketing work as before inside it.
+- Classes are not mixed even when the micro-batch has room. The model is compute-bound (batching adds ~30%
+  throughput), so an interactive record riding in a batch of 8 background records pays nearly the whole batch's
+  forward time; running it alone first costs the job one extra host overhead (~50% of a single forward).
+- Starvation bound: after `CLEF_INTERACTIVE_BURST` (default 8) interactive micro-batches in a row while background
+  work was waiting, the next micro-batch is background. A steady interactive load therefore leaves jobs at least
+  1 of every N+1 micro-batches. A micro-batch already taken is never preempted: all of its groups (one forward
+  per length bucket, one per media record) run before the worker looks at the lanes again.
 - Warmup: one forward per bucket (<= 1024) at batch sizes {1, max_microbatch}; status "warming" meanwhile.
 - No `torch.cuda.*` outside `backend.py`. OOM: `backend.is_oom(exc)` -> `backend.empty_cache()` ->
   `GpuOutOfMemory`; the worker keeps running. Timing uses `backend.synchronize()`.
@@ -214,7 +228,8 @@ Rules (v2 rules kept):
   compute; the vision tower, final norm, rotary tables and the joint head stay on the device. The weights are the
   same tensors, so probabilities are identical to a normal run. After a failed forward the streamer puts the layers
   back on the host. Measured numbers: [memory.md](memory.md).
-- The engine reports `stats.record_forward(...)` and `stats.set_queue_depth(n)` as in v2.
+- The engine reports `stats.record_forward(...)` and `stats.set_queue_depth(n, by_class={"interactive": i,
+  "background": b})` (`n` = `i + b`, the v2 total).
 
 ## Stats interface (`stats.py`)
 
@@ -223,7 +238,8 @@ class Stats:
     def __init__(self, buffer: int = 1000, retention_s: int = 3600): ...
     def record_request(self, entry: dict) -> None   # entry = /v1/log item minus id/ts; may include "key"
     def record_forward(self, n_records: int, n_tokens: int, padded_tokens: int, ms: float) -> None
-    def set_queue_depth(self, n: int) -> None
+    def set_queue_depth(self, n: int, by_class: dict[str, int] | None = None) -> None
+                                                    # n = total; by_class -> /v1/stats queue_depth_by_class
     def sample(self, gauges: dict) -> None          # engine.sample() + {"queue_depth"}; called every
                                                     # cfg.sample_interval_s by main; unknown keys ignored
     def in_flight(self) -> ContextManager
@@ -253,8 +269,8 @@ context, imports each module with `importlib` and includes its router.
 | `cfg`, `stats`, `engine`, `store` | the `Config`, `Stats`, `Engine` and `ClassifierStore` of this app |
 | `auth`, `limited` | FastAPI dependency lists: `auth` goes on every router that needs a key, `limited` adds the rate limit on inference routes |
 | `errors` | the shared OpenAPI `responses` for the standard error statuses |
-| `infer(request, reqs, batch, label="batch")` | the request path: limits, media load, one `engine.decide()`, and the request log / stats entry |
-| `decide(reqs, batch=True, label="batch")` | the same without a request, for background work (jobs): limits, media and one `engine.decide()`; not logged or counted in stats |
+| `infer(request, reqs, batch, label="batch")` | the request path: limits, media load, one `engine.decide(priority="interactive")`, and the request log / stats entry |
+| `decide(reqs, batch=True, label="batch", priority="background")` | the same without a request, for background work (jobs, the `evaluate` kind): limits, media and one `engine.decide()` in the background lane; not logged or counted in stats |
 | `map_exception(exc)`, `api_error(status, detail, headers=None)`, `request_id(request)` | the shared error mapping (raise the result `from exc`) |
 | `run_classify`, `run_classify_batch`, `run_score` | the classification routes' implementations, reusable by other features |
 | `on_startup`, `on_shutdown` | lists of async callables run inside the app lifespan after the engine starts / before it stops (jobs start and stop their runner here) |
@@ -481,7 +497,7 @@ HEALTHCHECK uses `/readyz` with a long start period so a container whose model f
 
 ### `GET /v1/stats?window_s=300`
 v2 body plus `"by_key": {"<name>|anonymous": count}` and `"by_endpoint": {"/v1/classify": count, ...}` over the
-window, plus `"status"` and `"gpu"` (`vram_allocated_gb`, `vram_reserved_gb`, `vram_total_gb`, `memory_kind`) and
+window, `"queue_depth_by_class": {"interactive": n, "background": n}` next to the v2 total `queue_depth`, plus `"status"` and `"gpu"` (`vram_allocated_gb`, `vram_reserved_gb`, `vram_total_gb`, `memory_kind`) and
 `"telemetry"` (cached engine telemetry) added by main.
 
 ### `GET /v1/stats/timeseries?window_s=300&step_s=5`

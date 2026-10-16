@@ -24,8 +24,11 @@ stateDiagram-v2
 
 Interactive requests (`/v1/classify`, `/v1/systemone`, ...) stay responsive while a job runs: the runner
 processes one job at a time and keeps **one chunk** (`CLEF_MAX_MICROBATCH` records, 8 by default) in flight
-at the engine. A request arriving mid-job waits for the chunk being computed (at most one micro-batch) and is
-then served ahead of the job's next chunk. Cancellation also takes effect between chunks.
+at the engine, and the engine queue has a **priority lane**: job chunks go in the background lane, requests in
+the interactive one, and the next micro-batch is always interactive when any request is waiting. A request
+arriving mid-job therefore waits only for the job micro-batch already being computed (it is never preempted):
+one forward when the chunk shares a length bucket, more when it spans several buckets or carries media (one
+forward per media record). Cancellation also takes effect between chunks.
 
 ## Endpoints
 
@@ -317,10 +320,21 @@ their own timer (every ten minutes), also while a job is running. Delete the fil
 `jobs.db` is upgraded in place).
 
 **Throughput.** Jobs run one at a time, FIFO, at the engine's batch speed, shared with interactive traffic.
-Priority between jobs, and a priority lane inside the engine, do not exist. Measured on the RX 7900 XTX (bf16,
-short tickets): a 500-item `classify` job ran at ~15 items/s (32 s); meanwhile interactive `/v1/classify` calls
-took p50 422 / p95 458 ms instead of 109 / 118 ms idle. They are never starved, but expect them to be ~4x slower
-while a large job runs.
+There is no priority between jobs. Inside the engine, job work (`ctx.decide`, including the `evaluate` kind) is
+in the background lane and requests (`ctx.infer`) in the interactive lane:
+
+- A micro-batch holds one class. Interactive goes first whenever any is queued, even if it arrived during a
+  batch window opened by job work.
+- Classes are not mixed to fill a micro-batch. The model is compute-bound, so a request riding in a batch of 8
+  job records would wait for all 8; running it alone costs the job one extra host overhead instead.
+- Jobs are not starved by steady traffic: after `CLEF_INTERACTIVE_BURST` (default 8) interactive micro-batches in
+  a row while job work waited, one job micro-batch runs. Lower it to favour jobs, raise it to favour requests.
+- `GET /v1/stats` reports `queue_depth_by_class` (`interactive`, `background`) next to the total `queue_depth`.
+
+Measured on the RX 7900 XTX (bf16, short tickets) before the lane existed: a 500-item `classify` job ran at
+~15 items/s (32 s); meanwhile interactive `/v1/classify` calls took p50 422 / p95 458 ms instead of 109 / 118 ms
+idle. With the lane the wait is bounded by the job micro-batch already being computed; the new numbers are pending
+a GPU run.
 
 ## Writing a job kind
 

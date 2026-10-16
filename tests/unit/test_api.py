@@ -32,6 +32,7 @@ class FakeEngine:
     def __init__(self) -> None:
         self.status, self.error, self.load_seconds = "ready", None, 1.5
         self.calls: list[list[dict[str, Any]]] = []
+        self.priorities: list[str] = []
         self.raises: Exception | None = None
         self.started = self.stopped = False
         self.samples = 0
@@ -91,8 +92,11 @@ class FakeEngine:
             }
         return {"type": "noul", "noul": self.noul.get(qid, 0.5)}
 
-    async def decide(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def decide(
+        self, records: list[dict[str, Any]], priority: str = "interactive"
+    ) -> list[dict[str, Any]]:
         self.calls.append(records)
+        self.priorities.append(priority)
         if self.raises:
             raise self.raises
         return [
@@ -140,6 +144,7 @@ def test_systemone_ok_and_lifespan(api):
     assert body["timing"]["total_ms"] >= 0 and body["timing"]["batch_size"] == 1
     rec = eng.calls[0][0]
     assert rec["images"] is None and rec["videos"] is None and rec["model"] == "clef-flash"
+    assert eng.priorities == ["interactive"]  # ctx.infer -> the engine's interactive lane
     assert "X-Request-ID" in r.headers
 
 

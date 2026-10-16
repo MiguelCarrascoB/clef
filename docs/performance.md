@@ -18,6 +18,15 @@ tokens, `clef bench`, 100 requests per level. v2 and v3 were run back to back on
     transformers' SDPA masking. Padding text batches to a multiple of 64 beats both raw lengths and full buckets
     (`CLEF_PAD_MULTIPLE`); that was measured on ROCm only. NVIDIA, Mac and CPU numbers are pending hardware.
 
+## Sharing the GPU with jobs
+
+Requests and jobs share one model and one worker thread. The engine queue has two lanes: requests are
+interactive, job chunks are background, and the next micro-batch is interactive whenever a request waits (one
+class per forward; after `CLEF_INTERACTIVE_BURST` interactive micro-batches in a row, one job micro-batch runs).
+A request during a job still waits for the job micro-batch already being computed (one forward per length
+bucket or media record in it). Before the lane, interactive p50 was
+422 ms during a job vs 109 ms idle ([Jobs](jobs.md)).
+
 ## Smaller-memory modes
 
 Same GPU, same session, 200 mixed records (`bench/memory_bench.py`). Offload is lossless: the probabilities are
