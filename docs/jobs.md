@@ -15,7 +15,8 @@ stateDiagram-v2
     queued --> cancelled: POST .../cancel
     running --> interrupted: server stopped / crashed
     interrupted --> running: server restarted, resumes after the last stored row
-    interrupted --> failed: interrupted more than CLEF_JOB_MAX_RESUMES times
+    interrupted --> failed: crashed more than CLEF_JOB_MAX_RESUMES times
+    interrupted --> cancelled: a cancel requested before the stop / crash
     succeeded --> [*]: DELETE or retention TTL
     failed --> [*]
     cancelled --> [*]
@@ -216,7 +217,9 @@ jitter), up to `CLEF_WEBHOOK_ATTEMPTS` attempts in total (default 10, about 8 mi
 or deploys is covered); other 4xx and every 3xx are final (redirects are never followed). Each attempt has a
 `CLEF_WEBHOOK_TIMEOUT_S` (default 10) total timeout. The delivery id (`X-Clef-Delivery`) is minted when the final
 event is recorded, together with the job's state change, so it stays the same across retries and server
-restarts. A pending delivery survives a restart and is retried on the next start. Status is in
+restarts. A pending delivery survives a restart and is retried on the next start. Known behaviour: its attempt
+count and backoff start over then (a fresh `CLEF_WEBHOOK_ATTEMPTS` budget, first retry after
+`CLEF_WEBHOOK_BACKOFF_S`), so a server restarting in a loop can attempt one delivery more often than the budget. Status is in
 `GET /v1/jobs/{id}` under `webhook.deliveries`; `webhook.failed_deliveries` counts the ones that gave up, and each
 shows up in `warnings`. A finished job with a pending final event is never purged, and a failed delivery is not
 retried automatically: after fixing the receiver, `POST /v1/jobs/{id}/webhook/redeliver` (optional `?event=`)
@@ -283,7 +286,7 @@ CLEF_WEBHOOK_ALLOW='hooks.example.com,*.corp.example.net,192.168.1.0/24'
 | `CLEF_WEBHOOK_ATTEMPTS` | 10 | Delivery attempts for final events. |
 | `CLEF_WEBHOOK_BACKOFF_S` | 2 | First retry delay; doubles each attempt. |
 | `CLEF_WEBHOOK_BACKOFF_CAP_S` | 120 | Longest delay between two attempts. |
-| `CLEF_JOB_MAX_RESUMES` | 3 | A job interrupted more often than this fails (`interrupted N times, giving up`); `0` = no limit. |
+| `CLEF_JOB_MAX_RESUMES` | 3 | A job that crashed the server (found `running` at startup) more often than this fails (`interrupted N times, giving up`); clean restarts do not count; `0` = no limit. |
 
 The request body limit (`CLEF_MAX_BODY_MB`, default 64) applies to `POST /v1/jobs`: roughly 100 000 short
 texts fit, 50 000 long ones may not. Media in `systemone` jobs counts too. Per-record limits (labels, images,
@@ -297,10 +300,17 @@ metadata are visible to the owner.
 
 **Persistence and restart.** Jobs, their submitted payloads (your inputs) and result rows live in SQLite
 (`<state dir>/jobs.db`, in clear text) and survive restarts.
-Rows are written after every chunk. If the server stops while a job runs it is marked `interrupted` and, on the
-next start, **resumed** from the last stored row (`resumes` counts how often), ahead of queued jobs. A job that
-keeps killing the process would otherwise be resumed forever, so after `CLEF_JOB_MAX_RESUMES` interruptions
-(default 3) it is failed with `interrupted N times, giving up` and a WARNING is logged. The built-in kinds (including
+Rows are written after every chunk, in one transaction that appends after the last stored row, so a chunk that
+was in flight when the server stopped is either stored whole or computed again: never a gap, never a duplicate. If
+the server stops while a job runs it is marked `interrupted` and, on the next start, **resumed** from the last
+stored row, ahead of queued jobs. `resumes` counts **crashes** only: a clean stop (`clef stop`, Ctrl-C, SIGTERM,
+anything that runs the shutdown) parks the job without counting it, while a job found still `running` at
+startup (the process died) counts one. A job that keeps killing the process would otherwise be resumed forever,
+so after `CLEF_JOB_MAX_RESUMES` crashes (default 3) it is failed with `interrupted N times, giving up` and a
+WARNING is logged. A job whose cancel was requested (`cancel_requested: true`) before a stop or crash is not
+resumed: it ends `cancelled` (with its `job.cancelled` webhook), at shutdown or at the next start. The final
+status and the pending webhook record are written in one transaction, so a crash cannot leave a finished job
+without its event. The built-in kinds (including
 `evaluate`) resume exactly; a custom kind that does not declare itself resumable restarts from item 0. Resuming re-reads
 the stored payload, which already holds the saved classifier as it was at submit. Finished jobs are purged on
 their own timer (every ten minutes), also while a job is running. Delete the file to drop all jobs (an older

@@ -443,7 +443,14 @@ Guide: [jobs.md](jobs.md).
 - Storage: SQLite `<state_dir>/jobs.db` (jobs, payloads, result rows, webhook deliveries). Statuses: `queued`,
   `running`, `succeeded`, `failed`, `cancelled`, `interrupted`. One runner, FIFO, one job at a time and ONE
   micro-batch in flight (`CLEF_MAX_MICROBATCH` records through `ctx.decide`), so interactive requests interleave.
-  A job interrupted by a stop or crash resumes after its last stored row on the next start. A row the engine rejects
+  A job interrupted by a stop or crash resumes after its last stored row on the next start. Rows are appended in
+  one transaction that reads `done` inside it, so an in-flight chunk is either stored whole or recomputed (no gap,
+  no duplicate). A clean stop (lifespan shutdown) parks the running job as `interrupted` without counting it;
+  only a job found still `running` at startup (a crash) increments `resumes`, and more than
+  `CLEF_JOB_MAX_RESUMES` crashes fail it. A job whose cancel was requested before the stop or crash ends
+  `cancelled` at that point (or at the next start), never resumed. Every terminal transition (finish, cancel
+  while queued, cancel / give-up at recovery) writes the status and the pending terminal webhook record in ONE
+  SQLite transaction, so a crash cannot lose the event. A row the engine rejects
   becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
   `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
 - Ownership: with auth on, a job belongs to the key name that submitted it and other keys get 404 (also in the
@@ -452,7 +459,8 @@ Guide: [jobs.md](jobs.md).
   per 10 s, one attempt). Headers `X-Clef-Event`, `X-Clef-Delivery`, and with a secret `X-Clef-Timestamp` and
   `X-Clef-Signature: sha256=` HMAC-SHA256 of `"<timestamp>.<raw body>"`. 2xx = delivered; 408 / 425 / 429 / 5xx and
   network errors retry with exponential backoff up to `CLEF_WEBHOOK_ATTEMPTS`; other statuses and all redirects are
-  final. Disabled until `CLEF_WEBHOOK_ALLOW` is set; the allow-list is checked at submit and on every attempt, the
+  final. A delivery still pending at restart is retried with the same delivery id, but its attempt count and backoff
+  start over (known behaviour). Disabled until `CLEF_WEBHOOK_ALLOW` is set; the allow-list is checked at submit and on every attempt, the
   host is resolved then and the connection is pinned to the checked IP (see [SECURITY.md](../SECURITY.md)).
 - Jobs are not counted in `/v1/stats` or the request log (they use `ctx.decide`).
 - Custom kinds: `ctx.extra.setdefault("job_kinds", {})[name] = {"validate": fn, "run": async_fn, "resumable": bool}`
