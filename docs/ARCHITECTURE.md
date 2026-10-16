@@ -208,7 +208,8 @@ Rules (v2 rules kept):
   `background` (`ctx.decide`: jobs, the `evaluate` job kind). Each lane is FIFO. The worker waits for the first item
   of either lane, lets the batch window run, and only then picks the lane for the micro-batch, so an interactive
   item that arrives during a window opened by background work still goes first. A micro-batch holds ONE class:
-  interactive whenever any is queued, else background. Micro-batching and bucketing work as before inside it.
+  interactive whenever any is queued (up to the starvation bound below), else background. Micro-batching and
+  bucketing work as before inside it.
 - Classes are not mixed even when the micro-batch has room. The model is compute-bound (batching adds ~30%
   throughput), so an interactive record riding in a batch of 8 background records pays nearly the whole batch's
   forward time; running it alone first costs the job one extra host overhead (~50% of a single forward).
