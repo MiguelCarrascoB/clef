@@ -19,6 +19,7 @@ tests. Change it first, then the code.
 | `clef_server/classify.py` | classification API models + translation classify/score <-> SystemOne records/answers |
 | `clef_server/classifiers.py` | saved-classifier store (JSON files under `<state_dir>/classifiers/`) |
 | `clef_server/security.py` | multi-key auth, per-key rate limiting, CORS setup |
+| `clef_server/logs.py` | stdlib-only logging: text / JSON formatters, the request-id context, secret redaction for the access log, uvicorn's `log_config` |
 | `clef_server/media.py` | data-URL / (optional) URL fetching with SSRF guard + caps, image/video decode |
 | `clef_server/stats.py` | request log ring buffer, latency histogram, counters, forward stats, **time series ring buffer** |
 | `clef_server/appctx.py` | `AppContext`: what a feature module gets from `create_app()` (config, stats, engine, auth / rate-limit dependencies, inference helpers, lifecycle hooks) |
@@ -73,9 +74,10 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_WEBHOOK_TIMEOUT_S` | `10` | total timeout of one delivery attempt |
 | `CLEF_WEBHOOK_ATTEMPTS` | `5` | delivery attempts for final events (`job.progress` is never retried) |
 | `CLEF_SAMPLE_INTERVAL_S` | `2` | gauge sampling period for the time series (memory, telemetry, queue) |
+| `CLEF_LOG_FORMAT` | `text` | `text` or `json`: server log lines (app, uvicorn, access log); json = one object per line, see [Logging](#logging-logspy) |
 | v2 knobs | unchanged | `CLEF_MAX_TOKENS`, `CLEF_MAX_BODY_MB`, `CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES`, `CLEF_VIDEO_FPS`, `CLEF_MAX_BATCH`, `CLEF_MAX_QUESTIONS`, `CLEF_ALLOW_URL_FETCH`, `CLEF_URL_FETCH_MAX_MB`, `CLEF_MAX_MICROBATCH`, `CLEF_BATCH_WINDOW_MS`, `CLEF_BUCKETS`, `CLEF_PAD_MULTIPLE` (64, measured on ROCm only), `CLEF_PAD_TO_BUCKET`, `CLEF_WARMUP`, `CLEF_LOG_STATE`, `CLEF_LOG_BUFFER` |
 
-`Config` validates enums (device, dtype, quant, quant backend, offload), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range and `CLEF_RATE_LIMIT >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
+`Config` validates enums (device, dtype, quant, quant backend, offload, log format), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range and `CLEF_RATE_LIMIT >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
 `auth_required`, `is_loopback`, `public_limits()`.
 
 ## Backend interface (`backend.py`)
@@ -282,7 +284,8 @@ appears in `openapi.json`.
 - Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration). When any key exists every `/v1/*` route, and the
   Hugging Face routes (`/hf/models/*`, `/models/*`), need `X-API-Key: <key>` or `Authorization: Bearer <key>` (401 +
   `WWW-Authenticate: Bearer` otherwise; the OpenAI and HF routes render that in their own error shape). For SSE
-  (EventSource cannot set headers) `/v1/events?key=<key>` is also accepted. Comparison is constant-time over all
+  `/v1/events?key=<key>` is also accepted for plain `EventSource` clients, which cannot set headers (the console
+  sends the header; see [Logging](#logging-logspy) for how the query value is masked). Comparison is constant-time over all
   keys. The matching key's **name** (never the key) is stored on `request.state.key_name` and written to the request
   log (`"key"`) and to `/v1/stats` (`by_key`). Auth off -> `key` is `null`.
 - Open routes: `/`, static files, `/health`, `/livez`, `/schema-example`, `/docs`, `/openapi.json`.
@@ -494,7 +497,23 @@ v2 entries plus `"key": "<name>" | null`. Endpoint values include the new POST r
 `event: log` + `data: <log entry>` per request; `event: stats` + `data: <stats body>` every 2 s. The stats body
 carries `"point": stats.latest_point(step_s)` (same fields as one time-series column entry, scalars, plus `t` and
 `step_s`), so charts append (new `t`) or replace (same `t`) their last point without polling. `step_s` in 1..60,
-default 5.
+default 5. Auth: the `X-API-Key` / Bearer header like every route, or `?key=` (kept for `EventSource` clients; masked
+in the access log).
+
+### Logging (`logs.py`)
+- `setup_logging(fmt)` installs one root handler (idempotent; a later call only swaps its formatter). `run(cfg)`
+  passes `uvicorn_log_config(fmt)` to `uvicorn.run(log_config=...)`, so the foreground `clef serve` and the
+  `--detach` child (`python -m clef_server.main`) log the same way.
+- `CLEF_LOG_FORMAT=text` (default): the app keeps `"%(asctime)s %(levelname)-7s %(name)s %(message)s"`, uvicorn
+  keeps its own formatters. `json`: the app, `uvicorn` / `uvicorn.error` and `uvicorn.access` all write one JSON
+  object per line: `{"ts": "<ISO 8601 UTC, ms>", "level", "logger", "msg"}` plus `"request_id"` when the record is
+  emitted inside a request (a `ContextVar` set by `GuardMiddleware`; the access line is logged inside it) and
+  `"exc"` (the formatted traceback) when there is one. Stdlib only.
+- Redaction: `RedactSecretsFilter` rewrites the values of the `key`, `api_key` and `token` query parameters to
+  `REDACTED` in every string of `record.args` (keeping the args tuple's shape, which uvicorn's `AccessFormatter`
+  unpacks) and in `record.msg`. It sits on uvicorn's `access` handler (via `log_config`) and, from the lifespan, on
+  the `uvicorn.access` logger, which covers servers started with plain `uvicorn`. Keys therefore never reach
+  clef's logs; reverse-proxy logs are the operator's (SECURITY.md has Caddy / nginx masking snippets).
 
 ### Errors
 Always `{"detail": "<message>", "request_id": "<hex>"}`; header `X-Request-ID` on every response.
@@ -511,7 +530,7 @@ date). All routes, including the feature modules', have pydantic request/respons
 
 ```
 clef serve [--host H] [--port P] [--device D] [--dtype T] [--quant Q] [--offload none|cpu]
-           [--max-device-memory-gb GB] [--model-path DIR] [--detach] [--timeout S]
+           [--max-device-memory-gb GB] [--model-path DIR] [--log-format text|json] [--detach] [--timeout S]
            # flags set the matching CLEF_* env; foreground by default (Ctrl+C stops)
 clef stop | clef status [--json] | clef logs [-f] [-n N]
 clef doctor [--no-gpu] [--smoke] [--json]    # exit 0 ok/warn, 1 on any FAIL
@@ -540,5 +559,6 @@ clef version
 Zero-build Preact + htm; one vendored charting library (`static/vendor/uPlot.*`, MIT) for time series, everything
 else hand-written SVG. No runtime CDN calls. Screens: Playground (SystemOne + Classify modes), History, Batch, Evaluate (labelled dataset -> `/v1/classify/batch`
 in chunks -> `/v1/evaluate/metrics`; confusion heatmap, reliability diagram, coverage curve, mistakes, export), Ops.
-It consumes `/health`, `/v1/stats`, `/v1/stats/timeseries`, `/v1/events?step_s=`, `/v1/log`, `/v1/systemone`,
+It consumes `/health`, `/v1/stats`, `/v1/stats/timeseries`, `/v1/events?step_s=` (read with `fetch()` and the
+`X-API-Key` header, not `EventSource`, so the key never goes in the URL), `/v1/log`, `/v1/systemone`,
 `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/classifiers*`, `/v1/evaluate/metrics`.
