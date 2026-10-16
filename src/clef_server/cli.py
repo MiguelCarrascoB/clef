@@ -23,11 +23,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-# Keep in sync with config.DEVICES / DTYPES / QUANTS (tests/unit/test_cli.py asserts it).
+# Keep in sync with config.DEVICES / DTYPES / QUANTS / OFFLOADS / LOG_FORMATS (test_cli.py asserts it).
 DEVICES = ("auto", "cuda", "rocm", "mps", "cpu")
 DTYPES = ("auto", "bfloat16", "float16", "float32")
 QUANTS = ("none", "int8", "nf4")
 OFFLOADS = ("none", "cpu")
+LOG_FORMATS = ("text", "json")
 
 # flag attribute -> environment variable set by `clef serve`
 FLAG_ENV = {
@@ -39,6 +40,7 @@ FLAG_ENV = {
     "offload": "CLEF_OFFLOAD",
     "max_device_memory_gb": "CLEF_MAX_DEVICE_MEMORY_GB",
     "model_path": "CLEF_MODEL_PATH",
+    "log_format": "CLEF_LOG_FORMAT",
 }
 
 MIN_FREE_GB = 21.0  # the release is ~19 GB; leave headroom for the partial download
@@ -527,6 +529,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="CLEF_MAX_DEVICE_MEMORY_GB: device memory this server may use (0 = no cap)",
     )
     sp.add_argument("--model-path", dest="model_path", metavar="DIR", help="CLEF_MODEL_PATH")
+    sp.add_argument(
+        "--log-format",
+        dest="log_format",
+        choices=LOG_FORMATS,
+        help="CLEF_LOG_FORMAT: json = one object per line",
+    )
     sp.add_argument("--detach", action="store_true", help="start in the background and wait until healthy")
     sp.add_argument(
         "--timeout",
