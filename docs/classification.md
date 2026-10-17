@@ -113,11 +113,14 @@ print(s.score, s.level, s.distribution)
 ## Saved classifiers
 
 Store the labels and instructions once; callers send only the input. Names: lowercase letters, digits, `-` and `_`,
-at most 64 characters, starting with a letter or digit. Definitions are JSON files under the state directory
-(`<CLEF_STATE_DIR>/classifiers/`), at most `CLEF_MAX_CLASSIFIERS` (1000).
+at most 64 characters, starting with a letter or digit. Definitions live in the database (`clef.db` in the state
+directory, or Postgres with `CLEF_DATABASE_URL`; see [Storage](jobs.md#storage)), at most `CLEF_MAX_CLASSIFIERS`
+(1000). Every `PUT` that changes a definition adds a version (`GET /v1/classifiers/{name}/versions`; runs accept
+`"version"`, default the latest), and the key of the first `PUT` owns the classifier. `clef classifiers export`
+writes them back out as JSON files.
 
 ```bash
-# create or overwrite
+# create, or add a version
 curl -s -X PUT http://127.0.0.1:8910/v1/classifiers/support-triage -H 'Content-Type: application/json' -d '{
   "kind": "classify",
   "labels": {"billing": "Payments or invoices", "technical": "Bugs or outages"},

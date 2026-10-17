@@ -65,8 +65,8 @@ A batch call counts as one request, so also keep `CLEF_MAX_BATCH` reasonable.
 Async jobs belong to the key that submitted them: other keys get `404` for them and do not see them in the job list.
 Webhooks are off until you set `CLEF_WEBHOOK_ALLOW`; list only the receivers you trust (a private address needs its
 IP or CIDR listed explicitly) and see [Jobs & webhooks](jobs.md#webhooks-are-off-by-default-ssrf) and the
-[security policy](../SECURITY.md) before enabling them on an exposed server. `jobs.db` in the state directory holds
-your submitted inputs and the webhook secrets in clear text, so protect that directory like the keys file.
+[security policy](../SECURITY.md) before enabling them on an exposed server. `clef.db` in the state directory (or your Postgres
+database, with `CLEF_DATABASE_URL`) holds your submitted inputs and the webhook secrets in clear text, so protect that directory like the keys file.
 
 ## CORS (browser callers)
 

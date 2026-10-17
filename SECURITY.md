@@ -57,9 +57,9 @@ most, trusted callers on a local network.
   `0` keeps them forever) or on `DELETE /v1/jobs/{id}`. Protect the state directory like the API keys file, and delete
   `clef.db` (with the server stopped) to drop everything.
 - **Database files and URLs.** A new `clef.db` is created readable by its owner only (`0600` on POSIX), and so are
-  the copies `clef backup` writes to `<state dir>/backups/`; a `clef.db` renamed from a v3.1 `jobs.db` keeps that
-  file's permissions (`chmod 600` it). With Postgres, everyone who can read that database reads the same payloads and
-  secrets: give clef its own database and role, and use TLS (`?sslmode=require`) to a remote server.
+  the copies `clef backup` writes to `<state dir>/backups/`; a `clef.db` copied from a v3.1 `jobs.db` is `0600` too,
+  but the original kept as `jobs.db.migrated` keeps its old permissions (delete it once you are happy). With
+  Postgres, everyone who can read that database reads the same payloads and secrets: give clef its own database and role, and use TLS (`?sslmode=require`) to a remote server.
   `CLEF_DATABASE_URL` carries the password: clef never logs it, and `/health`, `clef doctor` and the `clef db`
   commands show it as `***`. Prefer a systemd `EnvironmentFile` or a compose `.env` with tight permissions over the
   command line. The audit log (`audit_log`: saved-classifier changes now, key changes with v3.2 keys) records who,
