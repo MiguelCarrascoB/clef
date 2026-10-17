@@ -21,9 +21,9 @@ x-clef-env: &clef-env
   # Behind a load balancer probing /readyz: e.g. 5 s of 503 "draining" before stopping (keep it below the 10 s
   # `docker compose stop` timeout). This file's 30 s healthcheck is too slow to see the drain itself.
   CLEF_DRAIN_S: ${CLEF_DRAIN_S:-0}
-  # Database: by default SQLite /data/state/clef.db in the clef-data volume (a v3.1 jobs.db there is renamed once).
+  # Database: by default SQLite /data/state/clef.db in the clef-data volume (a v3.1 jobs.db there is copied once).
   # For Postgres, add `CLEF_DATABASE_URL: ${CLEF_DATABASE_URL:-}` here and set it in .env, e.g.
-  # postgresql://clef:<password>@db:5432/clef (the image then needs the `postgres` extra, psycopg 3). One clef
+  # postgresql://clef:<password>@db:5432/clef (the images include psycopg 3, the `postgres` extra). One clef
   # server per database. Docs: docs/jobs.md#storage.
 
 # Same check as the images' HEALTHCHECK: healthy only once the model is loaded (/readyz, 503 while loading, after a

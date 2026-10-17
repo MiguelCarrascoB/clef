@@ -20,6 +20,8 @@
   New commands: `clef db current|upgrade|copy` (copy SQLite to Postgres), `clef backup` (SQLite online backup,
   safe while serving), `clef classifiers export`. `clef doctor` checks the schema and `/health` has a `db` block.
   A database that cannot be reached answers `503 database unavailable`.
+  The `requirements/*.txt` locks (and so the Docker images) now include sqlalchemy, alembic and the `postgres`
+  extra (psycopg 3).
 - **Versioned saved classifiers with an owner**: every `PUT /v1/classifiers/{name}` that changes the definition adds
   a version (an identical PUT is a no-op); `GET ?version=N`, `GET /v1/classifiers/{name}/versions[/{v}]`; runs, jobs
   and `POST /v1/evaluate` accept `"version"`, and job snapshots record `classifier_version`. The first PUT's key

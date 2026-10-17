@@ -6,7 +6,8 @@ so it is split into extras:
 | Extra | Contents |
 | --- | --- |
 | *(base)* | `httpx`: enough for `clef_client` |
-| `server` | fastapi, uvicorn, pydantic, pillow, imageio(+ffmpeg), numpy, transformers==5.10.2, safetensors, huggingface_hub, einops, psutil. **No torch.** |
+| `server` | fastapi, uvicorn, pydantic, pillow, imageio(+ffmpeg), numpy, transformers==5.10.2, safetensors, huggingface_hub, einops, psutil, sqlalchemy, alembic. **No torch.** |
+| `postgres` | psycopg[binary], psycopg-pool (`CLEF_DATABASE_URL=postgresql://...`; part of every lock file below, so the Docker images can use Postgres) |
 | `cuda` | torch, flash-linear-attention, nvidia-ml-py, bitsandbytes (`CLEF_QUANT=int8/nf4` on CUDA; also works on ROCm, see docs/memory.md) |
 | `quant` | torchao (weight-only int8 for `CLEF_QUANT=int8`; already part of `rocm`, `mps` and `cpu`; optional on CUDA via `CLEF_QUANT_BACKEND=torchao`) |
 | `cuda-fast` | causal-conv1d (sdist only: needs `nvcc` / the CUDA toolkit; optional speed-up, `clef doctor` reports the fast path) |
@@ -18,6 +19,8 @@ so it is split into extras:
 Always combine `server` with exactly one backend: `clef-local[server,cuda]`, `clef-local[server,rocm]`, ...
 
 ## Lock files (exact pins, Python 3.10 resolution)
+
+Each file holds `server` + `postgres` + its backend (`dev.txt` adds `dev`).
 
 | File | Platform | torch |
 | --- | --- | --- |
@@ -48,11 +51,11 @@ bash requirements/compile.sh rocm cuda    # a subset (dev.txt is resolved agains
 The commands it runs (in this order):
 
 ```bash
-uv pip compile pyproject.toml --extra server --extra rocm --python-platform x86_64-unknown-linux-gnu --python-version 3.10 --torch-backend rocm7.2 --emit-index-url -c requirements/constraints-rocm.txt -o requirements/rocm.txt
-uv pip compile pyproject.toml --extra server --extra cuda --python-platform x86_64-unknown-linux-gnu --python-version 3.10 --torch-backend cu128 --emit-index-url -o requirements/cuda.txt
-uv pip compile pyproject.toml --extra server --extra cpu --universal --python-version 3.10 --torch-backend cpu --emit-index-url -o requirements/cpu.txt
-uv pip compile pyproject.toml --extra server --extra mps --python-platform aarch64-apple-darwin --python-version 3.10 -o requirements/macos.txt
-uv pip compile pyproject.toml --extra server --extra cpu --extra dev --universal --python-version 3.10 --torch-backend cpu --emit-index-url -c <cpu.txt without option lines> -o requirements/dev.txt
+uv pip compile pyproject.toml --extra server --extra postgres --extra rocm --python-platform x86_64-unknown-linux-gnu --python-version 3.10 --torch-backend rocm7.2 --emit-index-url -c requirements/constraints-rocm.txt -o requirements/rocm.txt
+uv pip compile pyproject.toml --extra server --extra postgres --extra cuda --python-platform x86_64-unknown-linux-gnu --python-version 3.10 --torch-backend cu128 --emit-index-url -o requirements/cuda.txt
+uv pip compile pyproject.toml --extra server --extra postgres --extra cpu --universal --python-version 3.10 --torch-backend cpu --emit-index-url -o requirements/cpu.txt
+uv pip compile pyproject.toml --extra server --extra postgres --extra mps --python-platform aarch64-apple-darwin --python-version 3.10 -o requirements/macos.txt
+uv pip compile pyproject.toml --extra server --extra postgres --extra cpu --extra dev --universal --python-version 3.10 --torch-backend cpu --emit-index-url -c <cpu.txt without option lines> -o requirements/dev.txt
 ```
 
 uv emits only the default index, so the script appends the `--extra-index-url https://download.pytorch.org/whl/<backend>`

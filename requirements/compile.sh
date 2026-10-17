@@ -17,24 +17,24 @@ targets=("$@"); [ ${#targets[@]} -gt 0 ] || targets=(rocm cuda cpu macos dev)
 for t in "${targets[@]}"; do
   case "$t" in
     rocm)  # ROCm 7.2 wheels (WSL2 / native Linux), torch pinned to what is measured to work
-      $UV pip compile pyproject.toml --extra server --extra rocm --python-platform x86_64-unknown-linux-gnu \
+      $UV pip compile pyproject.toml --extra server --extra postgres --extra rocm --python-platform x86_64-unknown-linux-gnu \
         --python-version $PY --torch-backend rocm7.2 --emit-index-url -c requirements/constraints-rocm.txt \
         -o requirements/rocm.txt
       add_torch_index requirements/rocm.txt rocm7.2 ;;
     cuda)  # NVIDIA, Linux x86_64, CUDA 12.8 wheels (causal-conv1d is the optional cuda-fast extra: sdist only)
-      $UV pip compile pyproject.toml --extra server --extra cuda --python-platform x86_64-unknown-linux-gnu \
+      $UV pip compile pyproject.toml --extra server --extra postgres --extra cuda --python-platform x86_64-unknown-linux-gnu \
         --python-version $PY --torch-backend cu128 --emit-index-url -o requirements/cuda.txt
       add_torch_index requirements/cuda.txt cu128 ;;
     cpu)   # CPU wheels, Linux + Windows (CI)
-      $UV pip compile pyproject.toml --extra server --extra cpu --universal --python-version $PY \
+      $UV pip compile pyproject.toml --extra server --extra postgres --extra cpu --universal --python-version $PY \
         --torch-backend cpu --emit-index-url -o requirements/cpu.txt
       add_torch_index requirements/cpu.txt cpu ;;
     macos) # Apple Silicon (MPS), default PyPI wheels
-      $UV pip compile pyproject.toml --extra server --extra mps --python-platform aarch64-apple-darwin \
+      $UV pip compile pyproject.toml --extra server --extra postgres --extra mps --python-platform aarch64-apple-darwin \
         --python-version $PY -o requirements/macos.txt ;;
     dev)   # CPU + pytest/ruff, same pins as cpu.txt (its index lines are stripped from the constraints copy)
       tmp="$(mktemp)"; grep -v '^--' requirements/cpu.txt > "$tmp"
-      $UV pip compile pyproject.toml --extra server --extra cpu --extra dev --universal --python-version $PY \
+      $UV pip compile pyproject.toml --extra server --extra postgres --extra cpu --extra dev --universal --python-version $PY \
         --torch-backend cpu --emit-index-url -c "$tmp" -o requirements/dev.txt
       rm -f "$tmp"
       sed -i -E 's#[A-Za-z:/_.0-9-]*/tmp\.[A-Za-z0-9]+#requirements/cpu.txt#g' requirements/dev.txt
