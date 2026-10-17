@@ -1,7 +1,7 @@
 # Configuration
 
 All settings are `CLEF_*` environment variables; the flags of `clef serve` set the same variables. Values are read
-once at startup, so restart the server after changing them. The tables below are checked against `config.py`; the
+once at startup, so restart the server after changing them. They can also live in a [`.env` file](#env-files). The tables below are checked against `config.py`; the
 same list with the engine and padding knobs is in [Architecture](ARCHITECTURE.md#configuration-configpy).
 
 ## Model and device
@@ -103,6 +103,27 @@ The router is off unless a key is set in the process environment ([Router and Re
 | `CLEF_ROUTER_MAX_NEW_PER_DAY` | `10` | auto mode: labels a router may add per UTC day |
 | `CLEF_ROUTER_MAX_INPUT_CHARS` | `500` | characters of each buffered input sent to the LLM |
 | `CLEF_REVIEW_TTL_DAYS` | `30` | review rows lose their input text this long after creation (and at once when resolved); 0 = keep |
+
+## .env files
+
+Instead of exporting variables, put `KEY=VALUE` lines in a file. At startup, before the settings are read, clef loads
+`./.env` (the directory you run `clef serve` in) and then `~/.config/clef/env` (the file `deploy/clef.service` also
+reads):
+
+```bash
+# .env  (keep it out of git; clef's own .gitignore lists it)
+GEMINI_API_KEY=your-key
+CLEF_API_KEYS=~/.config/clef/keys
+```
+
+- A variable that is already set (in the shell, by a flag, by systemd) always wins over both files; `./.env` wins
+  over `~/.config/clef/env`.
+- Blank lines and `#` comments are ignored. `export KEY=value` works. Values may be `'single'` (literal) or
+  `"double"` quoted (`\n`, `\"`, `\\` escapes); an unquoted value ends at ` #`.
+- `CLEF_ENV_FILE=/path/to/file` loads only that file. `CLEF_ENV_FILE=` (empty) loads none.
+- clef never logs values. `clef doctor` lists the files it loaded, by name.
+
+## Example
 
 Example for LAN access:
 

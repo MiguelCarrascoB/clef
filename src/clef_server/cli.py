@@ -23,6 +23,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from . import dotenv
+
 # Keep in sync with config.DEVICES / DTYPES / QUANTS / OFFLOADS / LOG_FORMATS (test_cli.py asserts it).
 DEVICES = ("auto", "cuda", "rocm", "mps", "cpu")
 DTYPES = ("auto", "bfloat16", "float16", "float32")
@@ -1029,6 +1031,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    dotenv.load_env()  # ./.env and ~/.config/clef/env, before any command reads CLEF_* (set variables win)
     parser = build_parser()
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw and raw[0] == "bench":  # argparse REMAINDER mishandles a leading --option: pass it straight on

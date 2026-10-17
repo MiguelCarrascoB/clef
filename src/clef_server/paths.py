@@ -91,3 +91,11 @@ def resolve_model_path(cfg: Any, spec: Any = None) -> Path:
     if not is_model_dir(path):
         raise ModelNotFound(f"incomplete snapshot at {path}; re-run `{fetch}`")
     return path
+
+
+def config_dir() -> Path:
+    """The user's clef config directory, ``~/.config/clef`` (``env``, ``keys``). Not created here.
+
+    The same place ``deploy/clef.service`` reads as its EnvironmentFile (``%h/.config/clef/env``).
+    """
+    return Path.home() / ".config" / "clef"

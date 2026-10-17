@@ -10,13 +10,13 @@ The router is **off** until you give it an LLM key. Routing itself (`/v1/routers
 
 ## Turn it on
 
-clef does not read `.env` files itself; the key must be in the server's process environment.
+Put the key in a `.env` file next to where you run `clef serve`, or in `~/.config/clef/env` (see
+[Configuration](configuration.md#env-files)). A variable already set in the environment wins over both files.
 
 ```bash
-# systemd (deploy/clef.service reads ~/.config/clef/env), or any shell:
-echo 'GEMINI_API_KEY=your-key' >> ~/.config/clef/env
-# docker compose: put the line in the .env file next to docker-compose.yml (the compose file passes it through)
-GEMINI_API_KEY=your-key
+echo 'GEMINI_API_KEY=your-key' >> .env                 # or: >> ~/.config/clef/env
+# systemd (deploy/clef.service) reads ~/.config/clef/env as well
+# docker compose: the .env file next to docker-compose.yml is passed through by the compose file
 ```
 
 Restart the server and check with `clef doctor` (it says whether the LLM is on, never the key). By default clef

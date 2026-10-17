@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import backend as backend_mod
+from . import dotenv
 from .config import VERSION, Config
 from .models import UnknownModel
 from .models import registry as model_registry
@@ -85,10 +86,20 @@ def check_python(r: Report) -> None:
 
 def check_config(r: Report) -> Config | None:
     try:
+        dotenv.load_env()
         cfg = Config()
     except Exception as exc:
         r.add(FAIL, "config", str(exc))
         return None
+    if dotenv.loaded:  # file names only, never their values
+        r.add(OK, "env files", "loaded " + ", ".join(dotenv.loaded))
+    else:
+        off = os.environ.get(dotenv.ENV_FILE_VAR) == ""
+        r.add(
+            SKIP,
+            "env files",
+            "disabled (CLEF_ENV_FILE is empty)" if off else "none found (./.env, ~/.config/clef/env)",
+        )
     r.add(
         OK,
         "config",

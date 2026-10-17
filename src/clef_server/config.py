@@ -371,4 +371,7 @@ class Config:
 
 
 def load() -> Config:
+    from .dotenv import load_env
+
+    load_env()  # ./.env and ~/.config/clef/env fill in what the environment leaves unset
     return Config()

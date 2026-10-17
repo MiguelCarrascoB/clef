@@ -47,6 +47,12 @@ def _private_state_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: py
 
 
 @pytest.fixture(autouse=True)
+def _no_env_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never read a real ``./.env`` or ``~/.config/clef/env`` (CLEF_ENV_FILE= disables loading)."""
+    monkeypatch.setenv("CLEF_ENV_FILE", "")
+
+
+@pytest.fixture(autouse=True)
 def _no_llm_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """The router's LLM is off unless a test turns it on with a fake: never a live client in tests."""
     for name in ("GEMINI_API_KEY", "CLEF_LLM_API_KEY", "CLEF_LLM_BASE_URL", "CLEF_LLM_MODEL"):
