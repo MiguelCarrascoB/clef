@@ -35,6 +35,10 @@ Source = "https://github.com/MiguelCarrascoB/clef"
 [project.scripts]
 clef = "clef_server.cli:main"
 
+# C2: decision model adapters (models/registry.py). Third-party packages register theirs in the same group.
+[project.entry-points."clef.models"]
+clef-release = "clef_server.models.clef_release:ClefReleaseAdapter"
+
 # Install the server with ONE backend extra, e.g.  clef-local[server,cuda]  (see requirements/README.md).
 # `server` deliberately does not pull torch: the right torch wheel depends on the platform and GPU.
 [project.optional-dependencies]

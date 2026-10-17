@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import importlib
 import importlib.metadata
+import importlib.util
 import logging
 import sys
 import threading
@@ -52,7 +53,9 @@ import torch
 
 from . import backend as backend_mod
 from .backend import Backend, BackendError, PreflightError
-from .paths import WEIGHTS_GB, ModelNotFound, resolve_model_path
+from .models import registry
+from .models.base import Capabilities, DecisionModel, ModelSpec, OffloadLayout, UnknownModel, safetensors_gb
+from .paths import MODEL_MARKER, WEIGHTS_GB, ModelNotFound, resolve_model_path
 
 log = logging.getLogger("clef.engine")
 
@@ -113,11 +116,21 @@ def pad_batch_right(batch: dict[str, Any], target: int, pad_token_id: int) -> di
     return {**batch, "input_ids": new_ids, "attention_mask": new_mask}
 
 
-def _import_model_module(path: Any) -> Any:
-    path_str = str(path)
-    if path_str not in sys.path:
-        sys.path.insert(0, path_str)
-    return importlib.import_module("joint_schema_model")
+def _import_model_module(path: Any, name: str = "joint_schema_model") -> Any:
+    """Import `<path>/joint_schema_model.py` as module `name` (per revision, so releases never collide)."""
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, Path(path) / MODEL_MARKER)
+    if spec is None or spec.loader is None:
+        raise ModelNotFound(f"cannot import {Path(path) / MODEL_MARKER}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod  # before exec: the release's dataclasses look their module up
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return mod
 
 
 def _default_loader(cfg: Any) -> Any:
@@ -126,11 +139,8 @@ def _default_loader(cfg: Any) -> Any:
 
 def _weights_gb(path: Any) -> float:
     """On-disk size of the release weights (falls back to the measured 19 GB)."""
-    try:
-        total = sum(f.stat().st_size for f in Path(path).glob("*.safetensors"))
-        return total / 1024**3 if total > 1024**3 else WEIGHTS_GB
-    except Exception:
-        return WEIGHTS_GB
+    gb = safetensors_gb(path)
+    return gb if gb > 1.0 else WEIGHTS_GB
 
 
 @dataclass
@@ -181,8 +191,12 @@ def _is_device_map_refusal(exc: BaseException) -> bool:
     return any(k in text for k in ("device_map", "dispatched on the cpu", "cpu_offload", "offload"))
 
 
-def load_model(mod: Any, path: Any, backend: Backend, dtype: Any, cfg: Any) -> tuple[Any, Any, LoadInfo]:
+def load_model(
+    mod: Any, path: Any, backend: Backend, dtype: Any, cfg: Any, layout: OffloadLayout | None = None
+) -> tuple[Any, Any, LoadInfo]:
     """Load (model, processor, info) honouring cfg.quant / cfg.offload / cfg.max_device_memory_gb.
+
+    Called by the clef-release adapter's `load()` with its OffloadLayout (None = the Qwen3.5 names).
 
     The standard path (no offload) is the model's own `load_release_model`, optionally with a quantization
     config. With CLEF_OFFLOAD=cpu the backbone is loaded with a per-module device map (embeddings and the
@@ -209,7 +223,7 @@ def load_model(mod: Any, path: Any, backend: Backend, dtype: Any, cfg: Any) -> t
         info.warn(caveat)
     if offload == "cpu":
         try:
-            return _load_offloaded(mod, path, backend, dtype, cfg, info, qc)
+            return _load_offloaded(mod, path, backend, dtype, cfg, info, qc, layout=layout)
         except (PreflightError, BackendError):
             raise
         except Exception as exc:
@@ -261,8 +275,21 @@ def _plan_budget_gb(backend: Backend, cfg: Any, qc: Any, info: LoadInfo) -> floa
     return budget
 
 
+def _attr(obj: Any, dotted: str) -> Any:
+    for part in dotted.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
 def _load_offloaded(
-    mod: Any, path: Any, backend: Backend, dtype: Any, cfg: Any, info: LoadInfo, qc: Any = None
+    mod: Any,
+    path: Any,
+    backend: Backend,
+    dtype: Any,
+    cfg: Any,
+    info: LoadInfo,
+    qc: Any = None,
+    layout: OffloadLayout | None = None,
 ):
     import json
 
@@ -271,9 +298,10 @@ def _load_offloaded(
 
     from . import offload as off
 
+    layout = layout or off.DEFAULT_LAYOUT
     root = Path(path)
     sizes = off.checkpoint_sizes(root)
-    layer_bytes, embed_bytes, other_bytes, _ = off.split_sizes(sizes, _bytes_scale(dtype))
+    layer_bytes, embed_bytes, other_bytes, _ = off.split_sizes(sizes, _bytes_scale(dtype), layout=layout)
     head_bytes = int(_file_gb(root / "joint_head.safetensors") * 1024**3 * _bytes_scale(dtype))
     budget_gb = _plan_budget_gb(backend, cfg, qc, info)
     plan = off.plan_layers(
@@ -295,17 +323,21 @@ def _load_offloaded(
     device = str(backend.device)
     extra = {"quantization_config": qc} if qc is not None else {}
     backbone = Qwen3_5ForConditionalGeneration.from_pretrained(
-        root, dtype=dtype, device_map=plan.device_map(device), **extra
+        root, dtype=dtype, device_map=plan.device_map(device, layout=layout), **extra
     )
     _strip_accelerate_hooks(backbone)
     backbone.config.use_cache = False
-    lm = backbone.model.language_model
-    lm.embed_tokens = off.HostEmbedding(lm.embed_tokens, backend.device)
-    backbone.lm_head = off.HostOutputEmbedding(backbone.lm_head, backend.device)
+    # the layout's checkpoint names are attribute paths on the backbone
+    embed_owner, _, embed_attr = layout.embed_key.rpartition(".")
+    lm = _attr(backbone, embed_owner)
+    setattr(lm, embed_attr, off.HostEmbedding(getattr(lm, embed_attr), backend.device))
+    head = _attr(backbone, layout.head_key)
+    setattr(backbone, layout.head_key, off.HostOutputEmbedding(head, backend.device))
     streamer = None
     if plan.streamed:
+        layers = _attr(backbone, layout.layers_prefix.rstrip("."))
         streamer = off.LayerStreamer(
-            list(lm.layers), plan.streamed, backend.host_copier(), lookahead=2, pin=backend.pin_host
+            list(layers), plan.streamed, backend.host_copier(), lookahead=2, pin=backend.pin_host
         )
         streamer.install()
         pin_err = getattr(backend, "pin_failure", lambda: None)()
@@ -365,6 +397,24 @@ def _strip_accelerate_hooks(model: Any) -> None:
 
 
 @dataclass
+class Prepared:
+    """Records checked and encoded ahead of `Engine.submit` (tokenize-ahead, D3 cache lookups)."""
+
+    records: list[Record]
+    keys: list[str | None]  # cache keys; None = not cacheable (filled by D3)
+    hits: dict[int, Result]  # index -> cached result (filled by D3)
+    encoded: list[Any]  # Encoded, None at hit positions
+
+    def slice(self, start: int, stop: int) -> Prepared:
+        """For bisection in decide_resilient: the same records [start, stop), hits re-indexed."""
+        hits = {i - start: r for i, r in self.hits.items() if start <= i < stop}
+        return Prepared(self.records[start:stop], self.keys[start:stop], hits, self.encoded[start:stop])
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+
+@dataclass
 class _Item:
     enc: Any
     questions: dict[str, Any]
@@ -390,12 +440,26 @@ def _resolve(item: _Item, result: Any = None, exc: BaseException | None = None) 
         item.loop.call_soon_threadsafe(_set)
 
 
+_KERNEL_PACKAGES = {"fla": "flash-linear-attention", "causal_conv1d": "causal-conv1d"}
+
+
 class Engine:
-    def __init__(self, cfg: Any, stats: Any, loader: Callable | None = None, backend: Backend | None = None):
+    def __init__(
+        self,
+        cfg: Any,
+        stats: Any,
+        loader: Callable | None = None,
+        backend: Backend | None = None,
+        model: DecisionModel | None = None,
+    ):
         self.cfg = cfg
         self.stats = stats
-        self._custom_loader = loader is not None
-        self._loader = loader or _default_loader
+        # loader: the old test / bench injection (loader(cfg) -> a joint_schema_model-like namespace),
+        # wrapped in ClefReleaseAdapter.from_module at load. model: an adapter instance. Both skip the
+        # release dir lookup.
+        self._loader = loader
+        self._injected_model = model
+        self._custom_loader = loader is not None or model is not None
         self._backend: Backend | None = backend
         self._injected_backend = backend is not None
         self._dtype: Any = None
@@ -407,6 +471,19 @@ class Engine:
         self.error: str | None = None
         self.load_seconds: float | None = None
         self.warmup_seconds: float | None = None
+        # The served model: resolved now (torch-free), loaded on the worker. An unknown CLEF_MODEL is a load
+        # error (status "error"), not a crash.
+        self._spec_error: str | None = None
+        if model is not None:
+            self.spec: ModelSpec = model.spec
+        else:
+            try:
+                self.spec = registry.resolve_spec(cfg)
+            except (UnknownModel, ValueError) as exc:
+                self._spec_error = str(exc)
+                requested = (getattr(cfg, "model", None) or "").partition("@")[0] or registry.DEFAULT_MODEL_ID
+                self.spec = ModelSpec(requested, "unknown", None, None, WEIGHTS_GB)
+        self.model: DecisionModel | None = None  # set on the worker thread once loaded
         # Two FIFO lanes guarded by one condition; _closed replaces the old shutdown sentinel and _drained
         # refuses late enqueues once the worker has failed the leftovers.
         self._lanes: dict[str, deque[_Item]] = {p: deque() for p in PRIORITIES}
@@ -417,12 +494,7 @@ class Engine:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._started = False
-        self._encode_lock = threading.Lock()
-        self._mod: Any = None
         self._load_info: LoadInfo | None = None
-        self._model: Any = None
-        self._processor: Any = None
-        self._pad_id = 0
         self._device = torch.device("cpu")
 
     # ------------------------------------------------------------------ lifecycle
@@ -441,43 +513,116 @@ class Engine:
         if self._thread is not None:
             self._thread.join(timeout)
 
+    # ------------------------------------------------------------------ model identity
+    def model_ref(self) -> str:
+        """`<id>@<revision>` (or `<id>@local`) of the served model, e.g. for jobs.model."""
+        return self.spec.ref
+
+    def check_model(self, requested: str | None) -> str:
+        """The served id when `requested` names it (id, id@<sha or a >= 7-char prefix>, the HF repo), else
+        UnknownModel (-> 404). None / "" mean the served model."""
+        spec = self.spec
+        if not requested:
+            return spec.id
+        if requested == spec.id or (spec.repo is not None and requested == spec.repo):
+            return spec.id
+        model_id, sep, rev = requested.partition("@")
+        rev = rev.lower()
+        if sep and model_id == spec.id and spec.revision and len(rev) >= 7 and spec.revision.startswith(rev):
+            return spec.id
+        raise UnknownModel(f"model {requested!r} is not served here (this server serves {spec.id!r})")
+
+    def capabilities(self) -> Capabilities:
+        if self.model is not None:
+            return self.model.capabilities
+        if self._injected_model is not None:
+            return self._injected_model.capabilities
+        cls = registry.adapters().get(self.spec.adapter)
+        return getattr(cls, "capabilities", None) or Capabilities()
+
+    def model_info(self) -> dict[str, Any]:
+        """/health `model`: the loaded adapter's info(), or the spec before (and after a failed) load."""
+        if self.model is not None:
+            out = dict(self.model.info())
+        else:
+            spec = self.spec
+            out = {"id": spec.id, "adapter": spec.adapter, "revision": spec.revision, "ref": spec.ref}
+            with contextlib.suppress(Exception):
+                out["capabilities"] = self.capabilities().to_json()
+        out["distribution"] = registry.adapter_origin(self.spec.adapter)
+        return out
+
     # ------------------------------------------------------------------ public API
-    async def decide(self, records: list[Record], priority: str = INTERACTIVE) -> list[Result]:
+    def _check_priority(self, priority: str) -> None:
         if priority not in PRIORITIES:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}, got {priority!r}")
-        if self.status not in ("ready", "warming") or self._stop.is_set():
+
+    def _check_ready(self) -> None:
+        if self.status not in ("ready", "warming") or self._stop.is_set() or self.model is None:
             raise EngineNotReady(self.error or f"engine is {self.status}")
+
+    async def prepare(self, records: list[Record], cache: bool = True) -> Prepared:
+        """Check the model and capabilities of every record, then encode them in threads (nothing is queued).
+
+        `cache`: the D3 result cache lookup (a no-op until it lands; False = `Cache-Control: no-cache`).
+        """
+        self._check_ready()
         if not records:
+            return Prepared([], [], {}, [])
+        model = self.model
+        checked: list[Record] = []
+        for r in records:
+            rec = {**r, "model": self.check_model(r.get("model"))}
+            model.validate(rec)
+            checked.append(rec)
+        encs = await asyncio.gather(*(asyncio.to_thread(self._encode, r) for r in checked))
+        self._check_ready()
+        return Prepared(checked, [None] * len(checked), {}, list(encs))
+
+    async def submit(self, prepared: Prepared, priority: str = INTERACTIVE) -> list[Result]:
+        """Enqueue the prepared misses in the `priority` lane, await them, merge the hits back in order."""
+        self._check_priority(priority)
+        self._check_ready()
+        n = len(prepared.records)
+        if not n:
             return []
         loop = asyncio.get_running_loop()
-        encs = await asyncio.gather(*(asyncio.to_thread(self._encode, r) for r in records))
-        if self.status not in ("ready", "warming") or self._stop.is_set():
-            raise EngineNotReady(self.error or f"engine is {self.status}")
         now = time.perf_counter()
-        items = [
-            _Item(
+        items: dict[int, _Item] = {}
+        for i in range(n):
+            if i in prepared.hits:
+                continue
+            enc = prepared.encoded[i]
+            items[i] = _Item(
                 enc=enc,
-                questions={str(k): v for k, v in r["questions"].items()},
-                model=r.get("model") or "clef-flash",
+                questions={str(k): v for k, v in prepared.records[i]["questions"].items()},
+                model=self.spec.id,
                 loop=loop,
                 future=loop.create_future(),
                 t_enq=now,
-                is_media=enc.media is not None,
-                length=len(enc.input_ids),
+                is_media=bool(enc.is_media),
+                length=int(enc.length),
             )
-            for r, enc in zip(records, encs, strict=True)
-        ]
-        with self._cv:
-            if self._drained:
-                raise EngineNotReady(self.error or "engine shut down")
-            self._lanes[priority].extend(items)
-            self._cv.notify()
-        self._report_depth()
-        results = await asyncio.gather(*(it.future for it in items), return_exceptions=True)
+        if items:
+            with self._cv:
+                if self._drained:
+                    raise EngineNotReady(self.error or "engine shut down")
+                self._lanes[priority].extend(items.values())
+                self._cv.notify()
+            self._report_depth()
+        results = await asyncio.gather(*(it.future for it in items.values()), return_exceptions=True)
         for res in results:
             if isinstance(res, BaseException):
                 raise res
-        return list(results)
+        computed = dict(zip(items, results, strict=True))
+        return [prepared.hits[i] if i in prepared.hits else computed[i] for i in range(n)]
+
+    async def decide(
+        self, records: list[Record], priority: str = INTERACTIVE, cache: bool = True
+    ) -> list[Result]:
+        """= submit(await prepare(records, cache), priority)."""
+        self._check_priority(priority)
+        return await self.submit(await self.prepare(records, cache=cache), priority)
 
     def info(self) -> dict:
         """Static facts + live memory. Fast (< 5 ms): telemetry is whatever the last sample() cached."""
@@ -514,7 +659,7 @@ class Engine:
                 if self._versions is None:
                     self._versions = b.versions()
                 versions = self._versions
-                fast_path = b.fast_path()
+                fast_path = self._fast_path(b)
             except Exception as exc:  # never let /health crash
                 log.warning("backend info failed: %s", exc)
         # Read the version from package metadata: importing transformers here (from /health) while the loader
@@ -538,6 +683,14 @@ class Engine:
             "versions": versions,
             "warnings": list(self._warnings),
         }
+
+    def _fast_path(self, b: Backend) -> dict[str, Any]:
+        """backend.fast_path() limited to the kernels the model can use (capabilities.optional_kernels)."""
+        fp = dict(b.fast_path())
+        kernels = self.capabilities().optional_kernels
+        out = {k: v for k, v in fp.items() if k in kernels}
+        out["expected"] = bool(fp.get("expected")) and bool(kernels)
+        return out
 
     def _memory_info(self) -> dict[str, Any]:
         """Memory mode in effect (offload, device cap, quant) and what sits on the host."""
@@ -596,18 +749,8 @@ class Engine:
 
     # ------------------------------------------------------------------ caller side
     def _encode(self, record: Record) -> Any:
-        try:
-            with self._encode_lock:  # HF tokenizers are not safe under concurrent use in all versions
-                return self._mod.encode_record(
-                    self._processor.tokenizer,
-                    record,
-                    max_length=self.cfg.max_tokens,
-                    processor=self._processor,
-                )
-        except ValueError as exc:
-            if "schema requires" in str(exc):
-                raise InputTooLarge(str(exc)) from exc
-            raise
+        """Any thread: the adapter encodes (and maps its own "too long" error to InputTooLarge)."""
+        return self.model.encode(record)
 
     def _report_depth(self) -> None:
         try:
@@ -652,11 +795,34 @@ class Engine:
                     # a final empty-queue check happens on the next loop turn
         self._drain_fail()
 
+    def _make_model(self) -> DecisionModel:
+        if self._injected_model is not None:
+            return self._injected_model
+        if self._loader is not None:
+            from .models.clef_release import ClefReleaseAdapter
+
+            return ClefReleaseAdapter.from_module(self._loader, self.spec, self.cfg)
+        return registry.create(self.cfg, self.spec)
+
+    def _kernel_warnings(self, b: Backend, kernels: tuple[str, ...]) -> None:
+        if not kernels:
+            return
+        fp = b.fast_path()
+        if b.name == "cuda" and not all(fp.get(k) for k in kernels):
+            names = " ".join(_KERNEL_PACKAGES.get(k, k) for k in kernels)
+            self._warnings.append(
+                f"fast path kernels missing (pip install {names}); the slow torch fallback is used"
+            )
+        elif b.name == "rocm" and "fla" in kernels and not fp.get("fla"):
+            self._warnings.append("flash-linear-attention is not installed; the slow torch fallback is used")
+
     def _load(self) -> bool:
-        """Detect backend -> dtype -> model path -> preflight -> quant config -> load. One-line errors."""
+        """Detect backend -> dtype -> adapter -> model path -> preflight -> adapter.load. One-line errors."""
         cfg = self.cfg
         t0 = time.perf_counter()
         try:
+            if self._spec_error:
+                raise UnknownModel(self._spec_error)
             b = self._backend or backend_mod.detect(cfg.device)
             self._backend = b
             with contextlib.suppress(Exception):
@@ -667,23 +833,10 @@ class Engine:
                 self._warnings.append(warn)
                 log.warning("%s", warn)
             self._device = b.device
-            if self._custom_loader:
-                self._mod = self._loader(cfg)
-                path = cfg.model_path
-            else:
-                path = resolve_model_path(cfg)
-                self._mod = _import_model_module(path)
+            adapter = self._make_model()
+            path = adapter.resolve()
             self._model_path = None if path is None else str(path)
-            fp = b.fast_path()
-            if b.name == "cuda" and not (fp["fla"] and fp["causal_conv1d"]):
-                self._warnings.append(
-                    "fast path kernels missing (pip install flash-linear-attention causal-conv1d); "
-                    "the slow torch fallback is used"
-                )
-            elif b.name == "rocm" and not fp["fla"]:
-                self._warnings.append(
-                    "flash-linear-attention is not installed; the slow torch fallback is used"
-                )
+            self._kernel_warnings(b, adapter.capabilities.optional_kernels)
             # Preflight needs real memory numbers; with an injected loader (tests) only run it if the backend
             # is injected too, so unit tests never depend on the host's RAM.
             if cfg.preflight and (not self._custom_loader or self._injected_backend):
@@ -692,12 +845,12 @@ class Engine:
                         b,
                         dtype,
                         cfg.quant,
-                        _weights_gb(path) if path else WEIGHTS_GB,
+                        adapter.weights_gb(path) if path else self.spec.weights_gb,
                         cap_gb=getattr(cfg, "max_device_memory_gb", 0.0),
                         offload=getattr(cfg, "offload", "none"),
                     )
                 )
-            model, processor, load_info = load_model(self._mod, path, b, dtype, cfg)
+            load_info = adapter.load(b, dtype)
             self._load_info = load_info
             for note in load_info.notes:
                 log.info("%s", note)
@@ -705,11 +858,8 @@ class Engine:
                 log.warning("%s", warning)
                 if warning not in self._warnings:
                     self._warnings.append(warning)
-            model.eval()
-            self._model, self._processor = model, processor
-            pad = getattr(processor.tokenizer, "pad_token_id", None)
-            self._pad_id = 0 if pad is None else int(pad)
-        except (BackendError, PreflightError, ModelNotFound) as exc:
+            self.model = adapter
+        except (BackendError, PreflightError, ModelNotFound, UnknownModel) as exc:
             self._fail(" ".join(str(exc).split()))
             return False
         except Exception as exc:
@@ -718,7 +868,10 @@ class Engine:
             return False
         self.load_seconds = round(time.perf_counter() - t0, 2)
         log.info(
-            "model loaded in %.1fs on %s/%s (%s)",
+            "model %s (adapter %s from %s) loaded in %.1fs on %s/%s (%s)",
+            self.spec.ref,
+            self.spec.adapter,
+            registry.adapter_origin(self.spec.adapter) or "?",
             self.load_seconds,
             b.name,
             b.device,
@@ -789,16 +942,14 @@ class Engine:
 
     def _run_group(self, group: list[_Item]) -> None:
         t_start = time.perf_counter()
+        model = self.model
         try:
             logits, ms, n_tokens, padded = self._forward([it.enc for it in group], media=group[0].is_media)
             for it, rec_logits in zip(group, logits, strict=True):
                 try:
                     answers = {}
                     for q, ql in zip(it.enc.questions, rec_logits, strict=True):
-                        probs = dict(zip(q.option_ids, ql.float().softmax(-1).tolist(), strict=True))
-                        answers[q.question_id] = self._mod.systemone_answer(
-                            it.questions[q.question_id], probs
-                        )
+                        answers[q.question_id] = model.answer(q, it.questions[q.question_id], ql)
                     _resolve(
                         it,
                         result={
@@ -848,55 +999,32 @@ class Engine:
         return -(-length // multiple) * multiple
 
     def _forward(self, encs: list[Any], media: bool) -> tuple[list, float, int, int]:
-        """One batched forward. Returns (per-record logits, ms, real tokens, padded tokens)."""
-        batch = self._mod.collate_records(encs, self._pad_id, torch.device("cpu"))
-        length = batch["input_ids"].shape[1]
-        if not media:
-            batch = pad_batch_right(batch, self.padded_length(length), self._pad_id)
+        """One batched forward: collate -> to_device -> forward. Returns (per-record logits, ms, real tokens,
+        padded tokens). Text batches are right-padded per the engine's policy; media records are not."""
+        model = self.model
+        pad_to = None if media else self.padded_length(max(e.length for e in encs))
+        batch = model.collate(encs, pad_to)
         padded_len = batch["input_ids"].shape[1]
-        batch = self._to_device(batch)
+        batch = model.to_device(batch, self._device)
         t0 = time.perf_counter()
         with torch.inference_mode():
-            logits = self._model(batch)
+            logits = model.forward(batch)
             self._backend.synchronize()
         ms = (time.perf_counter() - t0) * 1000
-        return logits, ms, sum(len(e.input_ids) for e in encs), padded_len * len(encs)
-
-    def _to_device(self, batch: dict[str, Any]) -> dict[str, Any]:
-        dev = self._device
-        out = dict(batch)
-        for key in ("input_ids", "attention_mask"):
-            out[key] = batch[key].to(dev, non_blocking=True)
-        out["media"] = {k: v.to(dev, non_blocking=True) for k, v in (batch.get("media") or {}).items()}
-        return out
+        return logits, ms, sum(e.length for e in encs), padded_len * len(encs)
 
     # ------------------------------------------------------------------ warmup
-    def _warm_record(self, repeats: int) -> Record:
-        return {
-            "model": "clef-flash",
-            "id": "warmup",
-            "state": _WARMUP_SENTENCE * repeats,
-            "questions": {
-                "q": {"type": "choice", "instructions": "warmup", "criteria": {"a": "first", "b": "second"}}
-            },
-        }
-
     def _warm_encode(self, repeats: int) -> Any:
-        with self._encode_lock:
-            return self._mod.encode_record(
-                self._processor.tokenizer,
-                self._warm_record(repeats),
-                max_length=self.cfg.max_tokens,
-                processor=self._processor,
-            )
+        model = self.model
+        return model.encode(model.warm_record(repeats))
 
     def _warmup_steps(self):
         """Generator: each next() runs one warmup forward (so queued requests can interleave)."""
         buckets = [b for b in sorted(self.cfg.buckets) if b <= 1024]
         sizes = sorted({1, max(1, self.cfg.max_microbatch)})
         try:
-            base = len(self._warm_encode(0).input_ids)
-            per = max(1, len(self._warm_encode(1).input_ids) - base)
+            base = self._warm_encode(0).length
+            per = max(1, self._warm_encode(1).length - base)
         except Exception:
             log.exception("warmup disabled: could not synthesize record")
             return
@@ -909,13 +1037,13 @@ class Engine:
             repeats = (b - base) // per
             try:
                 enc = self._warm_encode(repeats)
-                while len(enc.input_ids) > b and repeats > 0:
+                while enc.length > b and repeats > 0:
                     repeats -= 1
                     enc = self._warm_encode(repeats)
             except Exception:
                 log.exception("warmup encode failed for bucket %d", b)
                 continue
-            real = bucket_for(len(enc.input_ids), self.cfg.buckets)
+            real = bucket_for(enc.length, self.cfg.buckets)
             if real in seen:
                 continue
             seen.add(real)
