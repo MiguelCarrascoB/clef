@@ -410,4 +410,14 @@ button.lg-item { cursor: pointer; } button.lg-item:hover { color: var(--text); }
 .secret-key { overflow-wrap: anywhere; padding: 6px 8px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: var(--radius-sm); user-select: all; }
 .danger-card { border-color: var(--bad); }
 .audit-detail { max-width: 360px; overflow-wrap: anywhere; }
+/* E2: Review screen */
+.review-page .card-head h2 { margin: 0; }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.wrap { flex-wrap: wrap; align-items: flex-end; }
+.review-input { max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 6px 8px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: var(--radius-sm); margin: 6px 0; }
+.proposal-labels { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.proposal-labels .input { width: 100%; margin-top: 4px; }
+.accept { display: flex; flex-direction: column; gap: 3px; max-width: 420px; }
+.router-card .chips { margin: 4px 0; }
+.input.sm { padding: 3px 6px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
