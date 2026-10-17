@@ -171,6 +171,41 @@ class AsyncClefClient:
     async def delete_classifier(self, name: str) -> dict[str, Any]:
         return await self._request("DELETE", f"/v1/classifiers/{quote(name, safe='')}")
 
+    # -- routers and the review queue (docs/router.md) --
+    async def put_router(self, name: str, **settings: Any) -> dict[str, Any]:
+        """Create or change a router (seeds, instructions, domain_hint, mode, max_labels, gate)."""
+        return await self._request("PUT", f"/v1/routers/{quote(name, safe='')}", json=settings)
+
+    async def get_router(self, name: str) -> dict[str, Any]:
+        return await self._request("GET", f"/v1/routers/{quote(name, safe='')}")
+
+    async def list_routers(self) -> list[dict[str, Any]]:
+        return (await self._request("GET", "/v1/routers")).get("routers", [])
+
+    async def delete_router(self, name: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/v1/routers/{quote(name, safe='')}")
+
+    async def route(self, router: str, input: Any) -> dict[str, Any]:
+        """Route one input; the result has ``reason`` and ``review_id`` besides the classify fields."""
+        return await self._request(
+            "POST", f"/v1/routers/{quote(router, safe='')}/route", json={"input": input}
+        )
+
+    async def propose(self, router: str) -> dict[str, Any]:
+        return await self._request("POST", f"/v1/routers/{quote(router, safe='')}/propose")
+
+    async def list_review(self, **filters: Any) -> dict[str, Any]:
+        """``kind``, ``state``, ``router``, ``classifier``, ``limit``, ``offset``."""
+        return await self._request(
+            "GET", "/v1/review", params={k: v for k, v in filters.items() if v is not None}
+        )
+
+    async def resolve_review(self, review_id: str, action: str, **body: Any) -> dict[str, Any]:
+        """action: label (label=), discard, approve (labels=[{name, description}] optional), reject."""
+        return await self._request(
+            "POST", f"/v1/review/{quote(review_id, safe='')}/resolve", json={"action": action, **body}
+        )
+
     # -- async jobs (large batches; see docs/jobs.md) --
     async def submit_job(
         self,

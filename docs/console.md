@@ -10,6 +10,7 @@ the server and makes no CDN calls at runtime.
 | **Batch** | per-question charts, CSV / JSON in |
 | **Evaluate** | a labelled dataset in, accuracy, confusion matrix and calibration out |
 | **Ops** | live KPIs and time-series charts (latency, throughput, memory, queue) |
+| **Review** | router proposals and low-confidence items: label, discard, approve, reject; routers and their versions (needs the `classifiers` scope; see [Router and Review](router.md)) |
 
 ![Clef Console tour](screenshots/console.gif)
 

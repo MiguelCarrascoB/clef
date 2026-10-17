@@ -212,6 +212,14 @@ export class ClefClient {
   saveClassifier(name: string, def?: ClassifierDefinition): Promise<Record<string, any>>;
   getClassifier(name: string): Promise<Record<string, any>>;
   deleteClassifier(name: string): Promise<{ deleted: string }>;
+  putRouter(name: string, settings?: Record<string, unknown>): Promise<Record<string, any>>;
+  getRouter(name: string): Promise<Record<string, any>>;
+  listRouters(): Promise<Record<string, any>[]>;
+  deleteRouter(name: string): Promise<{ deleted: string }>;
+  route(router: string, input: unknown): Promise<Record<string, any>>;
+  propose(router: string): Promise<Record<string, any>>;
+  listReview(filters?: Record<string, string | number | undefined>): Promise<{ items: Record<string, any>[]; total: number }>;
+  resolveReview(id: string, action: 'label' | 'discard' | 'approve' | 'reject', body?: Record<string, unknown>): Promise<Record<string, any>>;
 }
 
 export function parseClassification(body: Record<string, any>, requestId?: string | null): Classification;

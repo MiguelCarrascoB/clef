@@ -8,6 +8,7 @@ import { Batch } from './screens/batch.js';
 import { Evaluate } from './screens/evaluate.js';
 import { Ops } from './screens/ops.js';
 import { Keys } from './screens/keys.js';
+import { Review } from './screens/review.js';
 
 const TABS = [
   { id: 'playground', label: 'Playground', view: Playground },
@@ -19,7 +20,13 @@ const TABS = [
 
 // Shown only to admins (S.whoami from /v1/whoami); the server enforces it anyway.
 const KEYS_TAB = { id: 'keys', label: 'Keys', view: Keys };
-const tabsFor = (who) => (who && who.auth && who.scopes.includes('admin') ? [...TABS, KEYS_TAB] : TABS);
+// Review (E2) needs the `classifiers` scope (admin has it); with auth off everyone has it.
+const REVIEW_TAB = { id: 'review', label: 'Review', view: Review };
+const tabsFor = (who) => {
+  const scopes = who && who.auth ? who.scopes : null;
+  const review = !scopes || scopes.includes('admin') || scopes.includes('classifiers');
+  return [...TABS, ...(review ? [REVIEW_TAB] : []), ...(scopes && scopes.includes('admin') ? [KEYS_TAB] : [])];
+};
 
 function App() {
   const { tab, history, whoami } = useStore();

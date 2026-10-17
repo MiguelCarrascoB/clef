@@ -112,3 +112,29 @@ def test_image_helpers(tmp_path):
     assert video_to_data_url(v) == "data:video/mp4;base64,AAE="
     with pytest.raises(TypeError):
         image_to_data_url(123)
+
+
+def test_router_and_review_helpers_hit_the_right_routes():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"routers": [{"name": "t"}], "items": [], "total": 0})
+
+    client = ClefClient("http://x", transport=httpx.MockTransport(handler))
+    assert client.list_routers() == [{"name": "t"}]
+    client.put_router("t", mode="auto", seeds={"a": "b"})
+    client.route("t", "hello")
+    client.propose("t")
+    client.list_review(state="open", router="t", kind=None)
+    client.resolve_review("rev_1", "label", label="a")
+    got = [(r.method, r.url.path, r.url.query.decode()) for r in seen]
+    assert got == [
+        ("GET", "/v1/routers", ""),
+        ("PUT", "/v1/routers/t", ""),
+        ("POST", "/v1/routers/t/route", ""),
+        ("POST", "/v1/routers/t/propose", ""),
+        ("GET", "/v1/review", "state=open&router=t"),
+        ("POST", "/v1/review/rev_1/resolve", ""),
+    ]
+    assert json.loads(seen[5].content) == {"action": "label", "label": "a"}

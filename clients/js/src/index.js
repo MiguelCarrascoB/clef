@@ -387,6 +387,32 @@ export class ClefClient {
   deleteClassifier(name) {
     return this._request('DELETE', `/v1/classifiers/${enc(name)}`);
   }
+  // --- routers and the review queue (docs/router.md) ---
+  putRouter(name, settings = {}) {
+    return this._request('PUT', `/v1/routers/${enc(name)}`, settings);
+  }
+  getRouter(name) {
+    return this._request('GET', `/v1/routers/${enc(name)}`);
+  }
+  async listRouters() {
+    return (await this._request('GET', '/v1/routers')).routers || [];
+  }
+  deleteRouter(name) {
+    return this._request('DELETE', `/v1/routers/${enc(name)}`);
+  }
+  route(router, input) {
+    return this._request('POST', `/v1/routers/${enc(router)}/route`, { input });
+  }
+  propose(router) {
+    return this._request('POST', `/v1/routers/${enc(router)}/propose`);
+  }
+  listReview(filters = {}) {
+    const qs = Object.entries(filters).filter(([, v]) => v != null && v !== '').map(([k, v]) => `${enc(k)}=${enc(v)}`).join('&');
+    return this._request('GET', `/v1/review${qs ? `?${qs}` : ''}`);
+  }
+  resolveReview(id, action, body = {}) {
+    return this._request('POST', `/v1/review/${enc(id)}/resolve`, { action, ...body });
+  }
 }
 
 export class Classifier {

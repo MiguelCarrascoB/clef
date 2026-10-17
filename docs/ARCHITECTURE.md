@@ -40,7 +40,7 @@ tests. Change it first, then the code.
 | `clef_server/keystore.py` (planned, v3.2) | principals, hashed keys, key cache, quotas (`Quotas`), on `db.py`; shared by the server and `clef keys` |
 | `clef_server/admin.py` (planned, v3.2) | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
 | `clef_server/cache.py` | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
-| `clef_server/router.py`, `clef_server/llm.py` (planned, v3.2) | feature module: routers, label-set versions, the Review queue (`/v1/routers*`, `/v1/review*`); the OpenAI-compatible LLM client |
+| `clef_server/router.py`, `clef_server/review.py`, `clef_server/llm.py` | feature module: routers, label-set versions, the Review routes (`/v1/routers*`, `/v1/review*`); `review.py` is the store of the `review` and `llm_calls` tables; the OpenAI-compatible LLM client |
 | `clef_server/batches.py` (planned, v3.2) | feature module: OpenAI `/v1/files*` and `/v1/batches*` on the `batch` job kind |
 
 Invariants (unchanged from v2):
@@ -98,18 +98,18 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_JOB_ACTIVE` (planned, v3.2) | `4` | jobs that may be `running` (taking turns) at once; `>= 1` |
 | `CLEF_JOB_AGING_S` (planned, v3.2) | `3600` | a waiting job's class rises one level per this many seconds without a turn (never to `urgent`); `0` = no aging |
 | `CLEF_JOB_SORT_WINDOW` (planned, v3.2) | `0` | F2: length-sort jobs in windows of N items (256-1024); `0` = off. Default flips only if the benchmark gain is over 10% |
-| `GEMINI_API_KEY` (planned, v3.2) | unset | the router's LLM key. Unset (and no `CLEF_LLM_API_KEY`) = router LLM off. Never logged; `clef doctor` only says whether it is set |
-| `CLEF_LLM_API_KEY` (planned, v3.2) | unset | key for another OpenAI-compatible provider; wins over `GEMINI_API_KEY` |
-| `CLEF_LLM_BASE_URL` (planned, v3.2) | `https://generativelanguage.googleapis.com/v1beta/openai/` | OpenAI-compatible endpoint (ollama, LM Studio, vLLM, OpenAI work the same) |
-| `CLEF_LLM_MODEL` (planned, v3.2) | `gemini-3.8-flash` | model id sent to the endpoint |
-| `CLEF_LLM_TIMEOUT_S` (planned, v3.2) | `60` | total timeout of one LLM call (2 retries on 429 / 5xx) |
-| `CLEF_ROUTER_BATCH` (planned, v3.2) | `20` | buffered items per proposal call |
-| `CLEF_ROUTER_COLD_BATCH` (planned, v3.2) | `20` | buffered items before the cold-start (bootstrap) call |
-| `CLEF_ROUTER_FLUSH_S` (planned, v3.2) | `600` | flush a non-empty buffer after this long even if it is below the batch size |
-| `CLEF_ROUTER_MODE` (planned, v3.2) | `review` | default mode of new routers: `review` or `auto` |
-| `CLEF_ROUTER_MAX_NEW_PER_DAY` (planned, v3.2) | `10` | auto mode: labels a router may add per UTC day |
-| `CLEF_ROUTER_MAX_INPUT_CHARS` (planned, v3.2) | `500` | each buffered input is truncated to this before it is sent to the LLM |
-| `CLEF_REVIEW_TTL_DAYS` (planned, v3.2) | `30` | review items' input text is deleted this long after creation (and at once when resolved) |
+| `GEMINI_API_KEY` | unset | the router's LLM key. Unset (and no `CLEF_LLM_API_KEY`) = router LLM off. Never logged; `clef doctor` only says whether it is set |
+| `CLEF_LLM_API_KEY` | unset | key for another OpenAI-compatible provider; wins over `GEMINI_API_KEY` |
+| `CLEF_LLM_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | OpenAI-compatible endpoint (ollama, LM Studio, vLLM, OpenAI work the same) |
+| `CLEF_LLM_MODEL` | `gemini-3.8-flash` | model id sent to the endpoint |
+| `CLEF_LLM_TIMEOUT_S` | `60` | total timeout of one LLM call (2 retries on 429 / 5xx) |
+| `CLEF_ROUTER_BATCH` | `20` | buffered items per proposal call |
+| `CLEF_ROUTER_COLD_BATCH` | `20` | buffered items before the cold-start (bootstrap) call |
+| `CLEF_ROUTER_FLUSH_S` | `600` | flush a non-empty buffer after this long even if it is below the batch size |
+| `CLEF_ROUTER_MODE` | `review` | default mode of new routers: `review` or `auto` |
+| `CLEF_ROUTER_MAX_NEW_PER_DAY` | `10` | auto mode: labels a router may add per UTC day |
+| `CLEF_ROUTER_MAX_INPUT_CHARS` | `500` | each buffered input is truncated to this before it is sent to the LLM |
+| `CLEF_REVIEW_TTL_DAYS` | `30` | review items' input text is deleted this long after creation (and at once when resolved) |
 | `CLEF_MAX_FILE_MB` (planned, v3.2) | `200` | body limit for `POST /v1/files` only (everything else keeps `CLEF_MAX_BODY_MB`) |
 | `CLEF_MAX_BATCH_LINES` (planned, v3.2) | `50000` | lines per batch input file; the effective cap is `min(this, CLEF_MAX_JOB_ITEMS)` |
 | `CLEF_FILE_TTL_HOURS` (planned, v3.2) | `720` | uploaded files without `expires_after` are purged this long after upload |
@@ -334,7 +334,7 @@ appears in `openapi.json`.
 | `GET /v1/stats`, `/v1/stats/timeseries`, `/v1/log`, `/v1/events` | observability (console) | below |
 | `GET /v1/classifiers/{name}/versions[/{v}]` | classifier history | Storage |
 | `GET /v1/whoami`, `/v1/admin/keys*`, `GET /v1/admin/audit` (planned, v3.2) | principals, keys, quotas, audit | Keys and principals |
-| `/v1/routers*`, `/v1/review*` (planned, v3.2) | self-evolving router, human review queue | Review queue and router |
+| `/v1/routers*`, `/v1/review*` | self-evolving router, human review queue | Review queue and router |
 | `/v1/files*`, `/v1/batches*` (planned, v3.2) | OpenAI Files + Batch API | OpenAI Files and Batches |
 
 ### Auth, rate limit, CORS (`security.py`)
@@ -652,7 +652,7 @@ clef version
 ## Console (`static/`)
 
 Zero-build Preact + htm; one vendored charting library (`static/vendor/uPlot.*`, MIT) for time series, everything
-else hand-written SVG. No runtime CDN calls. Screens: Playground (SystemOne + Classify modes), History, Batch, Evaluate (labelled dataset -> `/v1/classify/batch`
+else hand-written SVG. No runtime CDN calls. Screens: Playground (SystemOne + Classify modes), History, Batch, Review (routers and the review queue; `classifiers` scope), Evaluate (labelled dataset -> `/v1/classify/batch`
 in chunks -> `/v1/evaluate/metrics`; confusion heatmap, reliability diagram, coverage curve, mistakes, export), Ops.
 It consumes `/health`, `/v1/stats`, `/v1/stats/timeseries`, `/v1/events?step_s=` (read with `fetch()` and the
 `X-API-Key` header, not `EventSource`, so the key never goes in the URL), `/v1/log`, `/v1/systemone`,
@@ -1424,7 +1424,7 @@ Env: `CLEF_CACHE_SIZE` (Configuration). Tables: none. Routes: none (header only)
 Invariants: a cache entry is only ever written from a successful forward of the same process; media records never
 hit the cache; the key never contains secrets or the API key.
 
-## Review queue and router (planned, v3.2)
+## Review queue and router
 
 Scope (D7, D8, D15, D17, D19): a **router** is its own resource that grows the label set of one single-label saved
 classifier. It runs in review mode (default) or auto mode, only **adds** labels (grow-only; no merge, split, rename
@@ -1600,6 +1600,36 @@ an "external LLM: <host>" badge, calls and tokens today).
 Invariants: input text is stored only in `review.input` and only until resolved / TTL (D17); nothing leaves the
 machine unless an LLM key is set; the router never edits a classifier except by appending a version; single-label
 only (D8).
+
+As built (E2; additions and deviations, nothing above changed in meaning):
+- Modules: besides `router.py` and `llm.py`, `review.py` holds `ReviewStore` (all SQL of `review` and `llm_calls`);
+  `router.py` holds `RouterStore` (`routers`, `router_label_sets`), `RouterService` and the routes. No migration:
+  everything was created in `0002`.
+- `LLMClient` also exposes `base_url` and `model`. The response schema has no `maxItems`: the number of new
+  labels (<= 3, <= 8 for the starter set, <= capacity), names, word limits and index bounds are enforced in code, and
+  a violating proposal is dropped, not the call. Absent values are `""` (strict-schema friendly), not null.
+  `client_from_config` is called once in `router(ctx)` and stored in `ctx.extra["llm_client"]`; tests replace it.
+  `ctx.extra["review_capture"]` is the hook the saved-classifier routes in `main.py` call.
+- `config` also holds `CLEF_ROUTER_MODE`. `PUT /v1/routers/{name}` takes `seeds` only on a new or cold router (400
+  otherwise: labels are only added). `max_labels` 2..63; capacity = `min(max_labels, CLEF_MAX_LABELS - 1)`.
+- Router response gains `classifier_version` and `llm: {"enabled", "host", "model", "calls_today",
+  "input_tokens_today", "output_tokens_today", "errors_today"}` (the console badge). `POST .../propose` runs the LLM
+  call and the re-check before it answers 202 `{"router", "items", "llm_call_id", "proposals", "queued",
+  "activated"}`; 502 when the LLM call failed (recorded in `llm_calls`), 400 at the label cap or with fewer than 2
+  buffered items. After a failed call the background loop skips that router for 5 minutes.
+- Review rows: items whose text is part of an open proposal are `open` (not `buffered`) until the proposal is
+  resolved. Proposals the re-check refuses are stored with `state="failed"` and the acceptance numbers. `reroutes`
+  counts every check an unplaced item has been through (a propose call that did not use it, a failed or rejected
+  proposal, a re-route after publishing); at 2 the item is `permanent_other`. Items the LLM lists in `covered_by` or
+  `unclear_indices` become `open` with `prediction.llm_hint`. Proposal `label` is a JSON list of the accepted names.
+- Background loop (every 15 s): flush due routers (batch full, or oldest item older than `CLEF_ROUTER_FLUSH_S` with
+  >= 2 items, >= 5 for a cold start) and purge once an hour. A full batch also starts a flush right after the route
+  call that completed it. The starter set of a cold router is exempt from `CLEF_ROUTER_MAX_NEW_PER_DAY`; its pruning
+  keeps the labels that >= 2 buffered items land on and needs half of the items covered.
+- Human approval of an edited subset is not re-checked (a person decided); descriptions are 1-40 words there.
+- Scopes: as in Keys. Routers and review rows are owner-scoped (other owners get 404; PUT on another's router 403).
+- `ClassifierDef.review_threshold` is stored only when set. `clef doctor` reports whether the LLM is on.
+- Not built: tuning of the default thresholds on `tickets_labelled.csv` (needs the model; defaults are the contract's).
 
 ## Job scheduler (planned, v3.2)
 
