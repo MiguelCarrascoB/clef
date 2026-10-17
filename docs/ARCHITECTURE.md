@@ -1161,8 +1161,10 @@ CREATE TABLE api_usage (
     PRIMARY KEY (principal, day)
 );
 ```
-Every write to `api_principals` / `api_keys` bumps `clef_meta.keys_gen` in the same transaction. Key actions are
-written to `audit_log` (Storage) in the same transaction.
+Every write to `api_principals` / `api_keys` bumps `clef_meta.keys_gen` in the same transaction, except the
+`last_used_at` flush (it would reload every cache every 10 s under traffic). Key actions are
+written to `audit_log` (Storage) in the same transaction. CORS (`security.install_cors`) gains `PATCH` in
+`allow_methods` and `X-Quota-Limit`, `X-Quota-Remaining` in `expose_headers`.
 
 Scopes: `classify`, `jobs`, `classifiers`, `ops`, `admin`, `urgent`. `admin` implies all the others.
 
@@ -1218,8 +1220,10 @@ class QuotaExceeded(Exception):
 
 class Quotas:                            # keystore.py; in-memory and authoritative (one server per DB)
     def reserve(self, principal: Principal | None, n: int) -> Reservation | None
-        # None for env principals / auth off / no quota. Raises QuotaExceeded when used_today + n > daily_quota.
-        # Records the reservation on today's UTC row at once.
+        # None for env principals / auth off. A DB principal without a quota still gets a Reservation: usage is
+        # counted (Keys tab, used_today) but never refused. Raises QuotaExceeded when daily_quota is set and
+        # used_today + n > daily_quota. Records the reservation on today's UTC row at once.
+    def remaining(self, principal: Principal | None) -> tuple[int, int] | None   # (limit, left); None = no quota
     def refund(self, reservation: Reservation, n: int) -> None   # n <= reservation.n; same day row
     def used(self, name: str, day: str | None = None) -> int
     def reject(self, name: str) -> None                          # api_usage.rejected += 1
@@ -1234,8 +1238,11 @@ class Reservation:
 Request path: `require_key` sets `request.state.principal` (or `None` with auth off) and keeps
 `request.state.key_name = principal.name` (log, `by_key`, job owner, rate-limit identity unchanged). The rate
 limiter uses `principal.rate_limit or CLEF_RATE_LIMIT`. `ctx.infer` calls `ctx.quotas.reserve(principal, len(reqs))`
-before inference and refunds the whole reservation when the request ends in a 5xx. Cache hits do NOT count: the
-reservation is settled after the cache lookup and only computed records are charged (hits cost no GPU time). Every quota'd response carries `X-Quota-Limit` and `X-Quota-Remaining`. Over quota:
+before inference and refunds the whole reservation when the request ends in an error (nothing was computed for a
+4xx raised before the engine either; a partly computed failure is rare enough to ignore). Cache hits do NOT count:
+the reservation is settled after the cache lookup (`ctx.prepare`) and only computed records are charged (hits
+cost no GPU time). Every response of a quota'd principal to a route that reserves carries `X-Quota-Limit` and
+`X-Quota-Remaining` (also on the 429; CORS exposes them). Over quota:
 429 `daily quota exceeded (N records/day)` + `Retry-After` (OpenAI shape `insufficient_quota`). Jobs reserve at
 submit (Job scheduler).
 
@@ -1691,7 +1698,7 @@ existing tests a contract change forces. Every workstream may append to `CHANGEL
 | --- | --- | --- |
 | C1 DB | `db.py`, `dbschema.py`, `migrations/**` | `jobs.py` (store port, `claim_next`, `jobs.model`, payload `model` default + submit check, `classifier_version`), `classifiers.py`, `classify.py` (`version` on `ClassifierRunRequest` / `ClassifierBatchRequest` only), `evaluation.py` (`version` and the server-set `classifier_version` next to `classifier` on `EvaluateRequest`, its `ctx.store.get` lookup, and the `classifier_version` line in `snapshot_job`), `main.py` (create_app: `open_database`, store wiring, `AppContext(...)` db/model fields; classifier routes; `/health` `db`; lifespan close), `appctx.py` (`db`, `model_ref`, `check_model`), `paths.py` (`database_path`, `jobs_db` kept for the legacy rename; the rename and its `PRAGMA` live in `db.py`), `config.py` (`CLEF_DATABASE_*`), `cli.py` (`db`, `backup`, `classifiers export`), `doctor.py` (database check), `pyproject.toml` (sqlalchemy, alembic, `postgres` extra), `docker-compose.yml` (comment), `docs/jobs.md`, `SECURITY.md` |
 | C2 models | `models/__init__.py`, `models/base.py`, `models/registry.py`, `models/clef_release.py` | `engine.py`, `offload.py`, `backend.py` (TunableOp path per model, `fast_path` from capabilities), `paths.py` (`resolve_model_path(spec)`, `WEIGHTS_GB`), `config.py` (`CLEF_MODEL`, aliases), `schemas.py`, `classify.py`, `evaluation.py` (`model`), `compat_openai.py`, `compat_hf.py`, `main.py` (`infer` / `decide` / `prepare` region, `Cache-Control` read, `map_exception` UnknownModel, `/health` `model`, OpenAPI title, `/schema-example`), `appctx.py` (`prepare`, `decide_prepared`), `doctor.py` (model files from the adapter), `cli.py` (`download --model`, `models`), `pyproject.toml` (entry points), `clef_client/*`, `clients/js/*`, `static/screens/{playground,batch}.js`, `static/util.js`, `bench/parity.py` |
-| D1 keys | `keystore.py`, `admin.py`, `static/screens/keys.js` | `security.py`, `main.py` (auth / rate-limit region, `ctx.scope` on core routes, quota in `infer`, `FEATURES` += `admin`, `AppContext(...)` D1 fields, 403 in `ERRORS`), `appctx.py`, `jobs.py` (scopes, admin view, `auth_enabled`, audit calls), `compat_openai.py`, `compat_hf.py`, `compat_errors.py` (403), `evaluation.py` (scopes), `cli.py` (`keys`), `config.py` (none expected), `static/app.js`, `static/api.js`, `static/components/topbar.js`, `docs/remote-access.md`, `SECURITY.md` |
+| D1 keys | `keystore.py`, `admin.py`, `static/screens/keys.js` | `security.py`, `main.py` (auth / rate-limit region, `ctx.scope` on core routes, quota in `infer`, `FEATURES` += `admin`, `AppContext(...)` D1 fields, 403 in `ERRORS`), `appctx.py`, `jobs.py` (scopes, admin view, `auth_enabled`, audit calls, quota reserve at submit and refund when a job ends: `JobStore.create(quota_day, quota_reserved)`, `JobStore.settle_quota`), `compat_openai.py`, `compat_hf.py`, `compat_errors.py` (403), `evaluation.py` (scopes), `cli.py` (`keys`), `config.py` (none expected), `static/app.js`, `static/api.js`, `static/components/topbar.js`, `docs/remote-access.md`, `SECURITY.md` |
 | D2 perf | `bench/` scripts as needed | `models/clef_release.py` (forward, head), `backend.py` (`prepare_environment`), `config.py` (`CLEF_MASK_FREE`), `docs/performance.md`, `docs/hardware-results.md` |
 | D3 cache | `cache.py` | `engine.py` (`prepare` / `submit` cache calls, `cache_stats`), `stats.py` (`cache` block), `config.py` (`CLEF_CACHE_SIZE`) |
 | E1 scheduler | | `jobs.py`, `evaluation.py` (`job.decide`), `config.py` (`CLEF_JOB_*`), `pyproject.toml` (`tzdata`), `clef_client/*`, `clients/js/*` (job fields), `static/screens/batch.js` (job fields, optional), `docs/jobs.md` |
