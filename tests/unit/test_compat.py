@@ -16,7 +16,17 @@ from typing import Any
 import pytest
 
 from clef_server import compat_schema as cs
-from tests.unit.test_api import make, png_url
+from clef_server.engine import Engine
+from clef_server.models.registry import catalog
+from tests.unit.test_api import FakeEngine, make, png_url
+
+
+class ServingEngine(FakeEngine):
+    """FakeEngine that serves clef-flash only, with the real Engine.check_model (unknown ids are 404)."""
+
+    spec = catalog()["clef-flash"]
+    check_model = Engine.check_model
+
 
 TEAM = {"type": "string", "enum": ["billing", "technical", "account"], "description": "Who handles it?"}
 SCHEMA = {
@@ -47,7 +57,7 @@ def chat(**kw: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def api():
-    client, eng, app = make()
+    client, eng, app = make(ServingEngine())
     with client:
         yield client, eng, app
 
@@ -155,10 +165,17 @@ def test_chat_ignores_generation_params(api):
 
 
 def test_chat_reports_ignored_fields(api):
-    client, _, _ = api
-    r = post(client, chat(model="gpt-4o", temperature=0.2, max_tokens=5, seed=None, stop=["x"], n=1))
-    assert r.json()["clef"]["ignored"] == ["model", "temperature", "max_tokens", "stop"]
+    client, eng, _ = api
+    r = post(client, chat(temperature=0.2, max_tokens=5, seed=None, stop=["x"], n=1))
+    assert r.json()["clef"]["ignored"] == ["temperature", "max_tokens", "stop"]
     assert post(client, chat()).json()["clef"]["ignored"] == []
+    calls = len(eng.calls)
+    r = post(client, chat(model="gpt-4o"))  # a model this server does not serve: 404, no inference
+    assert r.status_code == 404 and len(eng.calls) == calls
+    err = r.json()["error"]
+    assert err["code"] == "model_not_found" and err["param"] == "model"
+    assert err["type"] == "invalid_request_error"
+    assert err["message"] == "model 'gpt-4o' is not served here (this server serves 'clef-flash')"
 
 
 def test_chat_array_multilabel(api):

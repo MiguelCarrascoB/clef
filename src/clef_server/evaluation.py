@@ -36,7 +36,7 @@ from .classify import (
     label_names,
     resolve_threshold,
 )
-from .schemas import DEFAULT_MODEL
+from .models.registry import served_model
 
 EPS = 1e-12
 INPUT_PREVIEW_CHARS = 200
@@ -445,6 +445,7 @@ class EvaluateRequest(_Base):
     snapshot_of: str | None = Field(
         None, description="set by the jobs API: the saved classifier whose definition was copied at submit"
     )
+    model: str | None = Field(None, description="omit for the served model; another id is 404")
 
     @field_validator("labels")
     @classmethod
@@ -501,6 +502,7 @@ class Spec:
     bins: int
     include_predictions: bool
     classifier: str | None = None
+    model: str | None = None  # the request's model (None = the served one)
 
 
 def preview(value: Any) -> str:
@@ -544,19 +546,21 @@ def router(ctx: AppContext) -> APIRouter:
         for i, row in enumerate(body.rows):  # fail before spending GPU time
             _gold_list(row.gold, multi, names, i)
         name = body.classifier or body.snapshot_of
-        return Spec(labels, instructions, multi, thr, body.rows, body.bins, body.include_predictions, name)
+        spec = Spec(labels, instructions, multi, thr, body.rows, body.bins, body.include_predictions, name)
+        spec.model = body.model
+        return spec
 
     async def resolve(body: EvaluateRequest) -> Spec:
         return await run_in_threadpool(resolve_sync, body)
 
     def build_requests(spec: Spec, rows: list[EvalRow]) -> list[Any]:
         return [
-            classify_to_systemone(x.input, spec.labels, spec.instructions, spec.multi_label, DEFAULT_MODEL)
+            classify_to_systemone(x.input, spec.labels, spec.instructions, spec.multi_label, spec.model)
             for x in rows
         ]
 
     def to_scores(spec: Spec, res: dict[str, Any], thr: float | None) -> dict[str, float]:
-        return classify_result(res["answers"], spec.labels, spec.multi_label, thr, DEFAULT_MODEL)["scores"]
+        return classify_result(res["answers"], spec.labels, spec.multi_label, thr, spec.model)["scores"]
 
     async def classify_chunks(spec: Spec, request: Request) -> list[dict[str, float]]:
         """Scores per row (request path): max_batch rows per forward through ctx.infer; any error fails it."""
@@ -610,6 +614,7 @@ def router(ctx: AppContext) -> APIRouter:
                 raise ValueError(
                     f"rows: too many rows (max {cfg.max_eval_rows}); submit an `evaluate` job for larger sets"
                 )
+            served_model(ctx.engine, body.model)  # UnknownModel -> 404 before any inference
             try:
                 spec = await resolve(body)
             except LookupError as exc:

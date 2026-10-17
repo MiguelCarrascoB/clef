@@ -50,6 +50,11 @@ class AppContext:
     on_startup: list[Hook] = field(default_factory=list)
     on_shutdown: list[Hook] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)  # features may publish objects to each other here
+    # C2: decide in two steps (tokenize ahead, then queue). prepare(reqs, batch=True, label="batch",
+    # cache=True) -> engine.Prepared: limits, the model check (UnknownModel -> 404), media, engine.prepare.
+    # decide_prepared(prepared, priority="background") -> results. decide(...) = both; it also takes cache=.
+    prepare: Callable[..., Awaitable[Any]] | None = None
+    decide_prepared: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None
 
 
 __all__ = ["AppContext", "Hook", "SystemOneRequest"]

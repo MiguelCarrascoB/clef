@@ -35,14 +35,14 @@ def mutated(**q: Any) -> dict[str, Any]:
 
 def test_valid_and_model_default():
     r = SystemOneRequest.model_validate(GOOD)
-    assert r.model == "clef-flash"
+    assert r.model is None  # = the served model
     rec = r.to_record()
     assert rec["images"] is None and rec["videos"] is None
     assert "criteria" not in rec["questions"]["out"]
     assert rec["questions"]["urg"]["instructions"] == "how urgent"
 
 
-@pytest.mark.parametrize("model", [5, None, ["x"]])
+@pytest.mark.parametrize("model", [5, ["x"]])
 def test_model_must_be_string(model):
     assert "model" in msg({**GOOD, "model": model})
 

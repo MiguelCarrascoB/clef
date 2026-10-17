@@ -199,7 +199,6 @@ def test_schema_example_livez_openapi(api):
         ({"questions": {"": {"type": "noul"}}}, "question ids must be non-empty"),
         ({"media_kwargs": {"max_pixels": 1}}, "media_kwargs: unknown field"),
         ({"model": 5}, "model:"),
-        ({"model": None}, "model:"),
         ({"images": ["x"] * 9}, "too many images"),
     ],
 )
