@@ -346,7 +346,8 @@ review, router and batch tables live there too. One clef server per database: Po
   stops with `jobs.db is in use by another process; stop the old server first` and changes nothing. If both
   `clef.db` and `jobs.db` exist, `clef.db` is used and a WARNING is logged. The saved classifiers in
   `<state dir>/classifiers/*.json` are imported once as version 1 of each (no owner); the folder is then renamed
-  `classifiers.imported/` (unreadable files are logged, skipped and stay there). `clef classifiers export [--out
+  `classifiers.imported/` (unreadable files are logged and skipped, and move there with the rest: fix one and
+  `PUT` it to import it). `clef classifiers export [--out
   DIR] [--name N]` writes the latest version of each back to `<DIR>/<name>.json` (the v3.1 file format plus
   `version`).
 * **SQLite to Postgres.** Stop the server, then `clef db copy --from sqlite:///<state dir>/clef.db --to
