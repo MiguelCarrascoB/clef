@@ -1,7 +1,15 @@
 """Reference oracle for the D2 head tests: the release's own head, copied from
-Cloudflare/clef-flash `joint_schema_model.py` (EvidenceRoutingLayer, JointSchemaHead; unchanged), so the
+Cloudflare/clef-flash `joint_schema_model.py` (EvidenceRoutingLayer, JointSchemaHead), so the
 vectorised `fast_joint_head` can be compared against the original per-record loops on random tensors.
-Not part of the package."""
+Not part of the package.
+
+Source:    https://huggingface.co/Cloudflare/clef-flash, file `joint_schema_model.py`,
+           revision 17f0b0ad64efb65d273590632833508766b2aae6 (the pin in src/clef_server/config.py).
+Copyright: Cloudflare, Inc. (the upstream file carries no copyright line of its own; the holder is the
+           repository owner. Confirm against the upstream LICENSE when it is next fetched.)
+License:   Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+Modified:  type hint `list[EncodedRecord]` -> `list[Any]`.
+"""
 # ruff: noqa
 # fmt: off
 
