@@ -14,8 +14,9 @@
 - **Database layer (C1)**: jobs, saved classifiers and an audit log now live in one database: SQLite
   `<state_dir>/clef.db` by default, or Postgres with `CLEF_DATABASE_URL=postgresql://...` (`pip install
   'clef-local[postgres]'`; one clef server per database, enforced with an advisory lock). SQLAlchemy Core + Alembic
-  (new `server` dependencies); every start migrates the schema. On the first start `jobs.db` is renamed to
-  `clef.db` and the `classifiers/*.json` files are imported once (the folder becomes `classifiers.imported/`).
+  (new `server` dependencies); every start migrates the schema. On the first start `jobs.db` is copied to
+  `clef.db` (online backup API; the original becomes `jobs.db.migrated`, and a `jobs.db` still open in a running
+  v3.1 server stops the start untouched) and the `classifiers/*.json` files are imported once (the folder becomes `classifiers.imported/`).
   New commands: `clef db current|upgrade|copy` (copy SQLite to Postgres), `clef backup` (SQLite online backup,
   safe while serving), `clef classifiers export`. `clef doctor` checks the schema and `/health` has a `db` block.
   A database that cannot be reached answers `503 database unavailable`.

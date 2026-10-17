@@ -733,9 +733,15 @@ Engine setup:
   (`runner.stop` no longer closes the store).
 
 `jobs.db` → `clef.db` (only when `CLEF_DATABASE_URL` is unset): if `<state_dir>/clef.db` does not exist and
-`<state_dir>/jobs.db` does, open `jobs.db` with `sqlite3`, run `PRAGMA wal_checkpoint(TRUNCATE)`, close it,
-`os.replace(jobs.db, clef.db)` and delete any leftover `jobs.db-wal` / `jobs.db-shm`. Logged once at INFO. When both
-files exist: a WARNING, and `clef.db` is used.
+`<state_dir>/jobs.db` does, `jobs.db` is copied, never changed in place. Open it with `sqlite3` (timeout 1 s), set
+`PRAGMA locking_mode=EXCLUSIVE` and run `BEGIN EXCLUSIVE; COMMIT` (the lock then lasts until close and fails while
+any other connection, such as a v3.1 server still running, has the file open). If that fails:
+`DatabaseError("jobs.db is in use by another process; stop the old server first")`, and nothing is touched.
+Otherwise remove a stale `clef.db.tmp`, copy with the sqlite3 online backup API into a new `0600` `clef.db.tmp`
+(it reads through `jobs.db-wal`), fsync it, `os.replace` it to `clef.db` and fsync the directory. Then close
+`jobs.db` (SQLite checkpoints and removes its WAL) and rename it `jobs.db.migrated` (`.migrated.N` if taken; a
+leftover `-wal` follows it as `jobs.db.migrated-wal`, a `-shm` is deleted). Logged once at INFO. Idempotent: with
+no `jobs.db` there is nothing to do. When both files exist: a WARNING, and `clef.db` is used.
 
 Alembic layout (`src/clef_server/migrations/`, shipped in the wheel; no `alembic.ini`, `db.py` builds the Alembic
 `Config` in code):

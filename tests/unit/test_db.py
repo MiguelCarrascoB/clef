@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -193,7 +195,7 @@ def test_metadata_matches_the_migrated_database(db):
     assert {i.name for table in metadata.sorted_tables for i in table.indexes} <= indexes
 
 
-def test_legacy_jobs_db_is_renamed_stamped_and_upgraded(cfg, caplog, sqlite_only):
+def test_legacy_jobs_db_is_copied_stamped_and_upgraded(cfg, caplog, sqlite_only):
     state = Path(cfg.state_dir)
     state.mkdir(parents=True)
     legacy = sqlite3.connect(str(state / "jobs.db"))
@@ -212,16 +214,17 @@ def test_legacy_jobs_db_is_renamed_stamped_and_upgraded(cfg, caplog, sqlite_only
         " VALUES ('job_a', 'classify', 'succeeded', '{}', 1);"
         "INSERT INTO items VALUES ('job_a', 0, '{\"label\": \"x\"}');"
     )
-    legacy.commit()  # left open: the WAL still holds the rows
+    legacy.commit()
+    legacy.close()  # a connection left open would be an old server still running (refused: next test)
     (state / "classifiers").mkdir()
     (state / "classifiers" / "tri.json").write_text(
         '{"name": "tri", "kind": "classify", "labels": ["a", "b"]}'
     )
     with caplog.at_level("INFO", logger="clef"):
         database = open_database(cfg)
-    legacy.close()
     assert not (state / "jobs.db").exists() and not (state / "jobs.db-wal").exists()
-    assert any("renamed" in r.getMessage() for r in caplog.records)
+    assert (state / "jobs.db.migrated").exists()
+    assert any("copied" in r.getMessage() for r in caplog.records)
     store = JobStore(database)
     assert store.get("job_a")["status"] == "succeeded" and store.items("job_a", 0, 10) == [
         (0, '{"label": "x"}')
@@ -246,6 +249,69 @@ def test_both_files_present_keeps_clef_db_and_warns(cfg, caplog, sqlite_only):
     with caplog.at_level("WARNING", logger="clef"):
         open_database(cfg).close()
     assert (state / "jobs.db").exists() and any("both" in r.getMessage() for r in caplog.records)
+
+
+def _legacy_with_wal(path: Path, rows: int) -> sqlite3.Connection:
+    """A v3.1 jobs.db whose committed rows are still only in the WAL; the writer stays open."""
+    con = sqlite3.connect(str(path), isolation_level=None)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA wal_autocheckpoint=0")
+    con.execute(LEGACY_JOBS)
+    for i in range(rows):
+        con.execute(
+            "INSERT INTO jobs (id, kind, status, payload, created_at)"
+            " VALUES (?, 'classify', 'succeeded', '{}', 1)",
+            (f"job_{i}",),
+        )
+    return con
+
+
+@pytest.mark.parametrize("holder", ["idle", "reader"])
+def test_legacy_jobs_db_in_use_by_another_process_is_left_alone(cfg, holder, sqlite_only):
+    state = Path(cfg.state_dir)
+    state.mkdir(parents=True)
+    old = state / "jobs.db"
+    writer = _legacy_with_wal(old, 20)
+    other = writer
+    if holder == "reader":  # an old server mid-read pins the WAL: a checkpoint could not truncate it
+        other = sqlite3.connect(str(old), isolation_level=None)
+        other.execute("BEGIN")
+        other.execute("SELECT count(*) FROM jobs").fetchone()
+    with pytest.raises(DatabaseError, match="jobs.db is in use by another process; stop the old server"):
+        open_database(cfg)
+    assert old.exists() and Path(f"{old}-wal").exists()
+    assert not (state / "clef.db").exists() and not (state / "clef.db.tmp").exists()
+    assert not (state / "jobs.db.migrated").exists()
+    other.close()
+    writer.close()
+    database = open_database(cfg)  # the old server stopped: now the copy runs
+    assert JobStore(database).get("job_19")["status"] == "succeeded"
+    with database.read() as conn:
+        assert conn.execute(text("SELECT count(*) FROM jobs")).scalar() == 20
+        assert conn.execute(text("PRAGMA integrity_check")).scalar() == "ok"
+    database.close()
+    assert not old.exists() and (state / "jobs.db.migrated").exists()
+    kept = sqlite3.connect(str(state / "jobs.db.migrated"))  # the original is kept, complete
+    assert kept.execute("SELECT count(*) FROM jobs").fetchone()[0] == 20
+    kept.close()
+    open_database(cfg).close()  # idempotent: nothing left to migrate
+    assert not old.exists() and not any(p.name.startswith("jobs.db.migrated.") for p in state.iterdir())
+
+
+def test_legacy_copy_leftover_tmp_is_replaced(cfg, sqlite_only):
+    state = Path(cfg.state_dir)
+    state.mkdir(parents=True)
+    (state / "clef.db.tmp").write_bytes(b"half a copy from a crashed start")
+    code = (  # a v3.1 server that died: its last commits are only in jobs.db-wal
+        "import sys, test_db; c = test_db._legacy_with_wal(test_db.Path(sys.argv[1]), 3); test_db.os._exit(0)"
+    )
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(Path(__file__).parent), *sys.path]))
+    subprocess.run([sys.executable, "-c", code, str(state / "jobs.db")], check=True, env=env)
+    assert (state / "jobs.db-wal").stat().st_size > 0
+    database = open_database(cfg)
+    assert JobStore(database).get("job_2")["status"] == "succeeded"
+    database.close()
+    assert not (state / "clef.db.tmp").exists() and not (state / "jobs.db-wal").exists()
 
 
 # ------------------------------------------------------------------ one server per database (Postgres)

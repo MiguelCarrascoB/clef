@@ -324,7 +324,12 @@ class Database:
 
 
 def migrate_legacy_file(cfg: Any) -> None:
-    """``<state_dir>/jobs.db`` -> ``clef.db`` once (only with the default URL; see ARCHITECTURE Storage)."""
+    """``<state_dir>/jobs.db`` -> ``clef.db`` once (only with the default URL; see ARCHITECTURE Storage).
+
+    jobs.db is never changed in place: under an exclusive lock (which fails while any other connection, e.g.
+    an old server, has it open) it is copied with the online backup API to ``clef.db.tmp``, fsynced and
+    renamed to ``clef.db``; the original is then renamed ``jobs.db.migrated``.
+    """
     from .paths import database_path, jobs_db
 
     new, old = database_path(cfg), jobs_db(cfg)
@@ -335,16 +340,62 @@ def migrate_legacy_file(cfg: Any) -> None:
             "database: both %s and %s exist; using %s (jobs.db is left alone)", new, old.name, new.name
         )
         return
-    con = sqlite3.connect(str(old))
+    tmp = new.with_name(new.name + ".tmp")
+    src = sqlite3.connect(str(old), timeout=1, isolation_level=None)
     try:
-        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        try:  # EXCLUSIVE locking mode keeps the lock after COMMIT, until close; it also blocks readers
+            src.execute("PRAGMA locking_mode=EXCLUSIVE")
+            src.execute("BEGIN EXCLUSIVE")
+            src.execute("COMMIT")
+        except sqlite3.OperationalError as exc:
+            raise DatabaseError("jobs.db is in use by another process; stop the old server first") from exc
+        for suffix in ("", "-journal", "-wal", "-shm"):  # a copy left by a start that crashed
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(f"{tmp}{suffix}")
+        os.close(os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        try:
+            dst = sqlite3.connect(str(tmp))
+            try:
+                src.backup(dst)  # reads through jobs.db-wal: every committed row
+                dst.execute("PRAGMA journal_mode=DELETE")  # self-contained: no -wal beside the tmp file
+            finally:
+                dst.close()
+            fd = os.open(tmp, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, new)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
+            raise
+        _fsync_dir(new.parent)
+    except sqlite3.DatabaseError as exc:
+        raise DatabaseError(f"cannot copy {old} to {new.name}: {exc}") from exc
     finally:
-        con.close()
-    os.replace(old, new)
-    for suffix in ("-wal", "-shm"):
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(f"{old}{suffix}")
-    log.info("database: renamed %s to %s (one-time migration)", old, new)
+        src.close()  # the last connection: SQLite checkpoints jobs.db-wal into jobs.db and removes it
+    kept = old.with_name(old.name + ".migrated")
+    n = 0
+    while kept.exists():
+        n += 1
+        kept = old.with_name(f"{old.name}.migrated.{n}")
+    os.replace(old, kept)
+    with contextlib.suppress(FileNotFoundError):
+        os.replace(f"{old}-wal", f"{kept}-wal")
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(f"{old}-shm")
+    log.info("database: copied %s to %s (one-time migration; the original is now %s)", old, new, kept.name)
+
+
+def _fsync_dir(path: Path) -> None:
+    if os.name != "posix":  # Windows cannot open a directory; NTFS renames are journaled
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def open_database(cfg: Any) -> Database:

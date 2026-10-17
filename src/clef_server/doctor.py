@@ -450,7 +450,7 @@ def check_database(r: Report, cfg: Config) -> None:
     if version is None:
         from .paths import jobs_db
 
-        legacy = " (jobs.db from v3.1 is renamed and upgraded then)" if jobs_db(cfg).exists() else ""
+        legacy = " (jobs.db from v3.1 is copied and upgraded then)" if jobs_db(cfg).exists() else ""
         r.add(OK, "database", f"{shown} does not exist yet; created at the first start{legacy}")
         return
     state = db.version_state(version)
