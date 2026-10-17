@@ -38,7 +38,9 @@ console.log((await triage.classify(text)).label);
 | `score(input, levels, { instructions, images, videos, model })` | `{ score, level, levelIndex, confidence, distribution, requestId, usage, timing, raw }` |
 | `classifier(name)` | handle with `.classify(input, opts)`, `.classifyMany(inputs)`, `.save(def)`, `.get()`, `.delete()` |
 | `listClassifiers()`, `saveClassifier(name, def)`, `getClassifier(name)`, `deleteClassifier(name)` | raw server objects |
-| `decide(state, questions, { images, videos, model })`, `batch(records)`, `health()`, `stats()` | raw server objects |
+| `decide(state, questions, { images, videos, model })`, `batch(records)`, `health()`, `stats()`, `models()` | raw server objects |
+
+`model` is left out of requests unless you pass one: the server uses the model it serves (`models()`); an id it does not serve is a 404 `ClefError`.
 
 Multi-label: `labels` holds every label scoring >= `threshold` (best first, possibly empty); `label` is the top one (or `null`) and `confidence` its score.
 

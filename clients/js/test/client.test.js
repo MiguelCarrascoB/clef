@@ -59,7 +59,7 @@ test('classify single', async () => {
   assert.equal(r.raw.label, 'technical');
   assert.equal(m.calls[0].url, 'http://127.0.0.1:8910/v1/classify');
   assert.equal(m.calls[0].headers['X-API-Key'], 'k');
-  assert.deepEqual(m.calls[0].body, { input: 'Checkout is down', labels: ['billing', 'technical'], instructions: 'why?', model: 'clef-flash' });
+  assert.deepEqual(m.calls[0].body, { input: 'Checkout is down', labels: ['billing', 'technical'], instructions: 'why?' }); // no model: the server's own
 });
 
 test('classify multi-label', async () => {
@@ -229,12 +229,11 @@ test('submitJob / classifyJob bodies and typed Job', async () => {
     instructions: 'why',
     multi_label: true,
     threshold: 0.4,
-    model: 'clef-flash',
     inputs: ['a', 'b'],
   });
   assert.deepEqual(m.calls[1].body.webhook, { url: 'u', secret: 's' });
   await c.classifyJob(['a'], null, { classifier: 'triage' });
-  assert.deepEqual(m.calls[2].body.payload, { classifier: 'triage', model: 'clef-flash', inputs: ['a'] });
+  assert.deepEqual(m.calls[2].body.payload, { classifier: 'triage', inputs: ['a'] });
 });
 
 test('job, jobs, cancelJob, deleteJob', async () => {

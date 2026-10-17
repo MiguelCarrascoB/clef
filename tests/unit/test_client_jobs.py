@@ -104,12 +104,11 @@ def test_submit_and_classify_job_bodies():
         "instructions": "why",
         "multi_label": True,
         "threshold": 0.4,
-        "model": "clef-flash",
         "inputs": ["a", "b"],
     }
     assert s.seen[1][2]["webhook"] == {"url": "u", "secret": "s"}
     c.classify_job(["a"], classifier="triage")
-    assert s.seen[2][2]["payload"] == {"classifier": "triage", "model": "clef-flash", "inputs": ["a"]}
+    assert s.seen[2][2]["payload"] == {"classifier": "triage", "inputs": ["a"]}
 
 
 def test_job_listing_cancel_delete():

@@ -99,9 +99,16 @@ def headers(api_key: str | None) -> dict[str, str]:
 
 
 def record(
-    state: Any, questions: dict[str, Any], images: list[str] | None, videos: list[str] | None, model: str
+    state: Any,
+    questions: dict[str, Any],
+    images: list[str] | None,
+    videos: list[str] | None,
+    model: str | None = None,
 ) -> dict[str, Any]:
-    rec: dict[str, Any] = {"model": model, "state": state, "questions": questions}
+    """A SystemOne request body. `model` is sent only when set (None = the model the server serves)."""
+    rec: dict[str, Any] = {"state": state, "questions": questions}
+    if model is not None:
+        rec["model"] = model
     if images:
         rec["images"] = list(images)
     if videos:
