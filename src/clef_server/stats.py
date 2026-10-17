@@ -80,6 +80,7 @@ class Stats:
         self._fwd_ms = 0.0
         self._fwd_tokens = 0
         self._fwd_padded = 0
+        self._cache_source: Callable[[], dict[str, Any]] | None = None
         self._subs: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue[dict[str, Any]]]] = []
 
     # ---- time-series internals (call with the lock held)
@@ -95,6 +96,24 @@ class Stats:
     def _note_queue(b: _Bucket, n: int) -> None:
         if b.qmax is None or n > b.qmax:
             b.qmax = n
+
+    # ---- result cache (D3)
+    def set_cache_source(self, source: Callable[[], dict[str, Any]] | None) -> None:
+        """The engine registers its `cache_stats`; `snapshot()` reports it as the `cache` block."""
+        self._cache_source = source
+
+    def _cache_block(self) -> dict[str, Any]:
+        src = self._cache_source
+        try:
+            c = dict(src()) if src is not None else {}
+        except Exception:
+            c = {}
+        c.setdefault("enabled", False)
+        for k in ("size", "capacity", "hits", "misses", "bypassed", "evictions"):
+            c.setdefault(k, 0)
+        looked = c["hits"] + c["misses"]
+        c["hit_rate"] = round(c["hits"] / looked, 4) if looked else 0.0
+        return c
 
     # ---- writers
     def record_request(self, entry: dict[str, Any]) -> None:
@@ -236,6 +255,7 @@ class Stats:
                     "in_total": self._tokens,
                     "avg_in": round(self._tokens / self._token_reqs) if self._token_reqs else 0,
                 },
+                "cache": self._cache_block(),
             }
 
     def _aggregate(self, lo: int, hi: int, now_sec: int) -> dict[str, Any]:

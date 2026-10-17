@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import importlib
 import importlib.metadata
 import importlib.util
@@ -54,6 +55,7 @@ import torch
 
 from . import backend as backend_mod
 from .backend import Backend, BackendError, PreflightError
+from .cache import ResultCache
 from .models import registry
 from .models.base import Capabilities, DecisionModel, ModelSpec, OffloadLayout, UnknownModel, safetensors_gb
 from .paths import MODEL_MARKER, WEIGHTS_GB, ModelNotFound, resolve_model_path
@@ -397,6 +399,13 @@ def _strip_accelerate_hooks(model: Any) -> None:
             del model.hf_device_map
 
 
+def _as_hit(result: Result) -> Result:
+    """A private copy of a stored / shared result marked as served without a forward (`timing.cached`)."""
+    out = copy.deepcopy(result)
+    out["timing"] = {"queue_ms": 0, "forward_ms": 0, "batch_size": 0, "cached": True}
+    return out
+
+
 @dataclass
 class Prepared:
     """Records checked and encoded ahead of `Engine.submit` (tokenize-ahead, D3 cache lookups)."""
@@ -404,12 +413,14 @@ class Prepared:
     records: list[Record]
     keys: list[str | None]  # cache keys; None = not cacheable (filled by D3)
     hits: dict[int, Result]  # index -> cached result (filled by D3)
-    encoded: list[Any]  # Encoded, None at hit positions
+    encoded: list[Any]  # Encoded, None at hit positions (a duplicate shares its first occurrence's Encoded)
+    dups: dict[int, int] = field(default_factory=dict)  # index -> index of the identical record computed once
 
     def slice(self, start: int, stop: int) -> Prepared:
         """For bisection in decide_resilient: the same records [start, stop), hits re-indexed."""
         hits = {i - start: r for i, r in self.hits.items() if start <= i < stop}
-        return Prepared(self.records[start:stop], self.keys[start:stop], hits, self.encoded[start:stop])
+        dups = {i - start: s - start for i, s in self.dups.items() if start <= i < stop and start <= s < stop}
+        return Prepared(self.records[start:stop], self.keys[start:stop], hits, self.encoded[start:stop], dups)
 
     def __len__(self) -> int:
         return len(self.records)
@@ -485,6 +496,10 @@ class Engine:
                 requested = (getattr(cfg, "model", None) or "").partition("@")[0] or registry.DEFAULT_MODEL_ID
                 self.spec = ModelSpec(requested, "unknown", None, None, WEIGHTS_GB)
         self.model: DecisionModel | None = None  # set on the worker thread once loaded
+        self.cache = ResultCache(int(getattr(cfg, "cache_size", 10000)))  # D3
+        register = getattr(stats, "set_cache_source", None)
+        if register is not None:
+            register(self.cache_stats)
         # Two FIFO lanes guarded by one condition; _closed replaces the old shutdown sentinel and _drained
         # refuses late enqueues once the worker has failed the leftovers.
         self._lanes: dict[str, deque[_Item]] = {p: deque() for p in PRIORITIES}
@@ -565,7 +580,8 @@ class Engine:
     async def prepare(self, records: list[Record], cache: bool = True) -> Prepared:
         """Check the model and capabilities of every record, then encode them in threads (nothing is queued).
 
-        `cache`: the D3 result cache lookup (a no-op until it lands; False = `Cache-Control: no-cache`).
+        `cache`: False = `Cache-Control: no-cache`: no lookup (the fresh result is still stored). Hits are
+        returned with `timing.cached` true; records that are not cacheable (media) are always computed.
         """
         self._check_ready()
         if not records:
@@ -576,9 +592,34 @@ class Engine:
             rec = {**r, "model": self.check_model(r.get("model"))}
             model.validate(rec)
             checked.append(rec)
-        encs = await asyncio.gather(*(asyncio.to_thread(self._encode, r) for r in checked))
+        n = len(checked)
+        keys: list[str | None] = [None] * n
+        hits: dict[int, Result] = {}
+        dups: dict[int, int] = {}
+        if self.cache.enabled:
+            ref = self.spec.ref
+            first: dict[str, int] = {}
+            for i, rec in enumerate(checked):
+                key = keys[i] = self.cache.key(ref, rec)
+                if key is None or not cache:
+                    self.cache.note_bypass()
+                    continue
+                hit = self.cache.get(key)
+                if hit is not None:
+                    hits[i] = _as_hit(hit)
+                elif key in first:
+                    dups[i] = first[key]
+                else:
+                    first[key] = i
+        todo = [i for i in range(n) if i not in hits and i not in dups]
+        done = await asyncio.gather(*(asyncio.to_thread(self._encode, checked[i]) for i in todo))
         self._check_ready()
-        return Prepared(checked, [None] * len(checked), {}, list(encs))
+        encoded: list[Any] = [None] * n
+        for i, enc in zip(todo, done, strict=True):
+            encoded[i] = enc
+        for i, src in dups.items():
+            encoded[i] = encoded[src]
+        return Prepared(checked, keys, hits, encoded, dups)
 
     async def submit(self, prepared: Prepared, priority: str = INTERACTIVE) -> list[Result]:
         """Enqueue the prepared misses in the `priority` lane, await them, merge the hits back in order."""
@@ -591,7 +632,7 @@ class Engine:
         now = time.perf_counter()
         items: dict[int, _Item] = {}
         for i in range(n):
-            if i in prepared.hits:
+            if i in prepared.hits or i in prepared.dups:
                 continue
             enc = prepared.encoded[i]
             items[i] = _Item(
@@ -612,11 +653,28 @@ class Engine:
                 self._cv.notify()
             self._report_depth()
         results = await asyncio.gather(*(it.future for it in items.values()), return_exceptions=True)
+        # Store every successful forward, even when a sibling failed; errors and OOM are never cached.
+        for i, res in zip(items, results, strict=True):
+            key = prepared.keys[i]
+            if key is not None and not isinstance(res, BaseException):
+                self.cache.put(key, res)
         for res in results:
             if isinstance(res, BaseException):
                 raise res
         computed = dict(zip(items, results, strict=True))
-        return [prepared.hits[i] if i in prepared.hits else computed[i] for i in range(n)]
+        out: list[Result] = []
+        for i in range(n):
+            if i in prepared.hits:
+                out.append(prepared.hits[i])
+            elif i in prepared.dups:
+                out.append(_as_hit(computed[prepared.dups[i]]))
+            else:
+                out.append(computed[i])
+        return out
+
+    def cache_stats(self) -> dict[str, Any]:
+        """Result cache counters (-> /v1/stats `cache`)."""
+        return self.cache.stats()
 
     async def decide(
         self, records: list[Record], priority: str = INTERACTIVE, cache: bool = True
@@ -864,6 +922,7 @@ class Engine:
                 if warning not in self._warnings:
                     self._warnings.append(warning)
             self.model = adapter
+            self.cache.clear()  # D3: results of any earlier model are never served
         except (BackendError, PreflightError, ModelNotFound, UnknownModel) as exc:
             self._fail(" ".join(str(exc).split()))
             return False
@@ -965,6 +1024,7 @@ class Engine:
                                 "queue_ms": round((t_start - it.t_enq) * 1000, 3),
                                 "forward_ms": round(ms, 3),
                                 "batch_size": len(group),
+                                "cached": False,
                             },
                         },
                     )

@@ -39,7 +39,7 @@ tests. Change it first, then the code.
 | `clef_server/models/` (planned, v3.2) | `base.py` (`DecisionModel`, `LocalTensorAdapter`, `Capabilities`, `ModelSpec`, `UnknownModel`), `registry.py` (`clef.models` entry points, `CLEF_MODEL`), `clef_release.py` (clef-flash, clef 27B) |
 | `clef_server/keystore.py` (planned, v3.2) | principals, hashed keys, key cache, quotas (`Quotas`), on `db.py`; shared by the server and `clef keys` |
 | `clef_server/admin.py` (planned, v3.2) | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
-| `clef_server/cache.py` (planned, v3.2) | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
+| `clef_server/cache.py` | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
 | `clef_server/router.py`, `clef_server/llm.py` (planned, v3.2) | feature module: routers, label-set versions, the Review queue (`/v1/routers*`, `/v1/review*`); the OpenAI-compatible LLM client |
 | `clef_server/batches.py` (planned, v3.2) | feature module: OpenAI `/v1/files*` and `/v1/batches*` on the `batch` job kind |
 
@@ -90,7 +90,7 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_DATABASE_POOL_SIZE` (planned, v3.2) | `5` | Postgres pool size (`max_overflow` = the same); ignored on SQLite; `>= 1` |
 | `CLEF_MODEL` (planned, v3.2) | `clef-flash` | `<id>[@<revision>]` from the model catalog (`clef-flash`, `clef`). `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` stay as aliases, see Decision model interface |
 | `CLEF_MASK_FREE` (planned, v3.2) | `0` | `1`: text batches call the backbone with `attention_mask=None` and the head uses CPU lengths (D2; becomes the default only after `bench/parity.py` passes) |
-| `CLEF_CACHE_SIZE` (planned, v3.2) | `10000` | result-cache entries (in-memory LRU); `0` = off |
+| `CLEF_CACHE_SIZE` | `10000` | result-cache entries (in-memory LRU); `0` = off |
 | `CLEF_JOB_TZ` (planned, v3.2) | `UTC` | IANA zone for job windows that give no `tz` and for `CLEF_JOB_WINDOW` |
 | `CLEF_JOB_WINDOW` (planned, v3.2) | empty | default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |
 | `CLEF_JOB_ACTIVE` (planned, v3.2) | `4` | jobs that may be `running` (taking turns) at once; `>= 1` |
@@ -1288,7 +1288,7 @@ Supersedes when landed: the Keys bullet of "Auth, rate limit, CORS" (`KeyAuth`, 
 `security.py` row's "multi-key auth", and "jobs created while auth was off stay visible to every key" (still true)
 plus "other keys get 404" (admins now see all).
 
-## Result cache (planned, v3.2)
+## Result cache
 
 Module boundary: `cache.py` holds `ResultCache`; the engine owns the only instance (`Engine.cache`, built from
 `cfg.cache_size` in `__init__`) and uses it in `Engine.prepare` (lookup) and `Engine.submit` (store). Nothing else
@@ -1297,30 +1297,41 @@ reads or writes it, so interactive routes, jobs, evaluate, batches and the route
 ```python
 class ResultCache:
     def __init__(self, capacity: int = 10000) -> None     # capacity 0 = disabled (every call is a no-op)
-    def key(self, model_ref: str, record: Record) -> str | None
+    enabled: bool
+    @staticmethod
+    def key(model_ref: str, record: Record) -> str | None
         # None (not cacheable) when the record has images or videos.
         # Else sha256 hex of canonical JSON (sort_keys=True, separators=(",", ":"), ensure_ascii=False) of
         # {"m": model_ref, "s": record["state"], "q": record["questions"]}: the state verbatim, every question with
-        # its type, instructions and criteria. Thresholds, the request id and the label order of a multi-label
-        # response are applied after the model and are not in the key.
-    def get(self, key: str) -> Result | None             # moves the entry to the MRU end
-    def put(self, key: str, result: Result) -> None       # stores the result without "timing"; evicts the LRU entry
-    def stats(self) -> dict                               # {"size", "capacity", "hits", "misses", "bypassed"}
+        # its type, instructions and criteria. `model_ref` is `<id>@<revision>`. Thresholds, the request id and the
+        # label order of a multi-label response are applied after the model and are not in the key.
+    def get(self, key: str) -> Result | None             # a private copy; moves the entry to the MRU end
+    def put(self, key: str, result: Result) -> None       # stores a copy without "timing"; evicts the LRU entry
+    def note_bypass(self, n: int = 1) -> None             # counts lookups skipped (no-cache, media)
+    def clear(self) -> None
+    def stats(self) -> dict   # {"enabled", "size", "capacity", "hits", "misses", "bypassed", "evictions"}
 ```
 
 Semantics:
-- Thread-safe (`threading.Lock`); in memory only, lost on restart. No invalidation: the questions are in the key,
-  and a model change needs a restart (D6).
-- A hit returns the stored result with `usage` as stored (the original `input_tokens`) and `timing` =
-  `{"queue_ms": 0, "forward_ms": 0, "batch_size": 0, "cached": true}` (main adds `total_ms`). Misses carry
-  `"cached": false`. Probabilities are bit-identical to the stored forward.
+- Thread-safe (`threading.Lock`); in memory only, lost on restart. No invalidation: the questions and the model
+  ref are in the key, and the engine also clears the cache when its model loads.
+- A hit returns a copy of the stored result with `usage` as stored (the original `input_tokens`) and `timing` =
+  `{"queue_ms": 0, "forward_ms": 0, "batch_size": 0, "cached": true}` (main adds `total_ms`). Computed records carry
+  `"cached": false`. **`timing.cached` is the per-record hit marker** for quotas and the request log.
+  Probabilities are bit-identical to the stored forward.
 - Bypass: a request with `Cache-Control: no-cache` (case-insensitive token anywhere in the header) skips the
   lookup and still stores the fresh result. `ctx.infer` reads the header and passes `cache=False` down
-  (`ctx.decide(..., cache=False)` → `engine.prepare(records, cache=False)`); background callers pass it explicitly.
-- Identical records inside one call are computed once (the later ones are filled from the first after the forward).
-- Quotas count cached records like computed ones; the request log and stats count the request as usual.
-- `/v1/stats` gains `"cache": ResultCache.stats() + {"hit_rate"}` (from `Stats.snapshot`, which reads
-  `engine.cache_stats()` when the engine has it).
+  (`ctx.decide(..., cache=False)` -> `engine.prepare(records, cache=False)`); background callers pass it explicitly.
+- Identical records inside one call are computed once; the later ones are filled from the first after the forward
+  and are marked as hits (`Prepared.dups`; `Prepared.slice` turns a dup whose source was sliced away into a miss).
+- Only successful forwards are stored (`submit` stores them even if a sibling failed). Errors, OOM and media records
+  are never cached.
+- Quotas (contract decision 3): cache hits do **not** count. D1 charges only the results whose
+  `timing.cached` is false. The request log and stats count the request as usual.
+- `/v1/stats` gains `"cache": Engine.cache_stats() + {"hit_rate"}`. The engine registers `cache_stats` with
+  `Stats.set_cache_source` at construction; `Stats.snapshot` reads it. `hit_rate` = hits / (hits + misses).
+- Memory: about 2 KB per entry for a 10-option question (measured, ~20 MB for 10 000 entries); more questions or
+  options scale it linearly.
 
 Env: `CLEF_CACHE_SIZE` (Configuration). Tables: none. Routes: none (header only). Error codes: none.
 
