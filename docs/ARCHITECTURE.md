@@ -923,6 +923,7 @@ class Encoded(Protocol):                      # opaque to the engine except thes
 
 class DecisionModel(Protocol):
     name: ClassVar[str]                       # adapter (entry-point) name
+    files: ClassVar[tuple[str, ...]] = ()     # files a complete local release has (`clef doctor` checks them)
     spec: ModelSpec
     capabilities: Capabilities
     @classmethod
@@ -932,7 +933,8 @@ class DecisionModel(Protocol):
     def weights_gb(self, path: Path) -> float # from the safetensors headers
     def load(self, backend: Backend, dtype: Any) -> LoadInfo   # worker thread: standard / quantized / offloaded
     def validate(self, record: Record) -> None  # capability check, ValueError (400) naming the field
-    def info(self) -> dict                    # {"id", "adapter", "revision", "ref", "capabilities"}
+    def info(self) -> dict                    # {"id", "adapter", "revision", "ref", "capabilities"} (JSON:
+                                              # the frozensets become sorted lists)
 
 class LocalTensorAdapter(DecisionModel):     # what the engine drives
     def encode(self, record: Record) -> Encoded         # any thread (holds its own tokenizer lock);
@@ -943,7 +945,9 @@ class LocalTensorAdapter(DecisionModel):     # what the engine drives
     def to_device(self, batch: dict, device: Any) -> dict
     def forward(self, batch: dict) -> list[list[Any]]   # worker thread, inside torch.inference_mode():
                                                         # per record, per question, the option logits
-    def answer(self, enc: Encoded, question: dict, logits: Any) -> dict  # SystemOne answer (softmax inside)
+    def answer(self, q: Any, question: dict, logits: Any) -> dict
+        # one question: q = an element of enc.questions (.question_id, .option_ids), question = the record's
+        # question dict, logits = that question's option logits from forward(). SystemOne answer (softmax inside)
     def pad_id(self) -> int
     def warm_record(self, repeats: int) -> Record
     def offload_layout(self) -> OffloadLayout | None
@@ -959,6 +963,10 @@ def create(cfg: Config) -> DecisionModel
 - `pyproject.toml`: `[project.entry-points."clef.models"] clef-release = "clef_server.models.clef_release:ClefReleaseAdapter"`.
   Built-ins register exactly like third-party adapters (D14). Entry points are only read from installed
   distributions; the adapter that loaded and its distribution version go in `/health` and the startup log.
+  One fallback: when the `clef-release` entry point is missing (a source checkout on `PYTHONPATH`, or an install
+  made before the entry point existed), `adapters()` registers the built-in directly and logs a WARNING (re-install
+  to silence it). Without it, every such checkout would fail to load any model. An entry point that fails to
+  import is skipped with a WARNING.
 - Catalog (`ClefReleaseAdapter.catalog()`): `clef-flash` → `Cloudflare/clef-flash@<MODEL_REVISION>` (today's
   pin, `weights_gb` 19.0); `clef` → `Cloudflare/clef@<sha>` with the full sha taken by C2 from the HF API (never
   typed from memory), `weights_gb` from its index.
