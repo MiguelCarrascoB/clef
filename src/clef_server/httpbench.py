@@ -51,26 +51,38 @@ def make_body(i: int, mixed: bool) -> dict:
     }
 
 
-async def run_level(client: httpx.AsyncClient, conc: int, n: int, mixed: bool) -> dict:
+async def run_level(client: httpx.AsyncClient, conc: int, n: int, mixed: bool, check=None) -> dict:
+    """`check(request_body, response_json)` (optional) may raise ValueError for a wrong response shape: the
+    request then counts as an error (used by bench/vllm/load.py so a mismatched server never scores 0 silently)."""
     sem = asyncio.Semaphore(conc)
     lat: list[float] = []
     batch_sizes: collections.Counter = collections.Counter()
     errors: collections.Counter = collections.Counter()
+    samples: dict[str, str] = {}  # first error body per status, for diagnostics
 
     async def one(i: int) -> None:
         async with sem:
             t = time.perf_counter()
             try:
-                r = await client.post("/v1/systemone", json=make_body(i, mixed))
+                body = make_body(i, mixed)
+                r = await client.post("/v1/systemone", json=body)
             except httpx.HTTPError as exc:
                 errors[type(exc).__name__] += 1
                 return
             ms = (time.perf_counter() - t) * 1000
             if r.status_code != 200:
                 errors[str(r.status_code)] += 1
+                samples.setdefault(str(r.status_code), r.text[:300])
                 return
+            data = r.json()
+            if check is not None:
+                try:
+                    check(body, data)
+                except ValueError as exc:
+                    errors[f"shape: {str(exc)[:120]}"] += 1
+                    return
             lat.append(ms)
-            batch_sizes[r.json().get("timing", {}).get("batch_size", 0)] += 1
+            batch_sizes[data.get("timing", {}).get("batch_size", 0)] += 1
 
     t0 = time.perf_counter()
     await asyncio.gather(*(one(i) for i in range(n)))
@@ -79,6 +91,7 @@ async def run_level(client: httpx.AsyncClient, conc: int, n: int, mixed: bool) -
         "conc": conc,
         "ok": len(lat),
         "errors": dict(errors),
+        "error_samples": samples,
         "rps": len(lat) / wall,
         "p50": pct(lat, 50),
         "p95": pct(lat, 95),
