@@ -39,6 +39,8 @@ See [Smaller GPUs](memory.md) for which combination fits which card.
 | `CLEF_CLASSIFY_THRESHOLD` | `0.5` | default multi-label threshold (also for array properties in `/v1/chat/completions`) |
 | `CLEF_MAX_BATCH` / `CLEF_MAX_QUESTIONS` | `64` / `64` | records per batch / questions per record |
 | `CLEF_MAX_BODY_MB` | `64` | request body limit |
+| `CLEF_MASK_FREE` | `0` | `1`: text-only batches call the backbone with `attention_mask=None` and the head uses CPU lengths (no device sync). Opt-in until `bench/perf_check.sh` passes on your GPU; see [Performance](performance.md) |
+| `CLEF_FAST_HEAD` | `0` | `1`: use the batch-vectorised, sync-free joint head (`fast_joint_head`) instead of the release's per-record loops. Same maths, opt-in; see [Performance](performance.md) |
 | `CLEF_MAX_TOKENS` | `16384` | input tokens per record |
 | `CLEF_MAX_EVAL_ROWS` | `500` | rows per `POST /v1/evaluate` request |
 | `CLEF_CACHE_SIZE` | `10000` | result-cache entries (in-memory LRU, lost on restart); `0` = off. Also bounded by `CLEF_CACHE_MB`. Interactive calls, jobs and evaluate share it; media records are never cached; send `Cache-Control: no-cache` to skip the lookup. Cache hits do not count toward quotas. Stats: `cache` block of `GET /v1/stats` |

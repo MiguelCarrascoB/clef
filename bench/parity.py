@@ -129,9 +129,13 @@ def build_eval_set(n: int = 200, images: int = 0) -> list[dict]:
     return records
 
 
+TIE_MARGIN = 1e-3  # a top-1 flip where the reference top-2 gap is below this is a near-tie, not a defect
+
+
 def compare(ref: list[dict], cand: list[dict]) -> dict:
-    """ref / cand: per record {"question.option": prob}. Max / mean abs diff and top-1 flips per question."""
-    diffs, flips, total_q = [], 0, 0
+    """ref / cand: per record {"question.option": prob}. Max / mean abs diff and top-1 flips per question.
+    A flip whose reference top-2 margin is below TIE_MARGIN counts in `tie_flips`, not in `top1_flips`."""
+    diffs, flips, ties, total_q = [], 0, 0, 0
     for r, c in zip(ref, cand, strict=True):
         if r.keys() != c.keys():
             raise ValueError("reference and candidate answer different options")
@@ -142,13 +146,29 @@ def compare(ref: list[dict], cand: list[dict]) -> dict:
         for keys in by_q.values():
             total_q += 1
             if max(keys, key=r.__getitem__) != max(keys, key=c.__getitem__):
-                flips += 1
+                top = sorted((r[k] for k in keys), reverse=True)
+                if len(top) > 1 and top[0] - top[1] < TIE_MARGIN:
+                    ties += 1
+                else:
+                    flips += 1
     return {
         "max_abs_diff": max(diffs) if diffs else 0.0,
         "mean_abs_diff": statistics.fmean(diffs) if diffs else 0.0,
         "top1_flips": flips,
+        "tie_flips": ties,
         "questions": total_q,
     }
+
+
+def noise_dp(a_path: str, b_path: str) -> float:
+    """Largest |dp| between two dumps of the same configuration (the run-to-run noise floor)."""
+    a, b = json.loads(Path(a_path).read_text()), json.loads(Path(b_path).read_text())
+    return max(compare(a[m], b[m])["max_abs_diff"] for m in ("singles", "batched"))
+
+
+def effective_tol(floor: float, noise: float) -> float:
+    """Parity threshold: max(floor, 2 x noise)."""
+    return max(floor, 2 * noise)
 
 
 def server_running(port: int) -> bool:
@@ -295,6 +315,7 @@ def compare_dumps(a_path: str, b_path: str, tol: float) -> int:
         print(
             f"{mode:<8} max |dp| = {st['max_abs_diff']:.5f}  mean |dp| = {st['mean_abs_diff']:.6f}  "
             f"top-1 flips {st['top1_flips']}/{st['questions']}  {'OK' if good else 'FAIL'}"
+            f"  (near-tie flips, ref margin < {TIE_MARGIN:g}: {st['tie_flips']})"
         )
     for name, d in (("A", a), ("B", b)):
         lat = statistics.median(d["lat"]) if d.get("lat") else 0.0
@@ -315,6 +336,12 @@ def main() -> int:
     ap.add_argument(
         "--tol", type=float, default=2e-3, help="--compare: max |dp| allowed (answers are rounded)"
     )
+    ap.add_argument(
+        "--noise",
+        nargs=2,
+        metavar=("A.json", "B.json"),
+        help="print the max |dp| between two dumps of one config (noise) and max(--tol, 2 x noise)",
+    )
     ap.add_argument("--model-path", default=default_model_path())
     ap.add_argument("--device", default=os.environ.get("CLEF_DEVICE", "auto"))
     ap.add_argument("--dtype", default=os.environ.get("CLEF_DTYPE", "float16"), help="candidate dtype")
@@ -332,6 +359,10 @@ def main() -> int:
     ap.add_argument("--out", default=str(_HERE / "out"))
     args = ap.parse_args()
 
+    if args.noise:
+        n = noise_dp(*args.noise)
+        print(f"noise {n:.6f} tol {effective_tol(args.tol, n):.6f}")
+        return 0
     if args.compare:
         return compare_dumps(args.compare[0], args.compare[1], args.tol)
     if not args.force and server_running(args.port):
