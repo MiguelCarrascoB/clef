@@ -27,6 +27,7 @@ tests. Change it first, then the code.
 | `clef_server/compat.py`, `compat_openai.py`, `compat_hf.py`, `compat_schema.py`, `compat_errors.py` | OpenAI (`/v1/models`, `/v1/chat/completions`) and Hugging Face zero-shot (`/hf/models/{id}`) routes; JSON-schema -> questions translation; client-shaped errors |
 | `clef_server/evaluation.py` | metric math (`compute_metrics`), `POST /v1/evaluate` and `/v1/evaluate/metrics`, the `evaluate` job kind |
 | `clef_server/jobs.py`, `clef_server/webhooks.py` | async jobs (SQLite store, FIFO runner, `/v1/jobs*` routes, built-in kinds) and signed, SSRF-guarded webhook delivery |
+| `clef_server/jobsort.py` | F2, opt-in: length sort inside a job window and tokenize-ahead for jobs (see Job throughput) |
 | `clef_server/cli.py` | the `clef` command (serve/stop/status/logs/doctor/download/bench/open/version); `download` is a pinned, resumable `snapshot_download` with a disk-space check |
 | `clef_server/doctor.py` | environment checks per backend, including a recommended memory setting; `main(argv) -> int` |
 | `clef_server/httpbench.py` | the async HTTP load test (`clef bench`; `bench/http_bench.py` is a shim) |
@@ -97,7 +98,8 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_JOB_WINDOW` (planned, v3.2) | empty | default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |
 | `CLEF_JOB_ACTIVE` (planned, v3.2) | `4` | jobs that may be `running` (taking turns) at once; `>= 1` |
 | `CLEF_JOB_AGING_S` (planned, v3.2) | `3600` | a waiting job's class rises one level per this many seconds without a turn (never to `urgent`); `0` = no aging |
-| `CLEF_JOB_SORT_WINDOW` (planned, v3.2) | `0` | F2: length-sort jobs in windows of N items (256-1024); `0` = off. Default flips only if the benchmark gain is over 10% |
+| `CLEF_JOB_SORT_WINDOW` | `0` | F2: a job takes N items at a time (N >= 1; 256-1024 recommended), sorts the ones that need a forward by token length and sends them in micro-batches; results are persisted per window in input order. `0` = off. Default flips only if `bench/sort_check.sh` shows a gain over 10% on the GPU |
+| `CLEF_TOKENIZE_AHEAD` | `0` | F2: `1`: the next window (a micro-batch when the sort is off) is encoded on CPU threads (`ctx.prepare`) while the current one is on the GPU. Same flip rule as the sort |
 | `GEMINI_API_KEY` (planned, v3.2) | unset | the router's LLM key. Unset (and no `CLEF_LLM_API_KEY`) = router LLM off. Never logged; `clef doctor` only says whether it is set |
 | `CLEF_LLM_API_KEY` (planned, v3.2) | unset | key for another OpenAI-compatible provider; wins over `GEMINI_API_KEY` |
 | `CLEF_LLM_BASE_URL` (planned, v3.2) | `https://generativelanguage.googleapis.com/v1beta/openai/` | OpenAI-compatible endpoint (ollama, LM Studio, vLLM, OpenAI work the same) |
@@ -1672,6 +1674,32 @@ input order); `recover()` unchanged; webhooks unchanged.
 Supersedes when landed: "One runner, FIFO, one job at a time and ONE micro-batch in flight" in Async jobs (the
 "one micro-batch in flight" part stays).
 
+### Job throughput: window sort and tokenize ahead (F2, `jobsort.py`)
+
+Opt-in, both default off (`CLEF_JOB_SORT_WINDOW`, `CLEF_TOKENIZE_AHEAD`), benchmark-gated (`bench/sort_check.sh`).
+`run_chunked` and the evaluate kind build a `jobsort.windowed(ctx, n, build, decide_resilient)` once per run; it
+is `None` with both flags off, and then the original loop runs unchanged.
+- A step is one **window**: `CLEF_JOB_SORT_WINDOW` items (never fewer than `CLEF_MAX_MICROBATCH`), or one
+  micro-batch when only tokenizing ahead. The caller builds the window's requests and calls
+  `sorter.decide(job, start, reqs)`, which returns results in the same order as `reqs`.
+- `decide` encodes the whole window with `ctx.prepare` (CPU threads), orders the records that need a forward
+  (no cache hit, no in-window duplicate) by `(is_media, token length)`, stable, and queues them with
+  `ctx.decide_prepared(priority="background")` in micro-batches of `CLEF_MAX_MICROBATCH`: one micro-batch in
+  flight, as before; interactive work still goes first through the engine lanes. Hits and duplicates are put
+  back as `Engine.submit` would (`timing.cached`).
+- Persistence: the caller persists the **whole window in one `add_items`** in input order. Rows stay contiguous
+  `0..done-1`; a crash, clean stop or cancel inside a window leaves `done` at the window start (at most one
+  window is recomputed on resume; the resume point need not be window aligned). Progress and the circuit
+  breaker advance once per window.
+- Tokenize ahead: after window k is encoded, a task encodes window k+1 while k is on the GPU. One GPU worker
+  only. The prefetch looks the cache up before window k's results are stored, so a duplicate in the next window
+  is computed again (same row content, only cache statistics differ).
+- Errors: a failed prefetch or encode, or a micro-batch the engine rejects (`ValueError`, OOM, not ready), is
+  re-run through `decide_resilient` for just those records, so isolation, bisection and the engine wait behave as
+  without the flags. Cancel is checked between micro-batches.
+- E1 seam: `WindowSorter._submit` is the one engine hand-off; the scheduler's turn gate wraps it (and the
+  fallback already goes through `decide_resilient`).
+
 ## OpenAI Files and Batches (planned, v3.2)
 
 Module boundary: `batches.py` is a feature module listed in `FEATURES` before `jobs` (it registers the `batch` job
@@ -1794,7 +1822,7 @@ existing tests a contract change forces. Every workstream may append to `CHANGEL
 | E1 scheduler | | `jobs.py`, `evaluation.py` (`job.decide`), `config.py` (`CLEF_JOB_*`), `pyproject.toml` (`tzdata`), `clef_client/*`, `clients/js/*` (job fields), `static/screens/batch.js` (job fields, optional), `docs/jobs.md` |
 | E2 router | `router.py`, `llm.py`, `static/screens/review.js` | `main.py` (`FEATURES` += `router`, low-confidence capture in the classifier-run routes), `classify.py` (`ClassifierDef.review_threshold`), `config.py` (`CLEF_LLM_*`, `CLEF_ROUTER_*`, `CLEF_REVIEW_TTL_DAYS`), `doctor.py` (LLM key check), `static/app.js` (tab), `clef_client/*`, `clients/js/*` (router helpers), new `docs/router.md` |
 | F1 batches | `batches.py` | `compat_openai.py` (`prepare_chat` / `render_chat`), `main.py` (`FEATURES` += `batches`, `GuardMiddleware` file limit), `config.py` (`CLEF_MAX_FILE_MB`, `CLEF_MAX_BATCH_LINES`, `CLEF_FILE_TTL_HOURS`), `pyproject.toml` (`python-multipart`), `docs/openai-compat.md` |
-| F2 throughput | | `jobs.py` (window sort in `run_chunked`, prefetch via `ctx.prepare`), `evaluation.py` (same for the evaluate kind), `engine.py` only if `Engine.prepare` / `submit` need a fix, `config.py` (`CLEF_JOB_SORT_WINDOW`) |
+| F2 throughput | `jobsort.py` | `jobs.py` (window sort in `run_chunked`, prefetch via `ctx.prepare`), `evaluation.py` (same for the evaluate kind), `engine.py` only if `Engine.prepare` / `submit` need a fix, `config.py` (`CLEF_JOB_SORT_WINDOW`, `CLEF_TOKENIZE_AHEAD`) |
 
 Same-wave shared files and how they split:
 
