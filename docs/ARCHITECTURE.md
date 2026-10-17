@@ -516,7 +516,7 @@ Guide: [jobs.md](jobs.md).
   becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
   `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
 - Ownership: with auth on, a job belongs to the key name that submitted it and other keys get 404 (also in the
-  list); jobs created while auth was off stay visible to every key.
+  list); jobs created while auth was off (owner NULL) are visible to admins only once auth is on.
 - Webhooks: events `job.succeeded`, `job.failed`, `job.cancelled` (default) and opt-in `job.progress` (at most one
   per 10 s, one attempt). Headers `X-Clef-Event`, `X-Clef-Delivery`, and with a secret `X-Clef-Timestamp` and
   `X-Clef-Signature: sha256=` HMAC-SHA256 of `"<timestamp>.<raw body>"`. 2xx = delivered; 408 / 425 / 429 / 5xx and
@@ -839,7 +839,8 @@ becomes version 1 with `owner` NULL and `created_by` `import`; the directory is 
 Routes (changes; every existing body stays valid):
 - `PUT /v1/classifiers/{name}` -> 200 the definition with `version`, `owner`, `model`. Owner = the caller's
   principal on the first PUT (NULL with auth off). A later PUT or DELETE by another principal is 403 unless the
-  caller has `admin`; anyone may change a classifier whose owner is NULL. The admin test is one helper: the
+  caller has `admin`; a classifier whose owner is NULL (created while auth was off, or imported) is admin-only to
+  change or delete once auth is on (running it stays open to `classify`). The 403 text does not name the owner. The admin test is one helper: the
   request's `principal.has("admin")` when `request.state.principal` is set (D1), else any caller with a key is
   admin (until D1 lands every key is an env key, and env principals have every scope), so before D1 the owner is
   recorded but no PUT / DELETE is refused.
@@ -1327,8 +1328,8 @@ As built (D1; additions and deviations, nothing above changed in meaning):
 - CLI: `clef keys` also has `update` and `usage`; `--expires` takes `90d` or a date (valid through that UTC day).
 
 Supersedes when landed: the Keys bullet of "Auth, rate limit, CORS" (`KeyAuth`, "auth off -> `key` is `null`"), the
-`security.py` row's "multi-key auth", and "jobs created while auth was off stay visible to every key" (still true)
-plus "other keys get 404" (admins now see all).
+`security.py` row's "multi-key auth", and "jobs created while auth was off stay visible to every key" (no longer: owner-less jobs are
+admin-only) plus "other keys get 404" (admins now see all).
 
 ## Result cache (planned, v3.2)
 

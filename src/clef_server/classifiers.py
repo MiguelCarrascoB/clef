@@ -154,6 +154,13 @@ class ClassifierStore:
         with self.db.read() as conn:
             return conn.execute(select(_C.c.owner).where(_C.c.name == name)).scalar()
 
+    def owner_of(self, name: str) -> tuple[bool, str | None]:
+        """``(exists, owner)``: owner-less (auth-off) is ``(True, None)``, a new name is ``(False, None)``."""
+        validate_name(name)
+        with self.db.read() as conn:
+            row = conn.execute(select(_C.c.owner).where(_C.c.name == name)).first()
+        return (False, None) if row is None else (True, row[0])
+
     # ---- writes
     def put(
         self,

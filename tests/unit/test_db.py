@@ -366,7 +366,7 @@ def test_classifier_owner_is_enforced_for_non_admin_principals():
     with client:
         assert client.put("/v1/classifiers/tri", json=CLS, headers=a).json()["owner"] == "alice"
         r = client.put("/v1/classifiers/tri", json=changed, headers=b)
-        assert r.status_code == 403 and "alice" in r.json()["detail"]
+        assert r.status_code == 403 and "alice" not in r.json()["detail"]  # only admins may learn the owner
         assert client.delete("/v1/classifiers/tri", headers=b).status_code == 403
         assert client.post("/v1/classifiers/tri", json={"input": "x"}, headers=b).status_code == 200
         assert client.put("/v1/classifiers/tri", json=changed, headers=a).json()["version"] == 2
@@ -375,15 +375,17 @@ def test_classifier_owner_is_enforced_for_non_admin_principals():
         assert client.delete("/v1/classifiers/tri", headers=root).status_code == 200
 
 
-def test_unowned_classifiers_can_be_changed_by_anyone():
+def test_unowned_classifiers_are_admin_only_to_change_once_auth_is_on():
     from test_keys import add_key
 
     client, _, app = make_api()
-    headers = {"X-API-Key": add_key(app, "alice", "classifiers")}
+    headers = {"X-API-Key": add_key(app, "alice", "classify,classifiers")}
     with client:
         app.state.ctx.store.put("open", CLS)  # e.g. imported from a v3.1 JSON file: owner NULL
-        r = client.put("/v1/classifiers/open", json={**CLS, "labels": ["x", "y"]}, headers=headers)
-        assert r.status_code == 200 and r.json()["owner"] is None
+        changed = {**CLS, "labels": ["x", "y"]}
+        assert client.put("/v1/classifiers/open", json=changed, headers=headers).status_code == 403
+        assert client.delete("/v1/classifiers/open", headers=headers).status_code == 403
+        assert client.post("/v1/classifiers/open", json={"input": "x"}, headers=headers).status_code == 200
 
 
 def test_classifier_audit_rows_carry_actor_ip_and_request_id():
@@ -419,7 +421,7 @@ def test_database_errors_are_503(monkeypatch):
 
     with client:
         monkeypatch.setattr(app.state.ctx.store, "list", down)
-        monkeypatch.setattr(app.state.ctx.store, "owner", down)
+        monkeypatch.setattr(app.state.ctx.store, "owner_of", down)
         monkeypatch.setattr(app.state.ctx.extra["jobs"].store, "list", down)
         for r in (
             client.get("/v1/classifiers"),

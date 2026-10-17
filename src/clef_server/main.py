@@ -731,12 +731,15 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         return True if principal is None else bool(principal.has("admin"))
 
     async def check_owner(request: Request, name: str) -> None:
-        """403 unless the caller owns ``name``, is admin, or nobody owns it (NULL owner)."""
-        owner = await run_in_threadpool(store.owner, name)
+        """403 unless the caller owns ``name`` or is admin (auth off counts as admin). A classifier nobody
+        owns (created while auth was off) is admin-only to change once auth is on. The owner is never named:
+        admins can read it from the classifier itself and never get this error."""
+        exists, owner = await run_in_threadpool(store.owner_of, name)
         caller = getattr(request.state, "key_name", None)
-        if owner is not None and owner != caller and not is_admin(request):
+        if exists and owner != caller and not is_admin(request):
             raise ApiError(
-                403, f"classifier {name!r} belongs to {owner!r}; only its owner or an admin may change it"
+                403,
+                f"classifier {name!r} is not yours; only its owner or an admin may change it",
             )
 
     owner_errors: dict[int | str, dict[str, Any]] = {

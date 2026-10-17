@@ -798,7 +798,9 @@ def test_several_env_keys_are_all_admin_and_the_server_says_so(caplog):
     admin. That is deliberate and loud: a startup warning, and the keys see each other's work."""
     with caplog.at_level("WARNING", logger="clef"):
         client, _, _ = make(api_keys_raw="alice:ka,bob:kb")
-    assert any("2 env keys" in r.getMessage() and "clef keys create" in r.getMessage() for r in caplog.records)
+    assert any(
+        "2 env keys" in r.getMessage() and "clef keys create" in r.getMessage() for r in caplog.records
+    )
     a, b = hdr("ka"), hdr("kb")
     with client:
         jid = submit(client, headers=a).json()["id"]
@@ -817,6 +819,48 @@ def test_a_single_env_key_gets_no_multi_key_warning(caplog):
     with caplog.at_level("WARNING", logger="clef"):
         make(api_keys_raw="alice:ka")
     assert not any("env keys" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.postgres
+def test_owner_less_rows_from_the_auth_off_era_are_admin_only_once_auth_is_on():
+    client, _, app = make(api_keys_raw="root:kr")  # root is only here to be an admin later
+    state = app.state.cfg.state_dir
+    app.state.ctx.db.close()
+    off, _, app_off = make(state_dir=state)  # auth was off: everything created has no owner
+    with off:
+        jid = submit(off).json()["id"]
+        wait(off, jid)
+        assert off.put("/v1/classifiers/old", json={"labels": ["a", "b"]}).status_code == 200
+    app_off.state.ctx.db.close()
+    client, _, app = make(state_dir=state, api_keys_raw="root:kr")
+    mallory = hdr(add_key(app, "mallory", "classify,jobs,classifiers"))
+    root = hdr("kr")
+    with client:
+        # jobs: invisible to non-admins (404), so neither readable nor modifiable
+        assert client.get(f"/v1/jobs/{jid}/results", headers=mallory).status_code == 404
+        assert client.get(f"/v1/jobs/{jid}", headers=mallory).status_code == 404
+        assert client.post(f"/v1/jobs/{jid}/cancel", headers=mallory).status_code == 404
+        assert client.delete(f"/v1/jobs/{jid}", headers=mallory).status_code == 404
+        assert client.get("/v1/jobs", headers=mallory).json()["total"] == 0
+        assert client.get(f"/v1/jobs/{jid}/results", headers=root).status_code == 200
+        # classifiers: running stays allowed, changing and deleting are admin-only
+        body = {"labels": ["x", "y"]}
+        assert client.put("/v1/classifiers/old", json=body, headers=mallory).status_code == 403
+        assert client.delete("/v1/classifiers/old", headers=mallory).status_code == 403
+        assert client.post("/v1/classifiers/old", json={"input": "hi"}, headers=mallory).status_code == 200
+        assert client.get("/v1/classifiers/old", headers=mallory).status_code == 200
+        assert client.put("/v1/classifiers/old", json=body, headers=root).status_code == 200
+        assert client.delete("/v1/classifiers/old", headers=root).status_code == 200
+        assert client.delete(f"/v1/jobs/{jid}", headers=root).status_code == 200
+
+
+def test_owner_403_does_not_name_the_owner():
+    client, _, app = make(api_keys_raw="root:kr")
+    alice, bob = hdr(add_key(app, "alice")), hdr(add_key(app, "bob"))
+    with client:
+        assert client.put("/v1/classifiers/c", json={"labels": ["a", "b"]}, headers=alice).status_code == 200
+        r = client.put("/v1/classifiers/c", json={"labels": ["x", "y"]}, headers=bob)
+        assert r.status_code == 403 and "alice" not in r.text and "owner or an admin" in r.text
 
 
 # ------------------------------------------------------------------ default-deny

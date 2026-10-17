@@ -106,7 +106,7 @@ A batch call counts as one request, so also keep `CLEF_MAX_BATCH` reasonable.
 ## Jobs, webhooks and keys
 
 Async jobs belong to the principal that submitted them: other non-admin keys get `404` for them and do not see them
-in the job list. Admin keys, including every env key, see all jobs.
+in the job list. Admin keys, including every env key, see all jobs. Jobs and classifiers created while auth was off have no owner and are admin-only to read results of, change or delete once auth is on (non-admin keys may still run such a classifier).
 Webhooks are off until you set `CLEF_WEBHOOK_ALLOW`; list only the receivers you trust (a private address needs its
 IP or CIDR listed explicitly) and see [Jobs & webhooks](jobs.md#webhooks-are-off-by-default-ssrf) and the
 [security policy](../SECURITY.md) before enabling them on an exposed server. `jobs.db` in the state directory holds

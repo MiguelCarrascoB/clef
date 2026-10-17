@@ -65,8 +65,8 @@ most, trusted callers on a local network.
   needs the owner's key, is rate limited and re-runs every check above. Details: [docs/jobs.md](docs/jobs.md#webhooks).
 - **Jobs: ownership, retention, disk.** With keys configured, a job belongs to the principal that submitted it; other
   non-admin keys get `404` and do not see it in the list. Admin keys (all env keys included) see every job. This is a
-  convenience between cooperating callers, not tenant isolation, and jobs created while auth was off stay visible to
-  every key. Jobs are stored in
+  convenience between cooperating callers, not tenant isolation, and jobs or classifiers created while auth was off (no owner) become
+  admin-only once auth is on: non-admin keys get `404` for such a job, `403` when changing or deleting such a classifier, and may still run it. Jobs are stored in
   the database (`clef.db` in the state directory, or `CLEF_DATABASE_URL`): the **submitted payload of every job (your
   input texts), its result rows and webhook secrets are stored in clear text** (HMAC needs the secret; `evaluate` rows
   also keep the input and gold label). Finished jobs are deleted `CLEF_JOB_TTL_HOURS` after they finish (default 168;

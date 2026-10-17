@@ -208,7 +208,7 @@ class JobStore:
     ) -> tuple[list[dict[str, Any]], int]:
         where = []
         if scoped:
-            where.append(or_(_JOBS.c.owner.is_(None), _JOBS.c.owner == owner))
+            where.append(_JOBS.c.owner == owner)  # owner-less jobs (auth-off era) are admin-only
         if status:
             where.append(_JOBS.c.status == status)
         if kind:
@@ -1500,7 +1500,7 @@ def router(ctx: AppContext) -> APIRouter:
         return getattr(request.state, "key_name", None)
 
     def scoped(request: Request) -> bool:
-        """Jobs are private to their owner when auth is on; admins see every principal's jobs."""
+        """Jobs are private to their owner when auth is on; admins see every job, owner-less ones included."""
         principal = ctx.principal(request)
         return ctx.auth_enabled() and not (principal is not None and principal.has("admin"))
 
@@ -1522,7 +1522,7 @@ def router(ctx: AppContext) -> APIRouter:
     async def load(request: Request, job_id: str) -> dict[str, Any]:
         row = await run_in_threadpool(store.get, job_id)
         # Someone else's job is indistinguishable from a missing one.
-        if row is None or (scoped(request) and row["owner"] not in (None, caller(request))):
+        if row is None or (scoped(request) and row["owner"] != caller(request)):
             raise ApiError(404, f"job {job_id!r} not found")
         return row
 
