@@ -16,13 +16,28 @@ most, trusted callers on a local network.
 
 - **Local by default.** `CLEF_HOST` defaults to `127.0.0.1`. Binding any other address without API keys logs a loud
   warning at startup.
-- **API keys.** `CLEF_API_KEY` or `CLEF_API_KEYS` (named keys, from a list or a file) protect every `/v1/*` route and the Hugging Face compatibility routes (`/hf/models/*`).
-  The OpenAI-compatible routes read the same keys as `Authorization: Bearer`, so the official SDKs work unchanged. Keys are compared in constant time, and only the key name is recorded in the request log and stats.
+- **API keys.** Two kinds protect every `/v1/*` route and the Hugging Face compatibility routes (`/hf/models/*`).
+  *Env keys* (`CLEF_API_KEY` or `CLEF_API_KEYS`, named, from a list or a file) are full admin with no quota: treat
+  them as break-glass credentials, and note that every env-key holder sees every job and may change every saved
+  classifier, so env keys are **not** isolated from each other. *Managed keys* (`clef keys create`, the console or
+  `/v1/admin/keys`) belong to a principal with scopes (`classify`, `jobs`, `classifiers`, `ops`, `admin`, `urgent`; a
+  missing scope is `403`), an optional daily record quota and rate limit, expiry and revocation. A managed key is
+  `clef_live_<id>_<secret>`; **only its SHA-256 is stored**, so it cannot be recovered, and the secret is shown once
+  (create / rotate). A rotated principal keeps up to five keys; the old ones expire after a grace period (default 24 h).
+  Auth is on when an env key exists or any managed key ever existed, and never turns off by itself (revoking the last
+  managed key does not open the server). `/v1/admin/*` always needs an `admin` key, even when auth is off. `clef keys`
+  works directly on the database (that is how the first admin key is made, with the server stopped, as the OS user
+  who can read the state directory), so access to the state directory is access to key management; protect it like
+  the keys file. The OpenAI-compatible routes read the same keys as `Authorization: Bearer`, so the official SDKs
+  work unchanged. Keys are compared in constant time (managed keys by their hash), and only the principal name is
+  recorded in the request log and stats. Key changes are audited (who, what, when, IP; never a secret).
   Keep the keys file out of version control and readable only by you (`chmod 600`). The SSE endpoint `/v1/events`
   also accepts `?key=` for plain `EventSource` clients, which puts the key in the URL; do not use it across
   untrusted networks without TLS. The console sends the `X-API-Key` header instead.
-- **Rate limit.** `CLEF_RATE_LIMIT` limits inference requests per minute per key (per IP when auth is off) and returns
-  429 with `Retry-After`. It is a safety net against accidents and noisy clients, not a DDoS defence.
+- **Rate limit and quota.** `CLEF_RATE_LIMIT` limits inference requests per minute per key (per IP when auth is off)
+  and returns 429 with `Retry-After`; a managed key can have its own limit. A managed key can also have a daily
+  quota of records per UTC day (computed records only; cache hits are free; a job is charged at submit and refunded
+  for what it did not process), refused with 429 and `Retry-After`. It is a safety net against accidents and noisy clients, not a DDoS defence.
 - **Rate limit scope.** Besides the classification routes, `POST /v1/chat/completions`, `POST /hf/models/*`,
   `POST /v1/evaluate` and `POST /v1/jobs` count against the limit. `POST /v1/evaluate/metrics` runs no inference and is
   not counted.
@@ -48,9 +63,10 @@ most, trusted callers on a local network.
   check the timestamp. Use `https` for anything that leaves your machine. The TLS path has not been tested against a
   real TLS server yet. `POST /v1/jobs/{id}/webhook/redeliver` resends a failed delivery only to the job's stored URL,
   needs the owner's key, is rate limited and re-runs every check above. Details: [docs/jobs.md](docs/jobs.md#webhooks).
-- **Jobs: ownership, retention, disk.** With keys configured, a job belongs to the key name that submitted it; other
-  keys get `404` and do not see it in the list. This is a convenience between cooperating callers, not tenant
-  isolation: there is no admin view, and jobs created while auth was off stay visible to every key. Jobs are stored in
+- **Jobs: ownership, retention, disk.** With keys configured, a job belongs to the principal that submitted it; other
+  non-admin keys get `404` and do not see it in the list. Admin keys (all env keys included) see every job. This is a
+  convenience between cooperating callers, not tenant isolation, and jobs created while auth was off stay visible to
+  every key. Jobs are stored in
   the database (`clef.db` in the state directory, or `CLEF_DATABASE_URL`): the **submitted payload of every job (your
   input texts), its result rows and webhook secrets are stored in clear text** (HMAC needs the secret; `evaluate` rows
   also keep the input and gold label). Finished jobs are deleted `CLEF_JOB_TTL_HOURS` after they finish (default 168;
@@ -62,7 +78,7 @@ most, trusted callers on a local network.
   secrets: give clef its own database and role, and use TLS (`?sslmode=require`) to a remote server.
   `CLEF_DATABASE_URL` carries the password: clef never logs it, and `/health`, `clef doctor` and the `clef db`
   commands show it as `***`. Prefer a systemd `EnvironmentFile` or a compose `.env` with tight permissions over the
-  command line. The audit log (`audit_log`: saved-classifier changes now, key changes with v3.2 keys) records who,
+  command line. The audit log (`audit_log`: saved-classifier changes, key changes, job cancel / delete; `GET /v1/admin/audit`) records who,
   what and when, never a secret or request content; it has no purge. Job results exported as
   CSV neutralise cells that start with `=`, `+`, `-` or `@`, so opening them in a spreadsheet does not run formulas.
 - **No secrets in logs.** Request state (the text you classify) is not logged unless `CLEF_LOG_STATE=1`, but jobs do
@@ -78,7 +94,8 @@ most, trusted callers on a local network.
   `requirements/`.
 
 Out of scope / not provided: TLS (use a reverse proxy, see [docs/remote-access.md](docs/remote-access.md)), per-user
-authorization (all keys have the same access to the model; job ownership only scopes job visibility), multi-tenant isolation, protection against a malicious model directory.
+authorization beyond the scopes above (all keys that may run the model have the same access to it; job and saved
+classifier ownership only scope visibility and changes), multi-tenant isolation, protection against a malicious model directory.
 
 ## Keys in proxy logs
 

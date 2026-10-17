@@ -32,6 +32,16 @@
   `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` keep working. `/health` and `/v1/models` report the served model
   (adapter, revision, capabilities). `Cache-Control: no-cache` on an inference request will bypass the result
   cache (once it lands).
+- **Keys and principals (D1)**: managed API keys (`clef keys create|list|rotate|revoke|update|usage`, the console
+  **Keys** tab, `/v1/admin/keys*`): a principal has scopes (`classify`, `jobs`, `classifiers`, `ops`, `admin`,
+  `urgent`; a missing one is `403`), an optional daily record quota (`429` + `Retry-After`, `X-Quota-Limit` /
+  `X-Quota-Remaining`; cache hits are free, a job is charged at submit and refunded for what it did not run), a
+  per-key rate limit, expiry, revocation and rotation with a 24 h grace. Keys are `clef_live_<id>_<secret>` and only
+  their SHA-256 is stored. `CLEF_API_KEY` / `CLEF_API_KEYS` stay as full-admin break-glass keys; auth turns on with
+  the first of either and never turns off by itself. `/v1/admin/*` always needs an admin key. `GET /v1/whoami`;
+  admins see every job; `GET /v1/admin/audit` lists key, job and classifier changes; classifier owners are now
+  enforced. Env keys can see each other's jobs (they are admins). Moved: the "listening on a non-loopback address
+  without a key" warning is logged at server start (it needs the database to know about managed keys).
 
 ### Changed
 - **`model` in requests**: optional everywhere (omit it, or send null, for the served model); responses report the

@@ -416,6 +416,7 @@ def test_admin_routes_always_need_an_admin_key():
 # ------------------------------------------------------------------ quotas over HTTP
 
 
+@pytest.mark.postgres
 def test_quota_headers_429_and_retry_after():
     client, _, app = make(api_key="root")
     secret = add_key(app, "ci", "classify", daily_quota=3)
@@ -490,6 +491,7 @@ class HitEngine(FakeEngine):
         return [prepared.hits.get(i, r) for i, r in enumerate(out)]
 
 
+@pytest.mark.postgres
 def test_cache_hits_are_not_charged():
     client, _, app = make(HitEngine(), api_key="root")
     secret = add_key(app, "ci", "classify", daily_quota=10)
@@ -510,6 +512,7 @@ def test_db_principal_without_quota_is_counted_but_not_limited():
         assert app.state.ctx.quotas.used("free") == 3
 
 
+@pytest.mark.postgres
 def test_usage_is_flushed_at_shutdown():
     client, _, app = make(api_key="root")
     secret = add_key(app, "ci", "classify", daily_quota=10)
@@ -542,6 +545,7 @@ def test_principal_rate_limit_applies_even_without_a_global_limit():
 # ------------------------------------------------------------------ jobs: ownership, quota, audit
 
 
+@pytest.mark.postgres
 def test_job_quota_reserve_refund_replay_and_cancel():
     client, _, app = make(SlowEngine(delay=0.15), api_key="root")
     secret = add_key(app, "ci", "classify,jobs", daily_quota=50)
@@ -637,6 +641,7 @@ def test_job_cancel_is_audited():
 # ------------------------------------------------------------------ admin API
 
 
+@pytest.mark.postgres
 def test_admin_api_lifecycle():
     client, _, app = make(api_key="root")
     root = hdr("root")
@@ -688,6 +693,7 @@ def test_admin_api_lifecycle():
         assert secret not in json.dumps(audit)
 
 
+@pytest.mark.postgres
 def test_admin_api_errors_and_guards():
     client, _, app = make(api_keys_raw="root:kr")
     root = hdr("kr")

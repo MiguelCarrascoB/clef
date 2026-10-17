@@ -3,6 +3,43 @@
 By default clef binds `127.0.0.1`: only the machine it runs on can call it. This page covers calling it from other
 machines on your local network, and what to add if you expose it further.
 
+## Two kinds of keys
+
+- **Env keys** (`CLEF_API_KEY`, `CLEF_API_KEYS`): full admin, no quota, the global rate limit. They are the
+  break-glass key and the bootstrap: the first admin key is made with one of them, or with `clef keys create`.
+  They are read at startup.
+- **Managed keys** (`clef keys ...` or the console **Keys** tab): a *principal* (a name) with scopes, an optional daily
+  quota and rate limit, and one to five keys (`clef_live_<id>_<secret>`). Only the SHA-256 of a key is stored; the
+  secret is shown once, when it is created or rotated. Changes made in the console or through `/v1/admin/keys` apply at
+  once; changes made with `clef keys` while the server runs apply within about 10 seconds.
+
+Auth is on when an env key exists or any managed key was ever created, and it never turns off by itself: revoking the
+last managed key leaves the server locked until you make a new one (`clef keys create` works with the server stopped,
+straight on the database).
+
+```bash
+clef keys create ci-bot --scope classify,jobs --quota 50000 --expires 90d   # prints the key once
+clef keys create ops --scope admin                                         # an admin key for the console
+clef keys list
+clef keys rotate ci-bot --grace 24h     # new key now; the old ones keep working for 24 h
+clef keys revoke ci-bot --key-id ab3...  # one key; without --key-id the principal is disabled for good
+clef keys update ci-bot --quota none --scope classify,jobs,ops
+clef keys usage ci-bot --days 30
+```
+
+Scopes: `classify` (the model routes, `GET /v1/classifiers`, `/v1/models`, `/v1/evaluate`), `jobs` (`/v1/jobs*`),
+`classifiers` (create / change / delete saved classifiers), `ops` (stats, log, events), `urgent` (urgent jobs) and
+`admin` (everything, plus `/v1/admin/*` and the Keys tab). A key without the route's scope gets `403`. `GET /v1/whoami`
+shows the caller's name, scopes and quota use.
+
+**Daily quota.** Counts records (a batch of 50 is 50) per UTC day. Computed records are charged; results served from
+the result cache are free. A job is charged in full when it is submitted, and the part it did not process comes back
+if it is cancelled or fails. Over the quota: `429` with `Retry-After` (seconds to the next UTC midnight); the OpenAI
+routes report `insufficient_quota`. Responses carry `X-Quota-Limit` and `X-Quota-Remaining`.
+
+**Audit log.** Key changes, job cancel / delete and saved-classifier changes are recorded with who, what, when and
+IP (`GET /v1/admin/audit`, also in the console). Secrets are never recorded.
+
 ## LAN setup
 
 1. Create a keys file (one `name:key` per line, `#` comments allowed). Generate strong keys:
@@ -24,7 +61,8 @@ machines on your local network, and what to add if you expose it further.
    ```
 
    `CLEF_API_KEYS` also accepts the list inline: `ci-bot:KEY1,laptop:KEY2`. `CLEF_API_KEY=KEY` is a single key named
-   `default`. Binding a non-loopback host with no key logs a loud warning at startup; do not ignore it.
+   `default`. These are env keys (full admin); for scoped keys with quotas use `clef keys create` instead of, or next
+   to, them. Binding a non-loopback host with no key (env or managed) logs a loud warning at startup; do not ignore it.
 
 3. Allow the port through the firewall for your LAN only (below).
 
@@ -37,7 +75,8 @@ machines on your local network, and what to add if you expose it further.
 
    `Authorization: Bearer <key>` works too. The Python and JS clients take the key as `api_key=` / `apiKey`.
 
-All `/v1/*` routes, and the Hugging Face routes (`/hf/models/*`), then require a key (401 otherwise); the OpenAI SDKs
+All `/v1/*` routes, and the Hugging Face routes (`/hf/models/*`), then require a key (401 otherwise, 403 for a key
+without the route's scope); `/v1/admin/*` always requires an admin key, even when auth is off; the OpenAI SDKs
 send it as `Authorization: Bearer` from their `api_key` setting. Open routes: `/`, static files, `/health`, `/livez`, `/readyz`, `/docs`,
 `/openapi.json`. The console is served without a key, but its API calls need one: enter it in the console settings. The
 console sends the key in the `X-API-Key` header, also for the live event stream. `/v1/events` still accepts `?key=`
@@ -51,18 +90,21 @@ use TLS.
 - Keys are compared in constant time. clef never logs them: `?key=` values are written as `REDACTED` in the access
   log. If you turn on the access log of a reverse proxy, mask the key there too; see
   [Keys in proxy logs](security.md#keys-in-proxy-logs) for Caddy and nginx.
-- Rotate by editing the keys file and restarting `clef serve` (keys are read at startup).
+- Rotate a managed key with `clef keys rotate NAME` (or the console): the old key keeps working for the grace
+  period (default 24 h), so callers can switch without a gap. Env keys are rotated by editing the keys file and
+  restarting `clef serve` (they are read at startup).
 
 ## Rate limit
 
 `CLEF_RATE_LIMIT=N` allows N inference requests per minute per key (per client IP when auth is off), sliding 60 s
-window. Counted routes: `/v1/systemone`, `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/score`,
+window. A managed key can have its own limit (`--rate-limit`), which applies even when `CLEF_RATE_LIMIT` is 0. Counted routes: `/v1/systemone`, `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/score`,
 `POST /v1/classifiers/{name}[/batch]`, `/v1/chat/completions`, `/hf/models/*`, `/v1/evaluate` and `POST /v1/jobs`. Over the limit: `429` with `Retry-After: <seconds>`. `0` (default) disables it.
 A batch call counts as one request, so also keep `CLEF_MAX_BATCH` reasonable.
 
 ## Jobs, webhooks and keys
 
-Async jobs belong to the key that submitted them: other keys get `404` for them and do not see them in the job list.
+Async jobs belong to the principal that submitted them: other non-admin keys get `404` for them and do not see them
+in the job list. Admin keys, including every env key, see all jobs.
 Webhooks are off until you set `CLEF_WEBHOOK_ALLOW`; list only the receivers you trust (a private address needs its
 IP or CIDR listed explicitly) and see [Jobs & webhooks](jobs.md#webhooks-are-off-by-default-ssrf) and the
 [security policy](../SECURITY.md) before enabling them on an exposed server. `jobs.db` in the state directory holds

@@ -1111,7 +1111,7 @@ Supersedes when landed: "ONE uvicorn worker per process (one model)" (becomes "o
 `loader` / `load_release_model` wording in Engine interface, "`GET /v1/models` lists `clef-flash`" and "`model`
 defaults to `"clef-flash"`" in the Classification and Compat sections.
 
-## Keys and principals (planned, v3.2)
+## Keys and principals
 
 Model: a **principal** is a name with scopes, a daily quota and a status; it owns jobs, classifiers, routers, files
 and batches (all keyed by name, as `jobs.owner` is today). A principal has 1 to 5 active **keys** (overlapping
@@ -1290,6 +1290,36 @@ picker), revoke (type the name to confirm), edit, audit list, env principals rea
 Invariants: no plaintext secret is ever stored or logged; the request path does no DB I/O for auth; a principal
 row is never deleted; env keys always work and are always admin; auth, once on because of a DB principal, never
 turns off by itself.
+
+As built (D1; additions and deviations, nothing above changed in meaning):
+- `Principal`, `ALL_SCOPES` and the key helpers live in `keystore.py`; `security.Authenticator` composes the old
+  `KeyAuth` (kept, now only the constant-time env walk) with the `KeyCache`.
+- `ctx.scope(*names)` returns one dependency that also runs `require_key`; no names = any valid key (`/v1/whoami`).
+  The callable carries `clef_scope = names`: the default-deny test (`tests/unit/test_keys.py`) looks for it on every
+  `/v1/*`, `/hf/*`, `/models/*` route (newer FastAPI keeps included routers lazy, so it walks
+  `effective_route_contexts()`). New routes in other workstreams (E2's routers and review, F1's files and batches)
+  fail that test until they use `ctx.scope`.
+- Wiring: `create_app` builds `KeyCache` and `Quotas` and loads both synchronously (auth is right from the first
+  request, also in tests that never start the lifespan). Their background tasks start from the first `on_startup`
+  hook (so `recover()` in jobs can refund into loaded counters) and stop from the last-running `on_shutdown` hook,
+  which flushes usage and `last_used_at`. A failed reload keeps the last good cache.
+- `Quotas`: `reserve` returns a `Reservation` for every DB principal (usage is counted even without a quota) and
+  counts `requests` / `rejected` itself. The flush is UPDATE-then-INSERT per row in one transaction (portable;
+  a refund below the stored count clamps at 0), not a dialect upsert. `history(name, days)` is zero-filled and
+  merges unflushed deltas; `remaining(principal)` feeds the headers.
+- `ctx.infer`: reserve `len(reqs)` before any work (429 `insufficient_quota`), `ctx.prepare` (cache lookup),
+  refund `len(prepared.hits)`, then `decide_prepared`. Any exception (4xx before the engine included) refunds what
+  is still held. Headers come from `request.state.quota`, added by `GuardMiddleware` for every route.
+- Jobs: `JobStore.create(..., quota_day, quota_reserved)`; the count per kind is `jobs.job_records` (a kind may
+  give `"records": fn(parsed)`). `JobStore.settle_quota(job_id=None)` refunds `quota_reserved - done` of failed /
+  cancelled jobs once (it then sets `quota_reserved = done`, the net charge). The runner calls it after every
+  failed / cancelled finish and for all jobs at startup. Cache hits inside jobs are not refunded (the whole job is
+  reserved at submit); E1 may refine that. `job.cancel` is audited after the cancel, `job.delete` in the delete's
+  own transaction. Admins see every job (`scoped = auth_enabled and not admin`).
+- `ApiError` has an optional `code` (OpenAI `insufficient_quota`; type `insufficient_quota` too); 403 renders as
+  `permission_denied`.
+- `bind_warning(cfg, auth_enabled)` runs in the lifespan and mentions `clef keys create`.
+- CLI: `clef keys` also has `update` and `usage`; `--expires` takes `90d` or a date (valid through that UTC day).
 
 Supersedes when landed: the Keys bullet of "Auth, rate limit, CORS" (`KeyAuth`, "auth off -> `key` is `null`"), the
 `security.py` row's "multi-key auth", and "jobs created while auth was off stay visible to every key" (still true)
