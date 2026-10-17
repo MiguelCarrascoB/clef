@@ -196,6 +196,12 @@ def test_a_local_dir_has_no_revision_to_match():
     assert eng.model_ref() == "clef-flash@local"
     with pytest.raises(UnknownModel):
         eng.check_model(f"clef-flash@{FLASH_SHA}")
+    assert eng.check_model("clef-flash@local") == "clef-flash"  # the ref /health and jobs.model report
+
+
+def test_check_model_accepts_its_own_ref():
+    eng = engine(model_path=None)
+    assert eng.check_model(eng.model_ref()) == "clef-flash"
 
 
 def test_unknown_clef_model_is_a_load_error_not_a_crash():

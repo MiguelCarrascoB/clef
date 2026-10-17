@@ -520,12 +520,12 @@ class Engine:
         return self.spec.ref
 
     def check_model(self, requested: str | None) -> str:
-        """The served id when `requested` names it (id, id@<sha or a >= 7-char prefix>, the HF repo), else
-        UnknownModel (-> 404). None / "" mean the served model."""
+        """The served id when `requested` names it (id, its ref e.g. `clef-flash@local`, id@<sha or a
+        >= 7-char prefix>, the HF repo), else UnknownModel (-> 404). None / "" mean the served model."""
         spec = self.spec
         if not requested:
             return spec.id
-        if requested == spec.id or (spec.repo is not None and requested == spec.repo):
+        if requested in (spec.id, spec.ref) or (spec.repo is not None and requested == spec.repo):
             return spec.id
         model_id, sep, rev = requested.partition("@")
         rev = rev.lower()

@@ -1038,7 +1038,8 @@ class Engine:
     spec: ModelSpec                    # resolved at construction (torch-free)
     def model_ref(self) -> str         # spec.ref
     def check_model(self, requested: str | None) -> str
-        # None / "" -> spec.id. Accepted: spec.id, f"{spec.id}@{rev}" (full sha or a >= 7-char prefix), spec.repo.
+        # None / "" -> spec.id. Accepted: spec.id, spec.ref (e.g. "clef-flash@local"), spec.repo,
+        # f"{spec.id}@{rev}" (full sha or a >= 7-char prefix).
         # Anything else -> UnknownModel(f"model {requested!r} is not served here (this server serves {spec.id!r})")
     async def prepare(self, records: list[Record], cache: bool = True) -> Prepared
         # validate + check_model per record, cache lookup (D3; no-op until then), encode the misses in threads
