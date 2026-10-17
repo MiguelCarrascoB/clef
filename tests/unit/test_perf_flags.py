@@ -108,6 +108,44 @@ def test_fast_head_matches_release_head(sizes):
     assert_close(got, again, tol=0.0)
 
 
+def test_fast_head_bf16_matches_release_head():
+    """bf16 has 8 bits of mantissa; both heads round differently, so the bound is a few bf16 ulps of the
+    logit scale (|logit| is O(1-10) here): max |dlogit| <= 0.1 and every softmax within 2e-2."""
+    rng = torch.Generator().manual_seed(9)
+    head = make_head(2).to(torch.bfloat16)
+    recs = [make_encoded(rng, n, extra=i * 3) for i, n in enumerate([2, 4, 1])]
+    lengths = [len(r.input_ids) for r in recs]
+    pad_to = max(lengths) + 4
+    ids, mask = make_batch(recs, pad_to)
+    hidden = torch.randn(len(recs), pad_to, HID, generator=rng).to(torch.bfloat16)
+    weight = torch.randn(VOCAB, HID, generator=rng).to(torch.bfloat16)
+    ref = reference_logits(head, hidden, ids, mask, recs, weight)
+    with torch.inference_mode():
+        got = fast_joint_head(head, hidden, ids, lengths, recs, weight)
+    for r_rec, g_rec in zip(ref, got, strict=True):
+        for r, g in zip(r_rec, g_rec, strict=True):
+            r, g = r.float(), g.float()
+            assert not torch.isnan(g).any()
+            assert (r - g).abs().max().item() <= 0.1
+            assert (r.softmax(-1) - g.softmax(-1)).abs().max().item() <= 2e-2
+
+
+def test_validate_rejects_empty_question_id_and_instructions():
+    ad = adapter(FakeModel())
+    ok = {"state": "s", "questions": {"q": {"type": "noul", "instructions": "Is it?"}}}
+    ad.validate(ok)
+    ad.validate(
+        {"state": "s", "questions": {"q": {"type": "noul", "instructions": ""}}}
+    )  # falls back to the id
+    for bad in (
+        {"state": "s", "questions": {"": {"type": "noul", "instructions": "Is it?"}}},
+        {"state": "s", "questions": {" ": {"type": "noul", "instructions": ""}}},
+        {"state": "s", "questions": {"q": {"type": "noul", "instructions": "   "}}},
+    ):
+        with pytest.raises(ValueError, match="questions"):
+            ad.validate(bad)
+
+
 def test_fast_head_no_padding_and_host_output():
     rng = torch.Generator().manual_seed(3)
     head = make_head(1)

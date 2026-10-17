@@ -161,6 +161,17 @@ class ClefReleaseAdapter(LocalTensorAdapter):
         self._pad = 0 if pad is None else int(pad)
         return info
 
+    def validate(self, record: Record) -> None:
+        super().validate(record)
+        # An empty span makes the release span mean NaN (the fast head gives 0): refuse it up front. The release
+        # renders `instructions` (or the question id when it is missing or "") as the question span.
+        for qid, q in (record.get("questions") or {}).items():
+            if not str(qid).strip():
+                raise ValueError("questions: question ids must not be empty")
+            text = q.get("instructions")
+            if not (str(qid) if text in (None, "") else str(text)).strip():
+                raise ValueError(f"questions.{qid}.instructions: must not be blank")
+
     # ------------------------------------------------------------------ tensors
     def encode(self, record: Record) -> ReleaseEncoded:
         from ..engine import InputTooLarge
