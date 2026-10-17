@@ -3367,7 +3367,7 @@
                 }
               }
             },
-            "description": "Unknown classifier"
+            "description": "Unknown classifier, or a model this server does not serve"
           },
           "409": {
             "content": {
@@ -3495,7 +3495,7 @@
                 }
               }
             },
-            "description": "Unknown classifier"
+            "description": "Unknown classifier, or a model this server does not serve"
           },
           "409": {
             "content": {
