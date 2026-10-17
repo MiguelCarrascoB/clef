@@ -13,6 +13,13 @@ Threading model: exactly one thread (the "worker") touches the GPU. It loads the
 interleaved with request serving, and then processes the queue. `decide()` tokenizes on the caller side
 (thread pool), enqueues encoded records, and awaits futures that the worker resolves.
 
+Priority lanes: the queue has two FIFO lanes, "interactive" (requests, the default) and "background"
+(jobs, through ctx.decide). After the batch window the worker fills the micro-batch from ONE lane:
+interactive whenever any is queued, else background. After cfg.interactive_burst interactive micro-batches
+in a row while background work waited, one background micro-batch goes next (starvation bound). Classes are
+never mixed in a forward: the model is compute-bound, so an interactive record riding in a full background
+batch would pay for all of it.
+
 Bucketing: text-only records are grouped by length bucket (see `bucket_for`) so one forward carries similar
 lengths, then right-padded to the next cfg.pad_multiple (default 64): hipBLASLt picks faster GEMM tiles for
 aligned lengths, and the waste stays under 64 tokens. Full padding to the bucket is opt-in
@@ -32,10 +39,10 @@ import contextlib
 import importlib
 import importlib.metadata
 import logging
-import queue
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,7 +59,9 @@ log = logging.getLogger("clef.engine")
 Record = dict
 Result = dict
 
-_SENTINEL = object()
+INTERACTIVE = "interactive"
+BACKGROUND = "background"
+PRIORITIES = (INTERACTIVE, BACKGROUND)
 _EMPTY_TELEMETRY = {
     "available": False,
     "source": None,
@@ -398,7 +407,13 @@ class Engine:
         self.error: str | None = None
         self.load_seconds: float | None = None
         self.warmup_seconds: float | None = None
-        self._q: queue.Queue = queue.Queue()
+        # Two FIFO lanes guarded by one condition; _closed replaces the old shutdown sentinel and _drained
+        # refuses late enqueues once the worker has failed the leftovers.
+        self._lanes: dict[str, deque[_Item]] = {p: deque() for p in PRIORITIES}
+        self._cv = threading.Condition()
+        self._closed = False
+        self._drained = False
+        self._burst = 0  # interactive micro-batches in a row while background work waited
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._started = False
@@ -420,12 +435,16 @@ class Engine:
 
     def shutdown(self, timeout: float = 10.0) -> None:
         self._stop.set()
-        self._q.put(_SENTINEL)
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
         if self._thread is not None:
             self._thread.join(timeout)
 
     # ------------------------------------------------------------------ public API
-    async def decide(self, records: list[Record]) -> list[Result]:
+    async def decide(self, records: list[Record], priority: str = INTERACTIVE) -> list[Result]:
+        if priority not in PRIORITIES:
+            raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}, got {priority!r}")
         if self.status not in ("ready", "warming") or self._stop.is_set():
             raise EngineNotReady(self.error or f"engine is {self.status}")
         if not records:
@@ -448,8 +467,11 @@ class Engine:
             )
             for r, enc in zip(records, encs, strict=True)
         ]
-        for it in items:
-            self._q.put(it)
+        with self._cv:
+            if self._drained:
+                raise EngineNotReady(self.error or "engine shut down")
+            self._lanes[priority].extend(items)
+            self._cv.notify()
         self._report_depth()
         results = await asyncio.gather(*(it.future for it in items), return_exceptions=True)
         for res in results:
@@ -589,7 +611,8 @@ class Engine:
 
     def _report_depth(self) -> None:
         try:
-            self.stats.set_queue_depth(self._q.qsize())
+            by_class = {p: len(lane) for p, lane in self._lanes.items()}
+            self.stats.set_queue_depth(sum(by_class.values()), by_class=by_class)
         except Exception:
             log.exception("stats.set_queue_depth failed")
 
@@ -704,40 +727,50 @@ class Engine:
         return True
 
     def _drain_fail(self) -> None:
-        while True:
-            try:
-                it = self._q.get_nowait()
-            except queue.Empty:
-                break
-            if it is not _SENTINEL:
-                _resolve(it, exc=EngineNotReady(self.error or "engine shut down"))
+        with self._cv:
+            self._drained = True
+            left = [it for lane in self._lanes.values() for it in lane]
+            for lane in self._lanes.values():
+                lane.clear()
+        for it in left:
+            _resolve(it, exc=EngineNotReady(self.error or "engine shut down"))
         self._report_depth()
+
+    def _pending(self) -> int:
+        return sum(len(lane) for lane in self._lanes.values())
 
     def _collect(self, first_timeout: float) -> list[_Item] | None:
-        """Block up to first_timeout for a first item, then drain for the batch window.
+        """Block up to first_timeout for a first item, let the batch window run, then take one lane's items.
 
-        Returns [] if nothing arrived, None if the shutdown sentinel was seen with nothing pending.
+        Returns [] if nothing arrived, None on shutdown with nothing pending. The lane is chosen after the
+        window, so interactive work that arrives during a window opened by background work still goes first.
         """
-        try:
-            first = self._q.get(timeout=first_timeout) if first_timeout > 0 else self._q.get_nowait()
-        except queue.Empty:
-            return []
-        if first is _SENTINEL:
-            return None
-        batch = [first]
-        deadline = time.perf_counter() + self.cfg.batch_window_ms / 1000.0
-        while len(batch) < self.cfg.max_microbatch:
-            remaining = deadline - time.perf_counter()
-            try:
-                nxt = self._q.get(timeout=remaining) if remaining > 0 else self._q.get_nowait()
-            except queue.Empty:
-                break
-            if nxt is _SENTINEL:
-                self._stop.set()
-                break
-            batch.append(nxt)
+        cap = max(1, int(self.cfg.max_microbatch))
+        with self._cv:
+            if not self._pending() and not self._closed and first_timeout > 0:
+                self._cv.wait_for(lambda: self._pending() or self._closed, first_timeout)
+            if not self._pending():
+                return None if self._closed else []
+            deadline = time.perf_counter() + self.cfg.batch_window_ms / 1000.0
+            while self._pending() < cap and not self._closed:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                self._cv.wait(remaining)
+            lane = self._pick_lane()
+            batch = [lane.popleft() for _ in range(min(cap, len(lane)))]
         self._report_depth()
         return batch
+
+    def _pick_lane(self) -> deque[_Item]:
+        """Interactive first; one background micro-batch after cfg.interactive_burst interactive in a row."""
+        inter, back = self._lanes[INTERACTIVE], self._lanes[BACKGROUND]
+        burst = max(1, int(getattr(self.cfg, "interactive_burst", 8)))
+        if inter and (not back or self._burst < burst):
+            self._burst = self._burst + 1 if back else 0
+            return inter
+        self._burst = 0
+        return back
 
     def _group(self, items: list[_Item]) -> list[list[_Item]]:
         groups: list[list[_Item]] = [[it] for it in items if it.is_media]

@@ -38,16 +38,19 @@ machines on your local network, and what to add if you expose it further.
    `Authorization: Bearer <key>` works too. The Python and JS clients take the key as `api_key=` / `apiKey`.
 
 All `/v1/*` routes, and the Hugging Face routes (`/hf/models/*`), then require a key (401 otherwise); the OpenAI SDKs
-send it as `Authorization: Bearer` from their `api_key` setting. Open routes: `/`, static files, `/health`, `/livez`, `/docs`,
+send it as `Authorization: Bearer` from their `api_key` setting. Open routes: `/`, static files, `/health`, `/livez`, `/readyz`, `/docs`,
 `/openapi.json`. The console is served without a key, but its API calls need one: enter it in the console settings. The
-live event stream accepts `?key=` because browsers cannot set headers on `EventSource`; this puts the key in the URL,
-so on untrusted networks use TLS.
+console sends the key in the `X-API-Key` header, also for the live event stream. `/v1/events` still accepts `?key=`
+for plain `EventSource` clients (they cannot set headers); this puts the key in the URL, so on untrusted networks
+use TLS.
 
 ## Keys and logging
 
 - Each key has a name. The name (never the key) is stored on every request in `/v1/log` and counted in `/v1/stats`
   (`by_key`), so you can see who is calling.
-- Keys are compared in constant time. They are never logged.
+- Keys are compared in constant time. clef never logs them: `?key=` values are written as `REDACTED` in the access
+  log. If you turn on the access log of a reverse proxy, mask the key there too; see
+  [Keys in proxy logs](security.md#keys-in-proxy-logs) for Caddy and nginx.
 - Rotate by editing the keys file and restarting `clef serve` (keys are read at startup).
 
 ## Rate limit
@@ -122,6 +125,7 @@ clef.example.com {
         max_size 64MB
     }
 
+    # no `log` directive: if you add one, mask X-Api-Key and ?key= (security.md#keys-in-proxy-logs)
     reverse_proxy 127.0.0.1:8910 {
         # server-sent events (/v1/events) must not be buffered
         flush_interval -1
@@ -132,6 +136,13 @@ clef.example.com {
 Run `caddy run --config Caddyfile`. For a LAN-only hostname without a public domain, use `tls internal` inside the
 site block (clients must trust Caddy's local CA). Behind a proxy every request comes from `127.0.0.1`, so the rate
 limit is per key, not per client IP: keep API keys on.
+
+**Load balancers.** Point the health check at `/readyz` (open, no key). To take a server out of rotation before
+it stops, set `CLEF_DRAIN_S` (e.g. `5`): after SIGTERM / Ctrl-C clef keeps serving that long while `/readyz`
+answers 503 `draining`, then shuts down; a second signal stops it at once. Pick the probe interval x failure
+threshold below `CLEF_DRAIN_S`, and keep `CLEF_DRAIN_S` below your supervisor's stop timeout (10 s for
+`docker stop`). With the default `0` the listening socket closes at once and the load balancer only sees refused
+connections.
 
 Additional hardening if you do expose it: set a low `CLEF_RATE_LIMIT`, keep `CLEF_ALLOW_URL_FETCH=0` (default), keep
 `CLEF_LOG_STATE=0` (default; request contents are not stored), and restrict by IP in the proxy where possible.

@@ -74,6 +74,10 @@ def test_forward_and_tokens():
     assert f["count"] == 2 and f["avg_batch"] == 3.0 and f["avg_ms"] == 150.0
     assert f["padding_ratio"] == round(1 - 1000 / 1200, 4)
     assert snap["queue_depth"] == 3 and snap["tokens"] == {"in_total": 400, "avg_in": 200}
+    assert snap["queue_depth_by_class"] == {"interactive": 0, "background": 0}
+    s.set_queue_depth(5, by_class={"interactive": 2, "background": 3})
+    snap = s.snapshot()
+    assert snap["queue_depth"] == 5 and snap["queue_depth_by_class"] == {"interactive": 2, "background": 3}
 
 
 def test_in_flight():

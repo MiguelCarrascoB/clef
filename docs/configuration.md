@@ -28,6 +28,7 @@ See [Smaller GPUs](memory.md) for which combination fits which card.
 | `CLEF_API_KEY` / `CLEF_API_KEYS` | unset | one key, or `name:key,name2:key2` / a path to a file with one `name:key` per line |
 | `CLEF_RATE_LIMIT` | `0` | requests per minute per key (per client IP when auth is off); 0 = off |
 | `CLEF_CORS_ORIGINS` | empty | comma-separated allowed origins (`*` allowed); empty = CORS off |
+| `CLEF_DRAIN_S` | `0` | seconds to keep serving after the first SIGTERM / Ctrl-C while `/readyz` answers 503 `draining`, so a load balancer stops routing first; a second signal stops at once. `0` = stop at once. Behind a load balancer use e.g. `5` (below Docker's 10 s stop timeout). `--drain-s` |
 | `CLEF_STATE_DIR` | per OS | logs, pidfile, saved classifiers and the jobs database (`jobs.db`) |
 
 ## Limits
@@ -56,9 +57,10 @@ See [Jobs & webhooks](jobs.md).
 | `CLEF_MAX_JOBS` | `100` | queued + running jobs; more is `409` with `Retry-After` |
 | `CLEF_JOB_TTL_HOURS` | `168` | finished jobs and their rows are purged this long after they finish; `0` keeps them forever |
 | `CLEF_JOB_ENGINE_WAIT_S` | `600` | how long a job waits for an unavailable engine before failing |
+| `CLEF_INTERACTIVE_BURST` | `8` | interactive micro-batches in a row before waiting job work gets one (the engine's priority lane; `>= 1`) |
 | `CLEF_WEBHOOK_ALLOW` | empty | hosts (`hooks.example.com`, `*.corp.example.net`), IPs and CIDRs webhooks may be sent to. **Empty = webhooks off** |
 | `CLEF_WEBHOOK_TIMEOUT_S` | `10` | total timeout of one delivery attempt |
-| `CLEF_WEBHOOK_ATTEMPTS` | `5` | delivery attempts for final events |
+| `CLEF_WEBHOOK_ATTEMPTS` | `10` | delivery attempts for final events |
 
 ## Observability
 
@@ -68,6 +70,7 @@ See [Jobs & webhooks](jobs.md).
 | `CLEF_LOG_STATE` | `0` | store a 200-character preview of each request's input in the request log |
 | `CLEF_LOG_BUFFER` | `1000` | request log ring buffer size |
 | `CLEF_SAMPLE_INTERVAL_S` | `2` | gauge sampling period for the console charts |
+| `CLEF_LOG_FORMAT` | `text` | `text` or `json`. json writes the app, uvicorn and access log lines as one JSON object per line (`ts`, `level`, `logger`, `msg`, plus `request_id` inside a request and `exc` for a traceback). `--log-format` |
 
 Example for LAN access:
 

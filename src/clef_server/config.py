@@ -18,6 +18,7 @@ DEVICES = ("auto", "cuda", "rocm", "mps", "cpu")
 DTYPES = ("auto", "bfloat16", "float16", "float32")
 QUANTS = ("none", "int8", "nf4")
 OFFLOADS = ("none", "cpu")
+LOG_FORMATS = ("text", "json")  # CLEF_LOG_FORMAT, see logs.py
 KEY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
@@ -136,6 +137,9 @@ class Config:
     cors_origins: tuple[str, ...] = field(
         default_factory=lambda: _csv(os.environ.get("CLEF_CORS_ORIGINS", ""))
     )
+    # Seconds to keep serving after the first SIGTERM / Ctrl-C with /readyz 503 "draining", so a load balancer
+    # stops routing first (main.run only; 0 = stop at once). A second signal skips the rest.
+    drain_s: float = field(default_factory=lambda: _float("CLEF_DRAIN_S", 0.0))
 
     # state (logs, pidfile, saved classifiers)
     state_dir: str = field(default_factory=lambda: str(default_state_dir()))
@@ -164,7 +168,8 @@ class Config:
     )  # 0 = keep forever
     max_jobs: int = field(default_factory=lambda: _int("CLEF_MAX_JOBS", 100))  # queued + running jobs
     job_engine_wait_s: float = field(default_factory=lambda: _float("CLEF_JOB_ENGINE_WAIT_S", 600.0))
-    # A job interrupted (crash / restart) more often than this is failed instead of resumed (0 = no limit).
+    # A job found still running at startup (a crash, not a clean stop) more often than this is failed
+    # instead of resumed (0 = no limit).
     job_max_resumes: int = field(default_factory=lambda: _int("CLEF_JOB_MAX_RESUMES", 3))
     # Hosts / IPs / CIDRs webhooks may be delivered to. Empty (default) = webhooks are OFF.
     webhook_allow: tuple[str, ...] = field(
@@ -179,6 +184,8 @@ class Config:
     # engine / performance
     max_microbatch: int = field(default_factory=lambda: _int("CLEF_MAX_MICROBATCH", 8))
     batch_window_ms: float = field(default_factory=lambda: _float("CLEF_BATCH_WINDOW_MS", 4.0))
+    # Interactive micro-batches in a row before waiting background (job) work gets one (starvation bound).
+    interactive_burst: int = field(default_factory=lambda: _int("CLEF_INTERACTIVE_BURST", 8))
     buckets: tuple[int, ...] = field(
         default_factory=lambda: _buckets(
             _env("CLEF_BUCKETS") or "128,192,256,384,512,768,1024,1536,2048,3072,4096"
@@ -196,6 +203,9 @@ class Config:
     log_state: bool = field(default_factory=lambda: _bool("CLEF_LOG_STATE", False))
     log_buffer: int = field(default_factory=lambda: _int("CLEF_LOG_BUFFER", 1000))
     sample_interval_s: float = field(default_factory=lambda: _float("CLEF_SAMPLE_INTERVAL_S", 2.0))
+    log_format: str = field(
+        default_factory=lambda: _str("CLEF_LOG_FORMAT", "text").lower()
+    )  # see LOG_FORMATS
 
     def __post_init__(self) -> None:
         for name, value, allowed in (
@@ -203,6 +213,7 @@ class Config:
             ("CLEF_DTYPE", self.dtype, DTYPES),
             ("CLEF_QUANT", self.quant, QUANTS),
             ("CLEF_QUANT_BACKEND", self.quant_backend, ("auto", "bnb", "torchao")),
+            ("CLEF_LOG_FORMAT", self.log_format, LOG_FORMATS),
         ):
             if value not in allowed:
                 raise ValueError(f"{name}={value!r} is not one of {', '.join(allowed)}")
@@ -214,6 +225,10 @@ class Config:
             raise ValueError("CLEF_CLASSIFY_THRESHOLD must be within [0, 1]")
         if self.rate_limit < 0:
             raise ValueError("CLEF_RATE_LIMIT must be >= 0 (0 disables it)")
+        if self.interactive_burst < 1:
+            raise ValueError("CLEF_INTERACTIVE_BURST must be >= 1")
+        if self.drain_s < 0:
+            raise ValueError("CLEF_DRAIN_S must be >= 0 (0 = no drain)")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
 
     def api_keys(self) -> dict[str, str]:

@@ -19,6 +19,7 @@ tests. Change it first, then the code.
 | `clef_server/classify.py` | classification API models + translation classify/score <-> SystemOne records/answers |
 | `clef_server/classifiers.py` | saved-classifier store (JSON files under `<state_dir>/classifiers/`) |
 | `clef_server/security.py` | multi-key auth, per-key rate limiting, CORS setup |
+| `clef_server/logs.py` | stdlib-only logging: text / JSON formatters, the request-id context, secret redaction for the access log, uvicorn's `log_config` |
 | `clef_server/media.py` | data-URL / (optional) URL fetching with SSRF guard + caps, image/video decode |
 | `clef_server/stats.py` | request log ring buffer, latency histogram, counters, forward stats, **time series ring buffer** |
 | `clef_server/appctx.py` | `AppContext`: what a feature module gets from `create_app()` (config, stats, engine, auth / rate-limit dependencies, inference helpers, lifecycle hooks) |
@@ -58,6 +59,7 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_API_KEY` | unset | one key, named `default` |
 | `CLEF_API_KEYS` | unset | `name:key,name2:key2` or a path to a file with one `name:key` per line (`#` comments) |
 | `CLEF_RATE_LIMIT` | `0` | requests per minute per key (per client IP when auth is off); 0 = off |
+| `CLEF_DRAIN_S` | `0` | seconds `main.run` keeps serving after the first SIGTERM / Ctrl-C with `/readyz` 503 `draining` (see [`GET /readyz`](#get-readyz)); `>= 0`, 0 = stop at once. `--drain-s` |
 | `CLEF_CORS_ORIGINS` | empty | comma-separated allowed origins (`*` allowed); empty = CORS off |
 | `CLEF_STATE_DIR` | per OS | Linux `$XDG_STATE_HOME/clef` (`~/.local/state/clef`), macOS `~/Library/Application Support/clef`, Windows `%LOCALAPPDATA%\clef`. Legacy alias `CLEF_LOG_DIR` |
 | `CLEF_MAX_LABELS` | `64` | labels per classify request / saved classifier |
@@ -71,11 +73,13 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_JOB_ENGINE_WAIT_S` | `600` | how long a job waits for an unavailable engine before failing |
 | `CLEF_WEBHOOK_ALLOW` | empty | hosts (`hooks.example.com`, `*.corp.example.net`), IPs and CIDRs webhooks may be delivered to; empty = webhooks off |
 | `CLEF_WEBHOOK_TIMEOUT_S` | `10` | total timeout of one delivery attempt |
-| `CLEF_WEBHOOK_ATTEMPTS` | `5` | delivery attempts for final events (`job.progress` is never retried) |
+| `CLEF_WEBHOOK_ATTEMPTS` | `10` | delivery attempts for final events (`job.progress` is never retried) |
 | `CLEF_SAMPLE_INTERVAL_S` | `2` | gauge sampling period for the time series (memory, telemetry, queue) |
+| `CLEF_INTERACTIVE_BURST` | `8` | interactive micro-batches in a row before waiting background (job) work gets one; `>= 1` |
+| `CLEF_LOG_FORMAT` | `text` | `text` or `json`: server log lines (app, uvicorn, access log); json = one object per line, see [Logging](#logging-logspy) |
 | v2 knobs | unchanged | `CLEF_MAX_TOKENS`, `CLEF_MAX_BODY_MB`, `CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES`, `CLEF_VIDEO_FPS`, `CLEF_MAX_BATCH`, `CLEF_MAX_QUESTIONS`, `CLEF_ALLOW_URL_FETCH`, `CLEF_URL_FETCH_MAX_MB`, `CLEF_MAX_MICROBATCH`, `CLEF_BATCH_WINDOW_MS`, `CLEF_BUCKETS`, `CLEF_PAD_MULTIPLE` (64, measured on ROCm only), `CLEF_PAD_TO_BUCKET`, `CLEF_WARMUP`, `CLEF_LOG_STATE`, `CLEF_LOG_BUFFER` |
 
-`Config` validates enums (device, dtype, quant, quant backend, offload), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range and `CLEF_RATE_LIMIT >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
+`Config` validates enums (device, dtype, quant, quant backend, offload, log format), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range, `CLEF_RATE_LIMIT >= 0`, `CLEF_INTERACTIVE_BURST >= 1` and `CLEF_DRAIN_S >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
 `auth_required`, `is_loopback`, `public_limits()`.
 
 ## Backend interface (`backend.py`)
@@ -170,7 +174,8 @@ class Engine:
     error: str | None
     load_seconds: float | None
     def start(self) -> None
-    async def decide(self, records: list[Record]) -> list[Result]   # results in input order
+    async def decide(self, records: list[Record], priority: str = "interactive") -> list[Result]
+        # results in input order; priority is "interactive" (default) or "background" (ValueError otherwise)
     def info(self) -> dict
     def sample(self) -> dict    # cheap gauges for the time series, see below; never raises; any thread
     def shutdown(self) -> None
@@ -200,6 +205,19 @@ Rules (v2 rules kept):
 - Exactly ONE thread ever runs forwards (the worker). `decide()` enqueues and awaits futures.
 - Text-only records are coalesced for up to `batch_window_ms` / `max_microbatch`, grouped by length bucket, one
   forward per group, right-padded to the next `pad_multiple`. Media records run alone, unpadded.
+- Two priority lanes: `interactive` (everything through `ctx.infer`, and direct `engine.decide()` calls) and
+  `background` (`ctx.decide`: jobs, the `evaluate` job kind). Each lane is FIFO. The worker waits for the first item
+  of either lane, lets the batch window run, and only then picks the lane for the micro-batch, so an interactive
+  item that arrives during a window opened by background work still goes first. A micro-batch holds ONE class:
+  interactive whenever any is queued (up to the starvation bound below), else background. Micro-batching and
+  bucketing work as before inside it.
+- Classes are not mixed even when the micro-batch has room. The model is compute-bound (batching adds ~30%
+  throughput), so an interactive record riding in a batch of 8 background records pays nearly the whole batch's
+  forward time; running it alone first costs the job one extra host overhead (~50% of a single forward).
+- Starvation bound: after `CLEF_INTERACTIVE_BURST` (default 8) interactive micro-batches in a row while background
+  work was waiting, the next micro-batch is background. A steady interactive load therefore leaves jobs at least
+  1 of every N+1 micro-batches. A micro-batch already taken is never preempted: all of its groups (one forward
+  per length bucket, one per media record) run before the worker looks at the lanes again.
 - Warmup: one forward per bucket (<= 1024) at batch sizes {1, max_microbatch}; status "warming" meanwhile.
 - No `torch.cuda.*` outside `backend.py`. OOM: `backend.is_oom(exc)` -> `backend.empty_cache()` ->
   `GpuOutOfMemory`; the worker keeps running. Timing uses `backend.synchronize()`.
@@ -214,7 +232,8 @@ Rules (v2 rules kept):
   compute; the vision tower, final norm, rotary tables and the joint head stay on the device. The weights are the
   same tensors, so probabilities are identical to a normal run. After a failed forward the streamer puts the layers
   back on the host. Measured numbers: [memory.md](memory.md).
-- The engine reports `stats.record_forward(...)` and `stats.set_queue_depth(n)` as in v2.
+- The engine reports `stats.record_forward(...)` and `stats.set_queue_depth(n, by_class={"interactive": i,
+  "background": b})` (`n` = `i + b`, the v2 total).
 
 ## Stats interface (`stats.py`)
 
@@ -223,7 +242,8 @@ class Stats:
     def __init__(self, buffer: int = 1000, retention_s: int = 3600): ...
     def record_request(self, entry: dict) -> None   # entry = /v1/log item minus id/ts; may include "key"
     def record_forward(self, n_records: int, n_tokens: int, padded_tokens: int, ms: float) -> None
-    def set_queue_depth(self, n: int) -> None
+    def set_queue_depth(self, n: int, by_class: dict[str, int] | None = None) -> None
+                                                    # n = total; by_class -> /v1/stats queue_depth_by_class
     def sample(self, gauges: dict) -> None          # engine.sample() + {"queue_depth"}; called every
                                                     # cfg.sample_interval_s by main; unknown keys ignored
     def in_flight(self) -> ContextManager
@@ -253,8 +273,8 @@ context, imports each module with `importlib` and includes its router.
 | `cfg`, `stats`, `engine`, `store` | the `Config`, `Stats`, `Engine` and `ClassifierStore` of this app |
 | `auth`, `limited` | FastAPI dependency lists: `auth` goes on every router that needs a key, `limited` adds the rate limit on inference routes |
 | `errors` | the shared OpenAPI `responses` for the standard error statuses |
-| `infer(request, reqs, batch, label="batch")` | the request path: limits, media load, one `engine.decide()`, and the request log / stats entry |
-| `decide(reqs, batch=True, label="batch")` | the same without a request, for background work (jobs): limits, media and one `engine.decide()`; not logged or counted in stats |
+| `infer(request, reqs, batch, label="batch")` | the request path: limits, media load, one `engine.decide(priority="interactive")`, and the request log / stats entry |
+| `decide(reqs, batch=True, label="batch", priority="background")` | the same without a request, for background work (jobs, the `evaluate` kind): limits, media and one `engine.decide()` in the background lane; not logged or counted in stats |
 | `map_exception(exc)`, `api_error(status, detail, headers=None)`, `request_id(request)` | the shared error mapping (raise the result `from exc`) |
 | `run_classify`, `run_classify_batch`, `run_score` | the classification routes' implementations, reusable by other features |
 | `on_startup`, `on_shutdown` | lists of async callables run inside the app lifespan after the engine starts / before it stops (jobs start and stop their runner here) |
@@ -268,7 +288,7 @@ appears in `openapi.json`.
 
 | Route | Purpose | Section |
 | --- | --- | --- |
-| `GET /health`, `GET /livez`, `GET /schema-example` | status, liveness, copy-paste bodies (open) | [below](#get-health) |
+| `GET /health`, `GET /livez`, `GET /readyz`, `GET /schema-example` | status, liveness, readiness, copy-paste bodies (open) | [below](#get-health) |
 | `POST /v1/systemone`, `POST /v1/batch` | the original typed questions API | [below](#post-v1systemone-post-v1batch) |
 | `POST /v1/classify`, `/v1/classify/batch`, `/v1/score`; `PUT|GET|DELETE /v1/classifiers/{name}`, `GET /v1/classifiers`, `POST /v1/classifiers/{name}[/batch]` | classification | [below](#classification-api-classifypy-classifierspy) |
 | `GET /v1/models[/{id}]`, `POST /v1/chat/completions` | OpenAI-compatible structured outputs | [Compat](#openai-and-hugging-face-compat-compatpy) |
@@ -282,10 +302,11 @@ appears in `openapi.json`.
 - Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration). When any key exists every `/v1/*` route, and the
   Hugging Face routes (`/hf/models/*`, `/models/*`), need `X-API-Key: <key>` or `Authorization: Bearer <key>` (401 +
   `WWW-Authenticate: Bearer` otherwise; the OpenAI and HF routes render that in their own error shape). For SSE
-  (EventSource cannot set headers) `/v1/events?key=<key>` is also accepted. Comparison is constant-time over all
+  `/v1/events?key=<key>` is also accepted for plain `EventSource` clients, which cannot set headers (the console
+  sends the header; see [Logging](#logging-logspy) for how the query value is masked). Comparison is constant-time over all
   keys. The matching key's **name** (never the key) is stored on `request.state.key_name` and written to the request
   log (`"key"`) and to `/v1/stats` (`by_key`). Auth off -> `key` is `null`.
-- Open routes: `/`, static files, `/health`, `/livez`, `/schema-example`, `/docs`, `/openapi.json`.
+- Open routes: `/`, static files, `/health`, `/livez`, `/readyz`, `/schema-example`, `/docs`, `/openapi.json`.
 - Rate limit (`CLEF_RATE_LIMIT=N`): sliding 60 s window per key name (per client IP when auth is off), counted on
   the POST inference routes only (`/v1/systemone`, `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/score`,
   `POST /v1/classifiers/{name}[/batch]`, `/v1/chat/completions`, `/hf/models/*`, `/v1/evaluate`, `POST /v1/jobs`).
@@ -443,7 +464,17 @@ Guide: [jobs.md](jobs.md).
 - Storage: SQLite `<state_dir>/jobs.db` (jobs, payloads, result rows, webhook deliveries). Statuses: `queued`,
   `running`, `succeeded`, `failed`, `cancelled`, `interrupted`. One runner, FIFO, one job at a time and ONE
   micro-batch in flight (`CLEF_MAX_MICROBATCH` records through `ctx.decide`), so interactive requests interleave.
-  A job interrupted by a stop or crash resumes after its last stored row on the next start. A row the engine rejects
+  A job interrupted by a stop or crash resumes after its last stored row on the next start. Rows are appended in
+  one transaction that reads `done` inside it, so an in-flight chunk is either stored whole or recomputed (no gap,
+  no duplicate). A clean stop (lifespan shutdown) parks the running job as `interrupted` without counting it;
+  only a job found still `running` at startup (a crash) increments `resumes`, and more than
+  `CLEF_JOB_MAX_RESUMES` crashes fail it. A job whose cancel was requested before the stop or crash ends
+  `cancelled` at that point (or at the next start), never resumed. Cancel is atomic per state:
+  `JobStore.cancel_queued` (queued / interrupted -> cancelled), else `JobStore.flag_cancel` in one transaction
+  (running -> `cancel_requested=1`; interrupted, i.e. parked meanwhile by a stop or runner error -> cancelled at
+  once), so a park racing the cancel cannot drop it. Every terminal transition (finish, cancel while queued or
+  interrupted, cancel / give-up at recovery) writes the status and the pending terminal webhook record in ONE
+  SQLite transaction, so a crash cannot lose the event. A row the engine rejects
   becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
   `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
 - Ownership: with auth on, a job belongs to the key name that submitted it and other keys get 404 (also in the
@@ -452,7 +483,8 @@ Guide: [jobs.md](jobs.md).
   per 10 s, one attempt). Headers `X-Clef-Event`, `X-Clef-Delivery`, and with a secret `X-Clef-Timestamp` and
   `X-Clef-Signature: sha256=` HMAC-SHA256 of `"<timestamp>.<raw body>"`. 2xx = delivered; 408 / 425 / 429 / 5xx and
   network errors retry with exponential backoff up to `CLEF_WEBHOOK_ATTEMPTS`; other statuses and all redirects are
-  final. Disabled until `CLEF_WEBHOOK_ALLOW` is set; the allow-list is checked at submit and on every attempt, the
+  final. A delivery still pending at restart is retried with the same delivery id, but its attempt count and backoff
+  start over (known behaviour). Disabled until `CLEF_WEBHOOK_ALLOW` is set; the allow-list is checked at submit and on every attempt, the
   host is resolved then and the connection is pinned to the checked IP (see [SECURITY.md](../SECURITY.md)).
 - Jobs are not counted in `/v1/stats` or the request log (they use `ctx.decide`).
 - Custom kinds: `ctx.extra.setdefault("job_kinds", {})[name] = {"validate": fn, "run": async_fn, "resumable": bool}`
@@ -462,9 +494,25 @@ Guide: [jobs.md](jobs.md).
 200 when status is ready or warming, 503 otherwise. `{"ready", "status", "version": "3.1.0", **engine.info(),
 "load_seconds", "uptime_s", "error", "limits": Config.public_limits()}`. `GET /livez` -> 200 `{"ok": true}`.
 
+### `GET /readyz`
+Readiness for load balancers and orchestrators (open, like `/livez`). 200 `{"ready": true}` only when the engine
+status is `ready` and the app is not draining; otherwise 503 `{"ready": false, "status":
+"loading|warming|error|draining", "error": <engine error or null>}`. Unlike `/health`, `warming` is not ready.
+Draining: uvicorn closes its listening sockets and drains connections BEFORE the lifespan shutdown runs, so a flag
+set there is never seen by a client. `main.run` therefore serves through `DrainingServer` (a `uvicorn.Server`
+subclass): the FIRST SIGTERM / Ctrl-C sets `app.state.draining = True` and keeps serving for `CLEF_DRAIN_S`
+seconds (`/readyz` answers 503 `draining`, every other route works as usual), then calls uvicorn's own
+`handle_exit` and the normal shutdown starts. A second signal during the drain skips the rest of it; after that
+uvicorn's semantics apply (another Ctrl-C forces the exit). `CLEF_DRAIN_S=0` (default) stops at once, as before.
+The lifespan still sets `draining = True` first thing at shutdown, for launchers other than `main.run` (plain
+`uvicorn`). A drain only helps a load balancer that probes `/readyz` faster than it lasts: probe interval x
+failure threshold must be below `CLEF_DRAIN_S`, and `CLEF_DRAIN_S` below the supervisor's stop timeout (Docker
+sends SIGKILL after 10 s by default; `clef stop` waits 30 s). Liveness stays on `/livez` (process up); the Docker
+HEALTHCHECK uses `/readyz` with a long start period so a container whose model failed to load turns unhealthy.
+
 ### `GET /v1/stats?window_s=300`
 v2 body plus `"by_key": {"<name>|anonymous": count}` and `"by_endpoint": {"/v1/classify": count, ...}` over the
-window, plus `"status"` and `"gpu"` (`vram_allocated_gb`, `vram_reserved_gb`, `vram_total_gb`, `memory_kind`) and
+window, `"queue_depth_by_class": {"interactive": n, "background": n}` next to the v2 total `queue_depth`, plus `"status"` and `"gpu"` (`vram_allocated_gb`, `vram_reserved_gb`, `vram_total_gb`, `memory_kind`) and
 `"telemetry"` (cached engine telemetry) added by main.
 
 ### `GET /v1/stats/timeseries?window_s=300&step_s=5`
@@ -494,7 +542,25 @@ v2 entries plus `"key": "<name>" | null`. Endpoint values include the new POST r
 `event: log` + `data: <log entry>` per request; `event: stats` + `data: <stats body>` every 2 s. The stats body
 carries `"point": stats.latest_point(step_s)` (same fields as one time-series column entry, scalars, plus `t` and
 `step_s`), so charts append (new `t`) or replace (same `t`) their last point without polling. `step_s` in 1..60,
-default 5.
+default 5. Auth: the `X-API-Key` / Bearer header like every route, or `?key=` (kept for `EventSource` clients; masked
+in the access log).
+
+### Logging (`logs.py`)
+- `setup_logging(fmt)` installs one root handler (idempotent; a later call only swaps its formatter). `run(cfg)`
+  passes `uvicorn_log_config(fmt)` to `uvicorn.run(log_config=...)`, so the foreground `clef serve` and the
+  `--detach` child (`python -m clef_server.main`) log the same way.
+- `CLEF_LOG_FORMAT=text` (default): the app keeps `"%(asctime)s %(levelname)-7s %(name)s %(message)s"`, uvicorn
+  keeps its own formatters. `json`: the app, `uvicorn` / `uvicorn.error` and `uvicorn.access` all write one JSON
+  object per line: `{"ts": "<ISO 8601 UTC, ms>", "level", "logger", "msg"}` plus `"request_id"` when the record is
+  emitted inside a request (a `ContextVar` set by `GuardMiddleware`; the access line is logged inside it) and
+  `"exc"` (the formatted traceback) when there is one. Stdlib only.
+- Redaction: `RedactSecretsFilter` rewrites the values of the `key`, `api_key` and `token` query parameters to
+  `REDACTED` in every string of `record.args` (keeping the args tuple's shape, which uvicorn's `AccessFormatter`
+  unpacks) and in `record.msg`. It parses each `?query` (up to `#`, whitespace or `"`): the query is split on `&`
+  and a parameter is redacted when its name, percent-decoded (as auth reads it) and lower-cased, is one of the
+  three, so `k%65y=` and `KEY=` are masked and `step_key=` is not; every other parameter stays byte-identical. It sits on uvicorn's handlers (via `log_config`), on clef's root handler and, from
+  the lifespan, on the `uvicorn.access` logger, which covers servers started with plain `uvicorn`. Keys therefore never reach
+  clef's logs; reverse-proxy logs are the operator's (SECURITY.md has Caddy / nginx masking snippets).
 
 ### Errors
 Always `{"detail": "<message>", "request_id": "<hex>"}`; header `X-Request-ID` on every response.
@@ -511,7 +577,7 @@ date). All routes, including the feature modules', have pydantic request/respons
 
 ```
 clef serve [--host H] [--port P] [--device D] [--dtype T] [--quant Q] [--offload none|cpu]
-           [--max-device-memory-gb GB] [--model-path DIR] [--detach] [--timeout S]
+           [--max-device-memory-gb GB] [--model-path DIR] [--log-format text|json] [--detach] [--timeout S]
            # flags set the matching CLEF_* env; foreground by default (Ctrl+C stops)
 clef stop | clef status [--json] | clef logs [-f] [-n N]
 clef doctor [--no-gpu] [--smoke] [--json]    # exit 0 ok/warn, 1 on any FAIL
@@ -540,5 +606,6 @@ clef version
 Zero-build Preact + htm; one vendored charting library (`static/vendor/uPlot.*`, MIT) for time series, everything
 else hand-written SVG. No runtime CDN calls. Screens: Playground (SystemOne + Classify modes), History, Batch, Evaluate (labelled dataset -> `/v1/classify/batch`
 in chunks -> `/v1/evaluate/metrics`; confusion heatmap, reliability diagram, coverage curve, mistakes, export), Ops.
-It consumes `/health`, `/v1/stats`, `/v1/stats/timeseries`, `/v1/events?step_s=`, `/v1/log`, `/v1/systemone`,
+It consumes `/health`, `/v1/stats`, `/v1/stats/timeseries`, `/v1/events?step_s=` (read with `fetch()` and the
+`X-API-Key` header, not `EventSource`, so the key never goes in the URL), `/v1/log`, `/v1/systemone`,
 `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/classifiers*`, `/v1/evaluate/metrics`.

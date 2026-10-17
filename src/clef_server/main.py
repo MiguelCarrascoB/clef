@@ -5,7 +5,7 @@ See docs/ARCHITECTURE.md for the API contract. Run: clef serve (one uvicorn work
   POST /v1/systemone  {model?, state, questions, images?, videos?} -> {model, answers, usage, timing}
   POST /v1/batch      {"batch": [<systemone request>, ...]}        -> {batch_ms, results}
   POST /v1/classify[/batch], /v1/score, /v1/classifiers/{name}[/batch]; PUT|GET|DELETE /v1/classifiers[/n]
-  GET  /health /livez /v1/stats /v1/stats/timeseries /v1/log /v1/events /schema-example   console at /
+  GET  /health /livez /readyz /v1/stats /v1/stats/timeseries /v1/log /v1/events /schema-example   console at /
 """
 
 from __future__ import annotations
@@ -15,10 +15,13 @@ import importlib
 import json
 import logging
 import re
+import signal
+import sys
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, nullcontext, suppress
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +59,7 @@ from .classify import (
 )
 from .config import VERSION, Config
 from .engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge
+from .logs import install_access_filter, request_id_var, setup_logging, uvicorn_log_config
 from .media import MediaError, load_media
 from .paths import classifiers_dir
 from .schemas import (
@@ -90,17 +94,6 @@ ERRORS: dict[int | str, dict[str, Any]] = {
 }
 # Feature modules: each exposes router(ctx: AppContext) -> APIRouter (see appctx.py). One line each.
 FEATURES: list[str] = ["evaluation", "compat", "jobs"]
-
-
-def setup_logging() -> None:
-    root = logging.getLogger()
-    if not any(getattr(h, "_clef", False) for h in root.handlers):
-        handler = logging.StreamHandler()
-        handler._clef = True  # type: ignore[attr-defined]
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s %(message)s"))
-        root.addHandler(handler)
-    if root.level in (logging.NOTSET, logging.WARNING):
-        root.setLevel(logging.INFO)
 
 
 class ApiError(Exception):
@@ -162,6 +155,7 @@ class GuardMiddleware:
         rid = rid if _RID_OK.match(rid) else uuid.uuid4().hex
         state = scope.setdefault("state", {})
         state.update(request_id=rid, t0=time.perf_counter(), rec={}, error=None)
+        rid_token = request_id_var.set(rid)  # log records (incl. uvicorn's access line) carry it in json mode
         tracked = is_tracked(scope["method"], scope["path"])
         status = 500
         received = 0
@@ -192,6 +186,7 @@ class GuardMiddleware:
                 else:
                     await self.app(scope, receive_wrap, send_wrap)
         finally:
+            request_id_var.reset(rid_token)
             if tracked:
                 self._record(scope["path"], status, state)
 
@@ -255,8 +250,8 @@ async def sse_events(
 
 
 def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
-    setup_logging()
     cfg = cfg or config_mod.load()
+    setup_logging(cfg.log_format)
     stats = Stats(cfg.log_buffer)
     eng = engine if engine is not None else Engine(cfg, stats)
     started = time.time()
@@ -282,8 +277,10 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             await asyncio.sleep(interval)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
+        install_access_filter()  # after uvicorn's dictConfig; covers launchers other than run()
         log.info("starting clef server %s (model load runs in background)", VERSION)
+        app_.state.draining = False
         eng.start()
         task = asyncio.create_task(sampler())
         for hook in ctx.on_startup:
@@ -291,6 +288,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         try:
             yield
         finally:
+            app_.state.draining = True  # other launchers; under run() DrainingServer set it already
             for hook in reversed(ctx.on_shutdown):
                 try:
                     await hook()
@@ -311,6 +309,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         ),
     )
     app.state.cfg, app.state.stats, app.state.engine = cfg, stats, eng
+    app.state.draining = False
     app.add_middleware(GuardMiddleware, cfg=cfg, stats=stats)
     install_cors(app, cfg)  # added last = outermost, so preflights never reach auth
 
@@ -372,14 +371,17 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         }
         if cfg.log_state:
             rec["state_preview"] = json.dumps(reqs[0].state, default=str, ensure_ascii=False)[:200]
-        results = await decide(reqs, batch=batch, label=label)
+        results = await decide(reqs, batch=batch, label=label, priority="interactive")
         rec["input_tokens"] = sum(int(r.get("usage", {}).get("input_tokens", 0)) for r in results)
         return results
 
     async def decide(
-        reqs: list[SystemOneRequest], batch: bool = True, label: str = "batch"
+        reqs: list[SystemOneRequest], batch: bool = True, label: str = "batch", priority: str = "background"
     ) -> list[dict[str, Any]]:
-        """Limits, media load (threadpool), ONE engine.decide(). No request needed (background work)."""
+        """Limits, media load (threadpool), ONE engine.decide(). No request needed (background work).
+
+        ``priority`` picks the engine lane: background by default (jobs), interactive from ``infer``.
+        """
         for i, r in enumerate(reqs):
             check_limits(r, cfg, f"{label}[{i}]." if batch else "")
         gpu_ready()
@@ -395,7 +397,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             return records
 
         records = await run_in_threadpool(build)
-        return await eng.decide(records)
+        return await eng.decide(records, priority=priority)
 
     def with_total(res: dict[str, Any], total_ms: float) -> dict[str, Any]:
         return {**res, "timing": {**res.get("timing", {}), "total_ms": round(total_ms, 1)}}
@@ -775,6 +777,13 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     async def livez() -> dict[str, bool]:
         return {"ok": True}
 
+    @app.get("/readyz", summary="Readiness (503 until the model is ready, and while draining)")
+    async def readyz() -> JSONResponse:
+        status = "draining" if app.state.draining else eng.status
+        if status == "ready":
+            return JSONResponse({"ready": True})
+        return JSONResponse({"ready": False, "status": status, "error": eng.error}, status_code=503)
+
     @app.get("/schema-example", summary="Copy-paste ready request bodies")
     async def schema_example() -> dict[str, Any]:
         return {
@@ -815,15 +824,81 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     return app
 
 
+class DrainingServer(uvicorn.Server):
+    """uvicorn Server with a drain: after the FIRST exit signal it keeps serving for ``drain_s`` seconds.
+
+    uvicorn closes its sockets and connections before the lifespan shutdown runs, so the lifespan's own
+    ``draining = True`` is never seen by a client. Here the first SIGTERM / Ctrl-C sets ``app.state.draining``
+    (``/readyz`` answers 503 "draining" while requests are still served) and starts a timer; when it ends,
+    uvicorn's own ``handle_exit`` starts the shutdown. A second signal during the drain exits at once, and
+    later ones keep uvicorn's semantics (a Ctrl-C during the shutdown forces it). ``drain_s = 0``: no drain.
+    """
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        app: Any,
+        drain_s: float = 0.0,
+        timer: Callable[..., Any] = threading.Timer,
+    ) -> None:
+        super().__init__(config)
+        self._app = app
+        self.drain_s = drain_s
+        self._timer = timer
+        self._drain_timer: Any = None
+
+    def handle_exit(self, sig: int, frame: Any) -> None:
+        if self._drain_timer is not None:  # second signal during the drain: stop waiting
+            self._drain_timer.cancel()
+            self._drain_timer = None
+            super().handle_exit(sig, frame)
+            return
+        if self.should_exit:  # already shutting down: uvicorn decides (force exit on Ctrl-C)
+            super().handle_exit(sig, frame)
+            return
+        if getattr(self._app, "state", None) is not None:
+            self._app.state.draining = True
+        if self.drain_s <= 0:
+            super().handle_exit(sig, frame)
+            return
+        try:
+            name = signal.Signals(sig).name
+        except ValueError:
+            name = str(sig)
+        log.info(
+            "%s: draining for %.1fs (/readyz 503), then shutting down; signal again to stop now",
+            name,
+            self.drain_s,
+        )
+        self._drain_timer = self._timer(self.drain_s, self._drain_done, (sig,))
+        self._drain_timer.daemon = True
+        self._drain_timer.start()
+
+    def _drain_done(self, sig: int) -> None:
+        if self._drain_timer is None:  # a second signal got there first
+            return
+        self._drain_timer = None
+        super().handle_exit(sig, None)
+
+
 def run(cfg: Config | None = None) -> None:
-    """Serve in the foreground: ONE uvicorn worker (one model per process)."""
+    """Serve in the foreground: ONE uvicorn worker (one model per process); drains CLEF_DRAIN_S on stop."""
     cfg = cfg or config_mod.load()
     warning = bind_warning(cfg)
     if warning:
-        setup_logging()
+        setup_logging(cfg.log_format)
         for line in warning.splitlines():
             log.warning(line)
-    uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port, workers=1)
+    # log_config: redact ?key= in the access log and apply CLEF_LOG_FORMAT to uvicorn's own loggers
+    log_config = uvicorn_log_config(cfg.log_format)
+    app = create_app(cfg)
+    config = uvicorn.Config(app, host=cfg.host, port=cfg.port, workers=1, log_config=log_config)
+    server = DrainingServer(config, app, cfg.drain_s)
+    # the tail of uvicorn.run(): the re-raised Ctrl-C after a clean exit is not an error; a failed start is 3
+    with suppress(KeyboardInterrupt):
+        server.run()
+    if not server.started:
+        sys.exit(3)  # uvicorn's STARTUP_FAILURE
 
 
 if __name__ == "__main__":

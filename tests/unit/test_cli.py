@@ -23,6 +23,19 @@ def test_choices_match_config():
     assert cli.DTYPES == config.DTYPES
     assert cli.QUANTS == config.QUANTS
     assert cli.OFFLOADS == config.OFFLOADS
+    assert cli.LOG_FORMATS == config.LOG_FORMATS
+
+
+def test_serve_log_format_flag_maps_to_env():
+    assert cli.serve_env(parse("serve", "--log-format", "json"), base={})["CLEF_LOG_FORMAT"] == "json"
+    assert "CLEF_LOG_FORMAT" not in cli.serve_env(parse("serve"), base={})
+    with pytest.raises(SystemExit):
+        parse("serve", "--log-format", "xml")
+
+
+def test_serve_drain_flag_maps_to_env():
+    assert cli.serve_env(parse("serve", "--drain-s", "5"), base={})["CLEF_DRAIN_S"] == "5.0"
+    assert "CLEF_DRAIN_S" not in cli.serve_env(parse("serve"), base={})
 
 
 def test_serve_memory_flags_map_to_env():
