@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -299,6 +300,45 @@ def test_quota_refund_below_flushed_base_is_clamped(db):
     q.flush()
     with db.read() as conn:
         assert conn.execute(text("SELECT records FROM api_usage")).scalar() == 0
+
+
+@pytest.mark.postgres
+def test_overlapping_flushes_never_double_count(db):
+    """The shutdown flush can start while the periodic one is still writing: it must wait, not re-write."""
+    q = Quotas(db)
+    q.reserve(principal(100), 7)
+    inside, release = threading.Event(), threading.Event()
+    real_tx = db.tx
+    calls = []
+
+    class SlowDb:
+        def __getattr__(self, name):
+            return getattr(db, name)
+
+        def tx(self):
+            calls.append(1)
+            if len(calls) == 1:
+                inside.set()
+                assert release.wait(10)
+            return real_tx()
+
+    q.db = SlowDb()
+    first = threading.Thread(target=q.flush)
+    first.start()
+    assert inside.wait(10)  # the periodic flush has its snapshot and is mid-write
+    second = threading.Thread(target=q.flush)  # the shutdown flush
+    second.start()
+    second.join(0.3)
+    assert second.is_alive()  # it waits for the one in progress
+    release.set()
+    first.join(10)
+    second.join(10)
+    q.db = db
+    with db.read() as conn:
+        assert conn.execute(text("SELECT records FROM api_usage")).scalar() == 7
+    fresh = Quotas(db)
+    fresh.load()
+    assert fresh.used("ci") == 7
 
 
 # ------------------------------------------------------------------ auth over HTTP

@@ -1312,7 +1312,11 @@ As built (D1; additions and deviations, nothing above changed in meaning):
 - `Quotas`: `reserve` returns a `Reservation` for every DB principal (usage is counted even without a quota) and
   counts `requests` / `rejected` itself. The flush is UPDATE-then-INSERT per row in one transaction (portable;
   a refund below the stored count clamps at 0), not a dialect upsert. `history(name, days)` is zero-filled and
-  merges unflushed deltas; `remaining(principal)` feeds the headers.
+  merges unflushed deltas; `remaining(principal)` feeds the headers. `flush` holds a dedicated lock for the whole
+  write, so the shutdown flush waits for a periodic one still running and never writes the same delta twice.
+  Quota counters live in one process's memory, so they are exact only because the Postgres advisory lock
+  (`PG_LOCK_KEY`, see Database) refuses a second server on the same database; SQLite is one file in one state
+  dir. Do not bypass the lock (for example by running two servers against one database).
 - `ctx.infer`: reserve `len(reqs)` before any work (429 `insufficient_quota`), `ctx.prepare` (cache lookup),
   refund `len(prepared.hits)`, then `decide_prepared`. Any exception (4xx before the engine included) refunds what
   is still held. Headers come from `request.state.quota`, added by `GuardMiddleware` for every route.

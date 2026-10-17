@@ -1023,7 +1023,8 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.to_thread(quotas.flush)  # a crash loses at most 5 s of counts; a clean stop none
+        # waits for a periodic flush still running in a thread (Quotas.flush is serialised)
+        await asyncio.to_thread(quotas.flush)
         await asyncio.to_thread(keycache.flush_used)
 
     ctx.on_startup.append(start_keys)  # first, so jobs' recover() can refund into loaded counters

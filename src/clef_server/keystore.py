@@ -574,6 +574,7 @@ class Quotas:
     def __init__(self, db: Database, clock: Callable[[], float] = time.time):
         self.db, self.clock = db, clock
         self._lock = threading.Lock()
+        self._flush_lock = threading.Lock()  # held for a whole flush: two flushes must never write one delta
         self._base: dict[tuple[str, str], list[int]] = {}  # (principal, day) -> [records, requests, rejected]
         self._delta: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0, 0])
 
@@ -637,6 +638,12 @@ class Quotas:
                 self._base[(r.principal, r.day)] = [r.records, r.requests, r.rejected]
 
     def flush(self) -> None:
+        """Write the unflushed deltas. One flush at a time: the shutdown flush waits for a periodic one in
+        progress (else both would write the same delta and double count it)."""
+        with self._flush_lock:
+            self._flush()
+
+    def _flush(self) -> None:
         with self._lock:
             snap = {k: list(v) for k, v in self._delta.items() if any(v)}
         if not snap:

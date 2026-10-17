@@ -24,7 +24,7 @@ most, trusted callers on a local network.
   missing scope is `403`), an optional daily record quota and rate limit, expiry and revocation. A managed key is
   `clef_live_<id>_<secret>`; **only its SHA-256 is stored**, so it cannot be recovered, and the secret is shown once
   (create / rotate). A rotated principal keeps up to five keys; the old ones expire after a grace period (default 24 h).
-  Auth is on when an env key exists or any managed key ever existed, and never turns off by itself (revoking the last
+  Daily quotas are counted in the memory of the one server process; they rely on the one-server-per-database rule (a Postgres advisory lock refuses a second server), so do not run two servers on one database. Auth is on when an env key exists or any managed key ever existed, and never turns off by itself (revoking the last
   managed key does not open the server). `/v1/admin/*` always needs an `admin` key, even when auth is off. `clef keys`
   works directly on the database (that is how the first admin key is made, with the server stopped, as the OS user
   who can read the state directory), so access to the state directory is access to key management; protect it like
