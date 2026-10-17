@@ -1183,8 +1183,8 @@ class Reservation:
 Request path: `require_key` sets `request.state.principal` (or `None` with auth off) and keeps
 `request.state.key_name = principal.name` (log, `by_key`, job owner, rate-limit identity unchanged). The rate
 limiter uses `principal.rate_limit or CLEF_RATE_LIMIT`. `ctx.infer` calls `ctx.quotas.reserve(principal, len(reqs))`
-before inference and refunds the whole reservation when the request ends in a 5xx. Cache hits count (they are
-records the caller asked for). Every quota'd response carries `X-Quota-Limit` and `X-Quota-Remaining`. Over quota:
+before inference and refunds the whole reservation when the request ends in a 5xx. Cache hits do NOT count: the
+reservation is settled after the cache lookup and only computed records are charged (hits cost no GPU time). Every quota'd response carries `X-Quota-Limit` and `X-Quota-Remaining`. Over quota:
 429 `daily quota exceeded (N records/day)` + `Retry-After` (OpenAI shape `insufficient_quota`). Jobs reserve at
 submit (Job scheduler).
 
@@ -1675,32 +1675,23 @@ Same-wave shared files and how they split:
 | all | Alembic heads | no new revision expected after C1; if two appear in one wave, the coordinator adds `alembic merge` (startup runs `upgrade heads`) |
 | all | `docs/ARCHITECTURE.md` | each workstream edits only its own planned section; the coordinator removes markers and applies the "Supersedes" lines |
 
-## Open contract questions (planned, v3.2)
+## Contract decisions (planned, v3.2)
 
-The contract above picks a default for each; the user should confirm or change it before the wave that needs it.
-
-1. **Unknown model on compat routes (C2).** D6 says 404. Today `/v1/chat/completions` reports a foreign `model` in
-   `clef.ignored` (documented, and asserted in `test_compat.py`), and OpenAI-SDK users often send `gpt-4o`-style
-   ids. Contract: 404 `model_not_found` everywhere except the HF path id, which stays ignored. Confirm the chat
-   route change.
-2. **Classifier owner (C1).** "Versioned classifiers with an owner" does not say whether the owner is enforced.
-   Contract: only the owner or an admin may PUT a new version or DELETE (403 otherwise); anyone may run it.
-3. **Cache hits and quotas (D1/D3).** Contract: hits count as records. The alternative is counting only computed
-   records.
-4. **Multi-day jobs and quotas (E1).** Contract: the whole job is reserved on the submit day, with the
-   unprocessed part refunded to that day on cancel / fail / expiry. A job that runs for days never charges later days.
-5. **Paused jobs and D9 (E1).** A running job that leaves its window stays `running` with
-   `waiting_reason: "off_hours"` (it is not advancing). The alternative is returning it to `queued`, which needs
-   resume-from-`done` for queued jobs.
-6. **Human labels vs D17 (E2).** Labels "feed the router's re-checks", but resolving purges the text. Contract:
-   the re-check runs at resolve time, before the purge; later acceptance tests can only use the stored label
-   against `input_sha256`.
-7. **Where low-confidence items come from (E2).** Contract: routers, plus saved classifiers with a new
-   `review_threshold`, on interactive single-label runs only (not jobs, not plain `/v1/classify`).
-8. **Privacy gate (E2).** Contract (D7): setting `GEMINI_API_KEY` is the consent to send up to 500 characters of
-   each buffered input to Google. There is no second `SEND_DATA` switch. Free-tier keys let Google use the data.
-9. **`clef backup` on Postgres (C1).** Contract: exit 2 with a `pg_dump` hint. The alternative is shelling out to
-   `pg_dump`.
-10. **27B pin (C2).** The full revision sha of `Cloudflare/clef` is not in the repo; C2 must fetch it from the HF
-    API. On the 24 GB card it fits only with nf4 (lossy on ROCm); doctor should say so.
-11. **Fair-share weights (E1).** Contract: weight 1 for every principal; there is no weight column in v3.2.
+Confirmed by the user (2026-10-17):
+1. **Unknown model (C2):** 404 `model_not_found` on every route except the HF path id, which stays ignored. This
+   replaces the `clef.ignored` behaviour of `/v1/chat/completions`; update `test_compat.py`.
+2. **Classifier owner (C1):** enforced. Only the owner or an admin may PUT a new version or DELETE (403 otherwise);
+   anyone with `classify` may run it.
+3. **Cache hits and quotas (D1/D3):** hits do **not** count. Only computed records are charged.
+4. **Multi-day jobs (E1):** the whole job is reserved on the submit day; the unprocessed part is refunded to that
+   day on cancel / fail / expiry.
+5. **Paused jobs (E1):** a running job outside its window stays `running` with `waiting_reason: "off_hours"`.
+6. **Human labels (E2):** the re-check runs at resolve time, before the text is purged.
+7. **Low-confidence sources (E2):** routers, plus saved classifiers with `review_threshold`, on interactive
+   single-label runs only.
+8. **Privacy (E2):** setting `GEMINI_API_KEY` is the consent to send up to 500 characters per buffered input. No
+   second switch.
+9. **`clef backup` on Postgres (C1):** exit 2 with a `pg_dump` hint.
+10. **27B pin (C2):** C2 fetches the `Cloudflare/clef` revision sha from the HF API; doctor warns it fits 24 GB only
+    with nf4.
+11. **Fair-share weights (E1):** 1 for every principal; no weight column.
