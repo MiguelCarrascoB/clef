@@ -450,6 +450,14 @@ def test_tunableop_file_is_per_model(monkeypatch):
     assert registry.model_slug({"CLEF_MODEL_PATH": "/x"}) == "clef-flash@local"
 
 
+def test_model_slug_follows_the_repo_rule_of_resolve_spec():
+    env = {"CLEF_MODEL_REPO": "Cloudflare/clef"}  # CLEF_MODEL unset: the catalog entry with that repo
+    assert registry.resolve_spec(make_cfg(model_path=None, model_repo="Cloudflare/clef")).id == "clef"
+    assert registry.model_slug(env) == f"clef@{CLEF_REVISION[:8]}"
+    assert registry.model_slug({"CLEF_MODEL_REPO": "someone/fork"}) == f"clef-flash@{FLASH_SHA[:8]}"
+    assert registry.model_slug({**env, "CLEF_MODEL": "clef-flash"}) == f"clef-flash@{FLASH_SHA[:8]}"
+
+
 def test_offload_layout_names():
     plan = OffloadPlan(2, (1,), (10, 10), 10, 10, 10)
     assert plan.device_map("cuda:0") == {

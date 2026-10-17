@@ -1073,7 +1073,9 @@ Perf hooks (D2, F2, wave G; nothing here changes probabilities by itself):
   backbone with `attention_mask=None` and the head slices by `batch["lengths"]` (sync-free, vectorised). Media
   batches keep the mask. Gate: `bench/parity.py` (max |dp| within the fp16 noise floor, 0 flips).
 - TunableOp results are kept per model: `PYTORCH_TUNABLEOP_FILENAME` under
-  `<state_dir>/tunableop/<spec.id>@<rev8>/` (set by `backend.prepare_environment` from `CLEF_MODEL`).
+  `<state_dir>/tunableop/<spec.id>@<rev8>/` (set by `backend.prepare_environment` from `CLEF_MODEL`, through
+  `registry.model_slug(environ)`: the `resolve_spec` rules over the built-in catalog, so `CLEF_MODEL_REPO=Cloudflare/clef`
+  alone gives the 27B's slug; `@local` with `CLEF_MODEL_PATH` and no revision).
 - Graph capture (wave G) belongs in `forward`, keyed by `(batch["input_ids"].shape)`; warmup already visits every
   bucket <= 1024 at batch sizes {1, max_microbatch}.
 - F2 tokenizes ahead with `ctx.prepare` (below): encoding is not "in flight"; only `submit` enqueues.

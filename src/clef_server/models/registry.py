@@ -191,20 +191,24 @@ def served_model(engine: Any, requested: str | None) -> str:
 
 
 def model_slug(environ: Mapping[str, str] = os.environ) -> str:
-    """`<id>@<rev8>` for per-model state dirs (TunableOp), from the environment alone. Never raises."""
+    """`<id>@<rev8>` for per-model state dirs (TunableOp), from the environment alone. Never raises.
+
+    Same rules as `resolve_spec`, over the built-in catalog only (no entry-point scan): CLEF_MODEL unset and
+    CLEF_MODEL_REPO naming a built-in entry's repo picks that entry."""
+    try:
+        from .clef_release import PINS, REPOS
+    except Exception:
+        PINS, REPOS = {}, {}
     try:
         model_id, rev = parse_model(environ.get("CLEF_MODEL"))
     except ValueError:
         model_id, rev = None, None
-    model_id = model_id or DEFAULT_MODEL_ID
+    repo = (environ.get("CLEF_MODEL_REPO") or "").strip()
+    if model_id is None:
+        model_id = next((mid for mid, r in REPOS.items() if repo and r == repo), DEFAULT_MODEL_ID)
     rev = rev or (environ.get("CLEF_MODEL_REVISION") or "").strip() or None
     if rev is None and not (environ.get("CLEF_MODEL_PATH") or "").strip():
-        try:  # the built-in pins, without scanning entry points
-            from .clef_release import PINS
-
-            rev = PINS.get(model_id)
-        except Exception:
-            rev = None
+        rev = PINS.get(model_id)  # the built-in pins
     slug = f"{model_id}@{(rev or 'local')[:8]}"
     return re.sub(r"[^A-Za-z0-9@_.-]", "_", slug)
 

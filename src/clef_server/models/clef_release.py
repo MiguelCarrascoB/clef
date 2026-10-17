@@ -27,6 +27,7 @@ CLEF_REVISION = "0b331204bb13fbd2ca93a64df1956f5b55478ce5"
 # the same way as clef-flash's 19.0 (18.82 GB + 0.24 GB).
 CLEF_WEIGHTS_GB = 55.0
 PINS = {"clef-flash": MODEL_REVISION, "clef": CLEF_REVISION}
+REPOS = {"clef-flash": MODEL_REPO, "clef": CLEF_REPO}  # for registry.model_slug (no entry-point scan)
 
 FILES = (
     "config.json",
@@ -211,4 +212,13 @@ class ClefReleaseAdapter(LocalTensorAdapter):
         return LAYOUT
 
 
-__all__ = ["CLEF_REPO", "CLEF_REVISION", "FILES", "LAYOUT", "PINS", "ClefReleaseAdapter", "ReleaseEncoded"]
+__all__ = [
+    "CLEF_REPO",
+    "CLEF_REVISION",
+    "FILES",
+    "LAYOUT",
+    "PINS",
+    "REPOS",
+    "ClefReleaseAdapter",
+    "ReleaseEncoded",
+]
