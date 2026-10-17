@@ -274,8 +274,8 @@ CLEF_WEBHOOK_ALLOW='hooks.example.com,*.corp.example.net,192.168.1.0/24'
   when listed.
 * Only `http` / `https`, no credentials in the URL, no redirects, no proxy settings from the environment, and an
   API key is never sent. Use `https` for anything that leaves your machine.
-* Secrets are stored in the job database (`jobs.db` in the state directory) in clear text, because HMAC needs
-  them; protect that directory like the API keys file. The secret is write-only through the API.
+* Secrets are stored in the database (`clef.db` in the state directory, or your `CLEF_DATABASE_URL`) in clear
+  text, because HMAC needs them; protect it like the API keys file. The secret is write-only through the API.
 
 ## Limits, ownership, retention
 
@@ -298,12 +298,12 @@ tokens) are the same as for the synchronous endpoints.
 
 **Ownership.** With auth off, every caller sees every job. With `CLEF_API_KEY` / `CLEF_API_KEYS` on, a job is
 owned by the key name that submitted it (`default` for `CLEF_API_KEY`); other keys get `404` for it (not `403`)
-and do not see it in `GET /v1/jobs`. There is no admin view: stop the server and read `jobs.db` if you need
-one. Jobs submitted while auth was off stay visible to all keys after you turn it on. Webhook URLs and
+and do not see it in `GET /v1/jobs`. There is no admin view: read the database (see [Storage](#storage)) if you
+need one. Jobs submitted while auth was off stay visible to all keys after you turn it on. Webhook URLs and
 metadata are visible to the owner.
 
-**Persistence and restart.** Jobs, their submitted payloads (your inputs) and result rows live in SQLite
-(`<state dir>/jobs.db`, in clear text) and survive restarts.
+**Persistence and restart.** Jobs, their submitted payloads (your inputs) and result rows live in the database
+(SQLite `<state dir>/clef.db` by default, or Postgres; in clear text, see [Storage](#storage)) and survive restarts.
 Rows are written after every chunk, in one transaction that appends after the last stored row, so a chunk that
 was in flight when the server stopped is either stored whole or computed again: never a gap, never a duplicate. If
 the server stops while a job runs it is marked `interrupted` and, on the next start, **resumed** from the last
@@ -317,8 +317,48 @@ status and the pending webhook record are written in one transaction, so a crash
 without its event. The built-in kinds (including
 `evaluate`) resume exactly; a custom kind that does not declare itself resumable restarts from item 0. Resuming re-reads
 the stored payload, which already holds the saved classifier as it was at submit. Finished jobs are purged on
-their own timer (every ten minutes), also while a job is running. Delete the file to drop all jobs (an older
-`jobs.db` is upgraded in place).
+their own timer (every ten minutes), also while a job is running.
+
+A job remembers the model it was submitted for (`"id@revision"`, from the server that took it). If the server now
+serves another model or revision, the job fails with `job was submitted for <model>, this server serves <ref>` instead
+of mixing two models in one result set; jobs from before v3.2 have no recorded model and run as before. A `model` in
+the payload that this server does not serve is `404` at submit. With a saved classifier, the payload may also give
+`"version": N` (default: the latest); the stored snapshot records the version it copied as `classifier_version`.
+
+## Storage
+
+One database holds jobs, result rows, saved classifiers (with their versions) and the audit log; the v3.2 key,
+review, router and batch tables live there too. One clef server per database: Postgres is for operations
+(backups, one place for everything), not for several servers sharing a queue.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `CLEF_DATABASE_URL` | unset | Unset: SQLite `<state dir>/clef.db`. `postgresql://user:pass@host:5432/clef` (or `postgres://`) uses Postgres and needs `pip install 'clef-local[postgres]'` (psycopg 3). |
+| `CLEF_DATABASE_POOL_SIZE` | 5 | Postgres connections (plus as many again under load); ignored on SQLite. |
+
+* **Upgrades are automatic.** Every start runs the schema migrations (Alembic, `upgrade heads`) before serving.
+  `clef db current` shows the schema version, `clef db upgrade` runs the migrations with the server stopped, and
+  `clef doctor` and `GET /health` (`"db": {"dialect", "schema_version", "url"}`) report it. The password in the
+  URL is always shown as `***`.
+* **From v3.1.** On the first start with the default URL, `<state dir>/jobs.db` is checkpointed and renamed to
+  `clef.db` (once; logged). If both files exist, `clef.db` is used and a WARNING is logged. The saved classifiers in
+  `<state dir>/classifiers/*.json` are imported once as version 1 of each (no owner); the folder is then renamed
+  `classifiers.imported/` (unreadable files are logged, skipped and stay there). `clef classifiers export [--out
+  DIR] [--name N]` writes the latest version of each back to `<DIR>/<name>.json` (the v3.1 file format plus
+  `version`).
+* **SQLite to Postgres.** Stop the server, then `clef db copy --from sqlite:///<state dir>/clef.db --to
+  postgresql://user:pass@host/clef [--yes]`: every table, 1000 rows at a time, in one transaction on the target,
+  which is migrated first and must be empty. Then start the server with `CLEF_DATABASE_URL` set to the target.
+  The source is not changed; it must be at the current schema (start the server on it once, or `clef db upgrade`).
+* **Backups.** `clef backup [--out PATH]` copies the SQLite database with SQLite's online backup API, safe while the
+  server runs, to `<state dir>/backups/clef-<UTC time>.db` (readable by you only). For Postgres it prints a
+  `pg_dump` command instead (exit 2).
+* **One server per database.** On Postgres a server holds an advisory lock for its lifetime; a second server on the
+  same database stops at startup with `another clef server holds this database (one server per database)`. The
+  CLI commands do not take the lock. On SQLite nothing enforces it: do not point two servers at one state dir
+  (each would recover the other's running job at startup).
+* **Errors.** A database that cannot be reached answers `503 database unavailable`. Drop everything by deleting
+  `clef.db` (SQLite) or the database (Postgres) with the server stopped.
 
 **Throughput.** Jobs run one at a time, FIFO, at the engine's batch speed, shared with interactive traffic.
 There is no priority between jobs. Inside the engine, job work (`ctx.decide`, including the `evaluate` kind) is

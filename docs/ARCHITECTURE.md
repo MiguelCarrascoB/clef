@@ -684,7 +684,7 @@ Rules shared by every planned section:
   coordinator can keep both sides of a conflict. `openapi.json`, `uv.lock` and `CHANGELOG.md` are regenerated or
   merged by the coordinator at the wave merge, never hand-merged.
 
-## Storage (planned, v3.2)
+## Storage
 
 Module boundary: `db.py` owns the engine, connections, transactions, migrations and URL handling. `dbschema.py` owns
 the table definitions. Stores (`JobStore` in `jobs.py`, `ClassifierStore` in `classifiers.py`, `KeyStore` in
@@ -869,6 +869,25 @@ classifier routes, which map them before `map_exception`; `map_exception` itself
 
 Invariants: payload columns stay out of list selects (the `_COLS` discipline); store APIs are sync; one writer
 transaction at a time on SQLite; the request path reaches the DB only through stores called in the threadpool.
+
+As built (C1; additions to the interface above, nothing in it changed):
+- `Database` also has `serialize(conn, name)` (inside `tx()`: a transaction advisory lock on Postgres for
+  check-then-write sections such as `CLEF_MAX_JOBS` / `CLEF_MAX_CLASSIFIERS`; a no-op on SQLite, where `BEGIN
+  IMMEDIATE` already serialises), `set_meta(conn, key, value)`, `acquire_server_lock()` (called by
+  `open_database`) and `info()` (the cached `/health` block; no I/O). Nested `tx()` / `read()` on the same thread
+  join the open transaction. `db.py` also holds the CLI / doctor helpers (`peek_version` opens nothing for
+  writing, `version_state`, `copy_database`, `backup_sqlite`, `migrate_legacy_file`) and `is_unavailable(exc)`.
+- `claim_next()` returns the running row plus `claimed_from` (`"queued"` | `"interrupted"`, the status before
+  the claim); `run_base_done` is set to `done` by the claim and zeroed by `reset_items`. The runner seeds
+  `cancel_ids` from the claimed row and never discards an id after a claim. `JobStore.close()` closes its
+  `Database` (tests); the server never calls it.
+- `ClassifierStore.put` / `delete` take keyword-only `actor`, `ip`, `request_id` for the audit row (`actor`
+  defaults to `created_by`, then `"anonymous"`). The JSON import writes `classifier.put` rows with actor `import`.
+- `AppContext.model_ref()` / `check_model()` are methods (they read the engine's hooks at call time).
+- Job payloads of `classify` / `score` accept `version` next to `classifier`; the snapshot drops it and records
+  `classifier_version`. `EvaluateRequest` has both fields too.
+- The alembic logger is set to WARNING; `upgrade()` logs `database: schema <from> -> <to>` at INFO when it
+  changed something.
 
 Supersedes when landed: "Storage: SQLite `<state_dir>/jobs.db`" in Async jobs, the `classifiers.py` row of the
 package layout, and the "Files: `<state_dir>/classifiers/<name>.json`" bullet in Saved classifiers.

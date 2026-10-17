@@ -11,6 +11,20 @@
   to load is reported unhealthy; `/livez` stays the process-up probe.
 - `CLEF_LOG_FORMAT=json` (`clef serve --log-format json`): app, uvicorn and access log lines as one JSON object per
   line (`ts`, `level`, `logger`, `msg`, `request_id`). The default `text` output is unchanged.
+- **Database layer (C1)**: jobs, saved classifiers and an audit log now live in one database: SQLite
+  `<state_dir>/clef.db` by default, or Postgres with `CLEF_DATABASE_URL=postgresql://...` (`pip install
+  'clef-local[postgres]'`; one clef server per database, enforced with an advisory lock). SQLAlchemy Core + Alembic
+  (new `server` dependencies); every start migrates the schema. On the first start `jobs.db` is renamed to
+  `clef.db` and the `classifiers/*.json` files are imported once (the folder becomes `classifiers.imported/`).
+  New commands: `clef db current|upgrade|copy` (copy SQLite to Postgres), `clef backup` (SQLite online backup,
+  safe while serving), `clef classifiers export`. `clef doctor` checks the schema and `/health` has a `db` block.
+  A database that cannot be reached answers `503 database unavailable`.
+- **Versioned saved classifiers with an owner**: every `PUT /v1/classifiers/{name}` that changes the definition adds
+  a version (an identical PUT is a no-op); `GET ?version=N`, `GET /v1/classifiers/{name}/versions[/{v}]`; runs, jobs
+  and `POST /v1/evaluate` accept `"version"`, and job snapshots record `classifier_version`. The first PUT's key
+  owns the classifier: once per-key principals exist (v3.2 keys), only the owner or an admin may change or delete it.
+- Jobs record the model they were submitted for (`jobs.model`) and fail clearly when the server now serves
+  another one; a payload `model` this server does not serve is `404` at submit.
 
 ### Fixed
 - **Console live stream**: a CRLF split across two network chunks was read as a blank line, which could split one

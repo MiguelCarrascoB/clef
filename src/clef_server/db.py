@@ -33,6 +33,7 @@ from sqlalchemy.pool import QueuePool
 from . import dbschema as t
 
 log = logging.getLogger("clef")
+logging.getLogger("alembic").setLevel(logging.WARNING)  # per-plugin INFO noise; upgrade() logs the result
 
 PG_LOCK_KEY = 1667032422  # pg_try_advisory_lock key held by the one server on a database
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
@@ -228,6 +229,7 @@ class Database:
     def upgrade(self) -> None:
         """``alembic upgrade heads`` in one transaction; a legacy jobs.db is stamped ``0001`` first."""
         from alembic import command
+        from alembic.runtime.migration import MigrationContext
 
         try:
             with self.tx() as conn:
@@ -235,6 +237,7 @@ class Database:
                 if "jobs" in tables and "alembic_version" not in tables:
                     self._legacy_baseline(conn)
                     command.stamp(self._alembic_config(conn), "0001")
+                before = "+".join(sorted(MigrationContext.configure(conn).get_current_heads()))
                 command.upgrade(self._alembic_config(conn), "heads")
         except DatabaseError:
             raise
@@ -242,6 +245,8 @@ class Database:
             raise DatabaseError(f"database upgrade failed on {self.display_url}: {exc.orig}") from exc
         self._version = None
         self._version = self.schema_version()
+        if before != self._version:
+            log.info("database: schema %s -> %s", before or "none", self._version)
 
     def _legacy_baseline(self, conn: Connection) -> None:
         """A v3.1 jobs.db -> exactly the 0001 shape (the idem_key ALTER, then whatever else is missing)."""

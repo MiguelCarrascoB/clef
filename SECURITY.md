@@ -51,10 +51,19 @@ most, trusted callers on a local network.
 - **Jobs: ownership, retention, disk.** With keys configured, a job belongs to the key name that submitted it; other
   keys get `404` and do not see it in the list. This is a convenience between cooperating callers, not tenant
   isolation: there is no admin view, and jobs created while auth was off stay visible to every key. Jobs are stored in
-  `jobs.db` in the state directory: the **submitted payload of every job (your input texts), its result rows and
-  webhook secrets are on disk in clear text** (HMAC needs the secret; `evaluate` rows also keep the input and gold
-  label). Finished jobs are deleted `CLEF_JOB_TTL_HOURS` after they finish (default 168; `0` keeps them forever) or on `DELETE /v1/jobs/{id}`.
-  Protect the state directory like the API keys file, and delete `jobs.db` to drop everything. Job results exported as
+  the database (`clef.db` in the state directory, or `CLEF_DATABASE_URL`): the **submitted payload of every job (your
+  input texts), its result rows and webhook secrets are stored in clear text** (HMAC needs the secret; `evaluate` rows
+  also keep the input and gold label). Finished jobs are deleted `CLEF_JOB_TTL_HOURS` after they finish (default 168;
+  `0` keeps them forever) or on `DELETE /v1/jobs/{id}`. Protect the state directory like the API keys file, and delete
+  `clef.db` (with the server stopped) to drop everything.
+- **Database files and URLs.** A new `clef.db` is created readable by its owner only (`0600` on POSIX), and so are
+  the copies `clef backup` writes to `<state dir>/backups/`; a `clef.db` renamed from a v3.1 `jobs.db` keeps that
+  file's permissions (`chmod 600` it). With Postgres, everyone who can read that database reads the same payloads and
+  secrets: give clef its own database and role, and use TLS (`?sslmode=require`) to a remote server.
+  `CLEF_DATABASE_URL` carries the password: clef never logs it, and `/health`, `clef doctor` and the `clef db`
+  commands show it as `***`. Prefer a systemd `EnvironmentFile` or a compose `.env` with tight permissions over the
+  command line. The audit log (`audit_log`: saved-classifier changes now, key changes with v3.2 keys) records who,
+  what and when, never a secret or request content; it has no purge. Job results exported as
   CSV neutralise cells that start with `=`, `+`, `-` or `@`, so opening them in a spreadsheet does not run formulas.
 - **No secrets in logs.** Request state (the text you classify) is not logged unless `CLEF_LOG_STATE=1`, but jobs do
   store it on disk (see above). clef's own logs never contain a key: headers are not logged, and the values of the
