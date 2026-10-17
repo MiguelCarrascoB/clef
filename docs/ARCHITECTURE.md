@@ -93,10 +93,10 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_FAST_HEAD` | `0` | `1`: the batch-vectorised, sync-free joint head `fast_joint_head` (D2; same maths as the release head, opt-in until `bench/perf_check.sh` passes on the GPU) |
 | `CLEF_CACHE_SIZE` | `10000` | result-cache entries (in-memory LRU); `0` = off |
 | `CLEF_CACHE_MB` | `256` | result-cache byte budget (stored-JSON size estimate); `0` = off |
-| `CLEF_JOB_TZ` (planned, v3.2) | `UTC` | IANA zone for job windows that give no `tz` and for `CLEF_JOB_WINDOW` |
-| `CLEF_JOB_WINDOW` (planned, v3.2) | empty | default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |
-| `CLEF_JOB_ACTIVE` (planned, v3.2) | `4` | jobs that may be `running` (taking turns) at once; `>= 1` |
-| `CLEF_JOB_AGING_S` (planned, v3.2) | `3600` | a waiting job's class rises one level per this many seconds without a turn (never to `urgent`); `0` = no aging |
+| `CLEF_JOB_TZ` | `UTC` | IANA zone for job windows that give no `tz` and for `CLEF_JOB_WINDOW` |
+| `CLEF_JOB_WINDOW` | empty | default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |
+| `CLEF_JOB_ACTIVE` | `4` | jobs that may be `running` (taking turns) at once; `>= 1` |
+| `CLEF_JOB_AGING_S` | `3600` | a waiting job's class rises one level per this many seconds without a turn (never to `urgent`); `0` = no aging |
 | `CLEF_JOB_SORT_WINDOW` (planned, v3.2) | `0` | F2: length-sort jobs in windows of N items (256-1024); `0` = off. Default flips only if the benchmark gain is over 10% |
 | `GEMINI_API_KEY` (planned, v3.2) | unset | the router's LLM key. Unset (and no `CLEF_LLM_API_KEY`) = router LLM off. Never logged; `clef doctor` only says whether it is set |
 | `CLEF_LLM_API_KEY` (planned, v3.2) | unset | key for another OpenAI-compatible provider; wins over `GEMINI_API_KEY` |
@@ -504,8 +504,9 @@ Guide: [jobs.md](jobs.md).
   `DELETE /v1/jobs/{id}` (409 while queued or running).
 - Storage: the database (`ctx.db`: SQLite `<state_dir>/clef.db` or `CLEF_DATABASE_URL`; jobs, payloads, result rows,
   webhook deliveries; see Storage). Statuses: `queued`, `running`, `succeeded`, `failed`, `cancelled`,
-  `interrupted`. One runner, FIFO, one job at a time and ONE micro-batch in flight (`CLEF_MAX_MICROBATCH` records
-  through `ctx.decide`), so interactive requests interleave.
+  `interrupted`. Jobs are scheduled by class and fair share (see Job scheduler), at most `CLEF_JOB_ACTIVE` at a time, and
+  ONE micro-batch in flight across all of them (`CLEF_MAX_MICROBATCH` records through `ctx.decide`), so
+  interactive requests interleave.
   A job interrupted by a stop or crash resumes after its last stored row on the next start. Rows are appended in
   one transaction that reads `done` inside it, so an in-flight chunk is either stored whole or recomputed (no gap,
   no duplicate). A clean stop (lifespan shutdown) parks the running job as `interrupted` without counting it;
@@ -519,8 +520,9 @@ Guide: [jobs.md](jobs.md).
   SQLite transaction, so a crash cannot lose the event. A row the engine rejects
   becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
   `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
-- Ownership: with auth on, a job belongs to the key name that submitted it and other keys get 404 (also in the
-  list); jobs created while auth was off (owner NULL) are visible to admins only once auth is on.
+- Ownership: with auth on, a job belongs to the key name that submitted it. Another non-admin principal gets 404
+  (not in its list either); a key without the `jobs` scope gets 403; admins see every job, owner-less ones (created
+  while auth was off) included.
 - Webhooks: events `job.succeeded`, `job.failed`, `job.cancelled` (default) and opt-in `job.progress` (at most one
   per 10 s, one attempt). Headers `X-Clef-Event`, `X-Clef-Delivery`, and with a secret `X-Clef-Timestamp` and
   `X-Clef-Signature: sha256=` HMAC-SHA256 of `"<timestamp>.<raw body>"`. 2xx = delivered; 408 / 425 / 429 / 5xx and
@@ -901,9 +903,9 @@ As built (C1; additions to the interface above, nothing in it changed):
 - `claim_next()` returns the running row plus `claimed_from` (`"queued"` | `"interrupted"`, the status before
   the claim); `run_base_done` is set to `done` by the claim and zeroed by `reset_items`. The runner seeds
   `cancel_ids` from the claimed row and never discards an id after a claim. `JobStore.close()` closes its
-  `Database` (tests); the server never calls it. When `claim_next` itself raises (possibly after its commit),
-  `_runner_failed(None)` calls `park_running()`: safe with one job at a time, but E1 (`CLEF_JOB_ACTIVE > 1`)
-  must replace it, since it would park jobs other tasks are still running.
+  `Database` (tests); the server never calls it. The scheduler claims with `claim(job_id)`; when that
+  raises (possibly after its commit) the runner parks only that id, never `park_running()`, which stays for the
+  clean stop after every job task has ended.
 - `ClassifierStore.put` / `delete` take keyword-only `actor`, `ip`, `request_id` for the audit row (`actor`
   defaults to `created_by`, then `"anonymous"`). The JSON import writes `classifier.put` rows with actor `import`.
 - `ClassifierStore.put` first takes `db.serialize(conn, "classifier:<name>")` (on Postgres a `SELECT ... FOR UPDATE`
@@ -1601,7 +1603,7 @@ Invariants: input text is stored only in `review.input` and only until resolved 
 machine unless an LLM key is set; the router never edits a classifier except by appending a version; single-label
 only (D8).
 
-## Job scheduler (planned, v3.2)
+## Job scheduler
 
 Module boundary: all in `jobs.py` (`JobRunner` + a `Scheduler` class). Kinds keep their `validate` / `run`
 signatures; scheduling happens per chunk inside `decide_resilient`, which every built-in kind (and `evaluate`, the
@@ -1616,11 +1618,16 @@ Policy:
   an owner that comes back sets `pass = max(own, current minimum)`. Within one owner: higher class first, then
   interrupted, then `seq`. State is in memory and rebuilt after a restart.
 - Turn gate: `await scheduler.turn(job)` before every engine call of a job; `scheduler.done(job, cost)` after.
-  **One job chunk in flight across all jobs** (as today): interactive work still goes first through the engine's
+  The gate wraps each engine call inside `decide_resilient` (so a bisected chunk takes one turn per call and no
+  turn is held while a job waits for an unavailable engine). **One job chunk in flight across all jobs** (as today): interactive work still goes first through the engine's
   lanes. A unit test asserts the background lane never holds more than one job chunk.
 - Active set: up to `CLEF_JOB_ACTIVE` jobs are claimed (`JobStore.claim(job_id)`, chosen in stride order) and run
   as their own asyncio tasks; all of them show `running` (D9). `runner.current` becomes a set; progress webhooks
-  are per job.
+  are per job. `claim(job_id)` returns the claimed row (plus `claimed_from`) or `None`; `claim_next` stays for
+  tools and tests but the runner no longer uses it. An `urgent` job does not wait for a free slot (it is
+  admitted at once, even above `CLEF_JOB_ACTIVE`), or the class would mean nothing while four normal jobs run.
+  Candidates are ordered like turn waiters (class after aging, owner pass, jobs the owner already runs,
+  interrupted, `seq`).
 - Windows: `schedule = {"window": "HH:MM-HH:MM", "tz": "<IANA>"}` per job (default `CLEF_JOB_WINDOW` in
   `CLEF_JOB_TZ`). `start > end` crosses midnight; `start == end` = 24 h. Aware datetimes via `zoneinfo`; on DST
   days an edge inside the skipped hour starts at the next valid minute, the repeated hour uses `fold=0`. A job gets
@@ -1637,6 +1644,10 @@ Policy:
   returns another job, a DB error), the reservation is refunded in full before the error is returned. The whole
   job is charged to the submit day; on `cancelled` / `failed` / expiry, `total - done` is refunded to that day.
   Env principals and auth off: no reservation.
+  Cache hits are not charged (D23 #3): each chunk's hits (`Prepared.hits` from `ctx.prepare`) are handed back to
+  the reservation once the chunk's rows are stored, and `quota_reserved` drops by the same number in that
+  transaction. The hit count is kept in memory only to make the final refund exact; after a restart the
+  refund of a cancelled job can be short by the hits counted before it (never over).
 
 Python API (for E2-free kinds and F1, so they never edit `jobs.py`):
 ```python
@@ -1646,7 +1657,8 @@ class JobRunner:
                      schedule: dict | None = None, expire_after_s: float | None = None,
                      idem_key: str | None = None) -> dict
         # validation, snapshot, model check, quota reservation, create, poke; raises ValueError (400),
-        # PermissionError (403, urgent), QuotaExceeded (429), JobsFull (409). POST /v1/jobs uses it.
+        # PermissionError (403, urgent), QuotaExceeded (429), JobsFull (409), LookupError (404, unknown
+        # model). POST /v1/jobs uses it (through `submit_ex`, which also says whether the job was a replay).
     async def cancel(self, job_id: str) -> dict
     def get(self, job_id: str) -> dict | None
 class JobHandle:
@@ -1668,9 +1680,6 @@ Errors: 400 bad window / tz / priority; 403 `urgent` without the scope; 409 `CLE
 
 Invariants: one job chunk in flight; rows stay contiguous `0..done-1` (F2's length sort persists each window in
 input order); `recover()` unchanged; webhooks unchanged.
-
-Supersedes when landed: "One runner, FIFO, one job at a time and ONE micro-batch in flight" in Async jobs (the
-"one micro-batch in flight" part stays).
 
 ## OpenAI Files and Batches (planned, v3.2)
 
