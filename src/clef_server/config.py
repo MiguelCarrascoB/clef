@@ -225,6 +225,12 @@ class Config:
     mask_free: bool = field(default_factory=lambda: _bool("CLEF_MASK_FREE", False))
     fast_head: bool = field(default_factory=lambda: _bool("CLEF_FAST_HEAD", False))
 
+    # F1: OpenAI Files + Batches (docs/openai-compat.md). max_file_mb is the body limit of POST /v1/files only
+    # (OpenAI's is 200 MB; max_body_mb stays the limit of every other route).
+    max_file_mb: int = field(default_factory=lambda: _int("CLEF_MAX_FILE_MB", 200))
+    max_batch_lines: int = field(default_factory=lambda: _int("CLEF_MAX_BATCH_LINES", 50_000))
+    file_ttl_hours: float = field(default_factory=lambda: _float("CLEF_FILE_TTL_HOURS", 720.0))  # 0 = forever
+
     def __post_init__(self) -> None:
         for name, value, allowed in (
             ("CLEF_DEVICE", self.device.split(":")[0], DEVICES),
@@ -251,6 +257,12 @@ class Config:
             raise ValueError("CLEF_CACHE_SIZE must be >= 0 (0 = off)")
         if self.cache_mb < 0:
             raise ValueError("CLEF_CACHE_MB must be >= 0 (0 = off)")
+        if self.max_file_mb < 1:
+            raise ValueError("CLEF_MAX_FILE_MB must be >= 1")
+        if self.max_batch_lines < 1:
+            raise ValueError("CLEF_MAX_BATCH_LINES must be >= 1")
+        if self.file_ttl_hours < 0:
+            raise ValueError("CLEF_FILE_TTL_HOURS must be >= 0 (0 = keep forever)")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
         # C2: CLEF_MODEL syntax and the @rev / CLEF_MODEL_REVISION alias (an unknown id is a load error)
         if self.model:
@@ -290,6 +302,8 @@ class Config:
             "classify_threshold": self.classify_threshold,
             "allow_url_fetch": self.allow_url_fetch,
             "max_job_items": self.max_job_items,
+            "max_file_mb": self.max_file_mb,
+            "max_batch_lines": self.max_batch_lines,
             "webhooks_enabled": bool(self.webhook_allow),
             "auth_required": self.auth_required,
             "rate_limit_per_min": self.rate_limit,
