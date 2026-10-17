@@ -43,6 +43,9 @@
   The Hugging Face path id (`/hf/models/{id}`) is still ignored. The Python and JS clients and the console no
   longer send `model: "clef-flash"`. A `/v1/systemone` choice / score question with more than `CLEF_MAX_LABELS`
   options is now a 400.
+- **TunableOp results are per model** (`CLEF_TUNABLEOP=1`, ROCm): they now live in
+  `<state dir>/tunableop/<model id>@<rev8>/`, so the first ROCm start after upgrading tunes again (a few minutes);
+  the old `<state dir>/tunableop_*.csv` files are no longer read and can be deleted.
 
 ### Fixed
 - **Console live stream**: a CRLF split across two network chunks was read as a blank line, which could split one
