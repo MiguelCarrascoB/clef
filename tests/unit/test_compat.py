@@ -718,7 +718,7 @@ def test_console_and_other_routes_unaffected(api):
 @pytest.fixture(scope="module")
 def live():
     uvicorn = pytest.importorskip("uvicorn")
-    client, eng, app = make()
+    client, eng, app = make(ServingEngine())
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
