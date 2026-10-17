@@ -421,6 +421,15 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             check_limits(r, cfg, f"{label}[{i}]." if batch else "")
             ids.append(served_model(eng, r.model))
         gpu_ready()
+        validate = getattr(eng, "validate", None)  # capabilities, before any media is decoded (fakes: none)
+        if callable(validate):
+            for i, r in enumerate(reqs):
+                try:
+                    validate({**r.to_record(r.images, r.videos), "model": ids[i]})
+                except ValueError as exc:
+                    if not batch:
+                        raise
+                    raise ValueError(f"{label}[{i}].{exc}") from exc
 
         def build() -> list[dict[str, Any]]:
             records = []

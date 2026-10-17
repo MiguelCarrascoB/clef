@@ -349,6 +349,16 @@ Q = {"d": {"type": "choice", "criteria": {"a": "x", "b": "y"}}}
 NOT_SERVED = "model 'gpt-4o' is not served here (this server serves 'clef-flash')"
 
 
+def test_batch_capability_errors_name_the_item_before_media_decode(http):
+    client, _, model = http
+    many = {"d": {"type": "choice", "criteria": {f"o{i}": "x" for i in range(65)}}}
+    bad = {"state": "s", "questions": many, "images": ["data:image/png;base64,not-an-image"]}
+    r = client.post("/v1/batch", json={"batch": [{"state": "s", "questions": Q}, bad]})
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"].startswith("batch[1].questions.d.criteria: too many options (max 64)")
+    assert model.calls == []
+
+
 def _routes(client: TestClient) -> list[tuple[str, dict[str, Any]]]:
     assert client.put("/v1/classifiers/triage", json={"labels": ["a", "b"]}).status_code == 200
     m = {"model": "gpt-4o"}

@@ -1041,6 +1041,10 @@ class Engine:
         # None / "" -> spec.id. Accepted: spec.id, spec.ref (e.g. "clef-flash@local"), spec.repo,
         # f"{spec.id}@{rev}" (full sha or a >= 7-char prefix).
         # Anything else -> UnknownModel(f"model {requested!r} is not served here (this server serves {spec.id!r})")
+    def validate(self, record: Record) -> None
+        # the loaded model's capability check (ValueError -> 400); media need only be present, not decoded.
+        # main.py's prepare runs it per request after check_limits and BEFORE media decode, prefixing
+        # "<label>[i]." in batches (e.g. "batch[1].questions.d.criteria: too many options (max 64)")
     async def prepare(self, records: list[Record], cache: bool = True) -> Prepared
         # validate + check_model per record, cache lookup (D3; no-op until then), encode the misses in threads
     async def submit(self, prepared: Prepared, priority: str = "interactive") -> list[Result]

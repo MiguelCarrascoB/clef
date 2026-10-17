@@ -562,6 +562,12 @@ class Engine:
         if self.status not in ("ready", "warming") or self._stop.is_set() or self.model is None:
             raise EngineNotReady(self.error or f"engine is {self.status}")
 
+    def validate(self, record: Record) -> None:
+        """The served model's capability check of one record (ValueError naming the field -> 400). Media only
+        need to be present, not decoded, so the server runs this before loading them."""
+        self._check_ready()
+        self.model.validate(record)
+
     async def prepare(self, records: list[Record], cache: bool = True) -> Prepared:
         """Check the model and capabilities of every record, then encode them in threads (nothing is queued).
 
