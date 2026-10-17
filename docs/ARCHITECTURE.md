@@ -961,7 +961,8 @@ class OffloadLayout:
     layers_prefix: str                        # "model.language_model.layers."
     embed_key: str                            # "model.language_model.embed_tokens"
     head_key: str                             # "lm_head"
-    device_prefixes: tuple[str, ...]          # kept on the device: vision tower, final norm, rotary, joint head
+    device_prefixes: tuple[str, ...]          # kept on the device: vision tower, final norm, rotary (the joint
+                                              # head is not in the device_map: its own module, always on device)
 
 class Encoded(Protocol):                      # opaque to the engine except these
     length: int                               # real tokens (bucketing, usage.input_tokens)
