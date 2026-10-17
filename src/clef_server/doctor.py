@@ -471,6 +471,17 @@ def check_database(r: Report, cfg: Config) -> None:
         )
 
 
+def check_router_llm(r: Report, cfg: Config) -> None:
+    """E2: whether the router's LLM is on. Says only whether a key is set, never the key."""
+    if not cfg.llm_api_key:
+        r.add(SKIP, "router llm", "off (set GEMINI_API_KEY to let the router propose labels)")
+        return
+    from urllib.parse import urlsplit
+
+    host = urlsplit(cfg.llm_base_url).netloc or cfg.llm_base_url
+    r.add(OK, "router llm", f"on: key set, buffered inputs go to {host} (model {cfg.llm_model})")
+
+
 # ---------------------------------------------------------------------------------------------- smoke
 class _NullStats:
     def record_forward(self, *a: Any, **k: Any) -> None: ...
@@ -533,6 +544,7 @@ def run_checks(no_gpu: bool = False, smoke: bool = False, echo: bool = True) -> 
         return r
     server_up = check_port(r, cfg)
     check_database(r, cfg)
+    check_router_llm(r, cfg)
     if no_gpu:
         check_model(r, cfg)  # torch-free: an unknown CLEF_MODEL fails CI too
         r.add(SKIP, "gpu / weights / disk", "skipped (--no-gpu)")
