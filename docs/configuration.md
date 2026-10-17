@@ -41,7 +41,8 @@ See [Smaller GPUs](memory.md) for which combination fits which card.
 | `CLEF_MAX_BODY_MB` | `64` | request body limit |
 | `CLEF_MAX_TOKENS` | `16384` | input tokens per record |
 | `CLEF_MAX_EVAL_ROWS` | `500` | rows per `POST /v1/evaluate` request |
-| `CLEF_CACHE_SIZE` | `10000` | result-cache entries (in-memory LRU, about 2 KB each, lost on restart); `0` = off. Interactive calls, jobs and evaluate share it; media records are never cached; send `Cache-Control: no-cache` to skip the lookup. Cache hits do not count toward quotas. Stats: `cache` block of `GET /v1/stats` |
+| `CLEF_CACHE_SIZE` | `10000` | result-cache entries (in-memory LRU, lost on restart); `0` = off. Also bounded by `CLEF_CACHE_MB`. Interactive calls, jobs and evaluate share it; media records are never cached; send `Cache-Control: no-cache` to skip the lookup. Cache hits do not count toward quotas. Stats: `cache` block of `GET /v1/stats` |
+| `CLEF_CACHE_MB` | `256` | result-cache byte budget (estimated as the stored JSON size, typically about 1-2 KB per entry, so 10000 entries are about 10-20 MB); LRU entries are evicted until it fits, and an entry larger than a tenth of the budget is not stored; `0` = off |
 | `CLEF_MAX_JOB_EVAL_ROWS` | `100000` | rows per `evaluate` job and per `POST /v1/evaluate/metrics` request |
 
 The media limits (`CLEF_MAX_IMAGES`, `CLEF_MAX_VIDEOS`, `CLEF_MAX_PIXELS`, `CLEF_MAX_FRAMES`, `CLEF_VIDEO_FPS`,

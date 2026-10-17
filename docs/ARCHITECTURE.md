@@ -91,6 +91,7 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_MODEL` (planned, v3.2) | `clef-flash` | `<id>[@<revision>]` from the model catalog (`clef-flash`, `clef`). `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` stay as aliases, see Decision model interface |
 | `CLEF_MASK_FREE` (planned, v3.2) | `0` | `1`: text batches call the backbone with `attention_mask=None` and the head uses CPU lengths (D2; becomes the default only after `bench/parity.py` passes) |
 | `CLEF_CACHE_SIZE` | `10000` | result-cache entries (in-memory LRU); `0` = off |
+| `CLEF_CACHE_MB` | `256` | result-cache byte budget (stored-JSON size estimate); `0` = off |
 | `CLEF_JOB_TZ` (planned, v3.2) | `UTC` | IANA zone for job windows that give no `tz` and for `CLEF_JOB_WINDOW` |
 | `CLEF_JOB_WINDOW` (planned, v3.2) | empty | default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |
 | `CLEF_JOB_ACTIVE` (planned, v3.2) | `4` | jobs that may be `running` (taking turns) at once; `>= 1` |
@@ -1296,23 +1297,27 @@ reads or writes it, so interactive routes, jobs, evaluate, batches and the route
 
 ```python
 class ResultCache:
-    def __init__(self, capacity: int = 10000) -> None     # capacity 0 = disabled (every call is a no-op)
+    def __init__(self, capacity: int = 10000, max_bytes: int = 256 << 20) -> None  # capacity or max_bytes 0 = disabled
     enabled: bool
     @staticmethod
     def key(model_ref: str, record: Record) -> str | None
         # None (not cacheable) when the record has images or videos.
         # Else sha256 hex of canonical JSON (sort_keys=True, separators=(",", ":"), ensure_ascii=False) of
-        # {"m": model_ref, "s": record["state"], "q": record["questions"]}: the state verbatim, every question with
-        # its type, instructions and criteria. `model_ref` is `<id>@<revision>`. Thresholds, the request id and the
+        # {"m": model_ref, "s": record["state"], "q": [[qid, question], ...]}: the state verbatim (the release sorts
+        # it), the questions as an ORDERED list with each choice `criteria` as an ordered [[key, text], ...] list,
+        # because the release lays out questions and options in dict order (a different order is a different forward). `model_ref` is `<id>@<revision>`. Thresholds, the request id and the
         # label order of a multi-label response are applied after the model and are not in the key.
     def get(self, key: str) -> Result | None             # a private copy; moves the entry to the MRU end
     def put(self, key: str, result: Result) -> None       # stores a copy without "timing"; evicts the LRU entry
     def note_bypass(self, n: int = 1) -> None             # counts lookups skipped (no-cache, media)
     def clear(self) -> None
-    def stats(self) -> dict   # {"enabled", "size", "capacity", "hits", "misses", "bypassed", "evictions"}
+    def stats(self) -> dict   # {"enabled", "size", "capacity", "bytes", "max_bytes", "hits", "misses", "bypassed", "evictions"}
 ```
 
 Semantics:
+- Bounds: `CLEF_CACHE_SIZE` entries and `CLEF_CACHE_MB` bytes (running estimate: `len(json.dumps(stored))`). `put`
+  evicts LRU entries until both hold and skips an entry larger than 1/10 of the byte budget. Memory is about the
+  budget (default 256 MiB at most; typical entries are 1-2 KB so 10000 entries are tens of MB).
 - Thread-safe (`threading.Lock`); in memory only, lost on restart. No invalidation: the questions and the model
   ref are in the key, and the engine also clears the cache when its model loads.
 - A hit returns a copy of the stored result with `usage` as stored (the original `input_tokens`) and `timing` =
@@ -1323,7 +1328,7 @@ Semantics:
   lookup and still stores the fresh result. `ctx.infer` reads the header and passes `cache=False` down
   (`ctx.decide(..., cache=False)` -> `engine.prepare(records, cache=False)`); background callers pass it explicitly.
 - Identical records inside one call are computed once; the later ones are filled from the first after the forward
-  and are marked as hits (`Prepared.dups`; `Prepared.slice` turns a dup whose source was sliced away into a miss).
+  and are marked as hits and counted as hits in the stats (`Prepared.dups`; `Prepared.slice` turns a dup whose source was sliced away into a miss).
 - Only successful forwards are stored (`submit` stores them even if a sibling failed). Errors, OOM and media records
   are never cached.
 - Quotas (contract decision 3): cache hits do **not** count. D1 charges only the results whose

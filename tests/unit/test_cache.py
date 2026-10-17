@@ -27,10 +27,45 @@ def res(tag="a"):
 
 
 # ---------------------------------------------------------------- the LRU
-def test_key_is_canonical_and_ignores_dict_order():
+def test_key_depends_on_question_order():
+    qa = {"type": "noul", "instructions": "Is it positive?"}
+    qb = {"type": "choice", "instructions": "Topic", "criteria": {"x": "sports", "y": "politics"}}
+    r1 = {"state": "hello", "questions": {"a": qa, "b": qb}}
+    r2 = {"state": "hello", "questions": {"b": qb, "a": qa}}
+    assert ResultCache.key("m@1", r1) != ResultCache.key("m@1", r2)
+    assert ResultCache.key("m@1", r1) == ResultCache.key(
+        "m@1", {"state": "hello", "questions": {"a": qa, "b": qb}}
+    )
+
+
+def test_key_depends_on_criteria_order():
+    def r(c):
+        return {"state": "s", "questions": {"q": {"type": "choice", "criteria": c}}}
+
+    assert ResultCache.key("m", r({"x": "1", "y": "2"})) != ResultCache.key("m", r({"y": "2", "x": "1"}))
+    assert ResultCache.key("m", r({"x": "1", "y": "2"})) == ResultCache.key("m", r({"x": "1", "y": "2"}))
+
+
+def test_byte_budget_evicts_lru_and_skips_oversized():
+    def big(t, n):
+        return {**res(t), "pad": "x" * n}
+
+    c = ResultCache(1000, max_bytes=10000)
+    for k in "abcdefghijklmnop":  # ~700 bytes each, 16 of them exceed the budget
+        c.put(k, big(k, 600))
+    st = c.stats()
+    assert st["bytes"] <= 10000 and st["evictions"] >= 1 and c.get("a") is None and c.get("p") is not None
+    c.put("huge", big("h", 1500))  # > 1/10 of the budget: skipped
+    assert c.get("huge") is None
+    assert ResultCache(100, max_bytes=0).enabled is False
+    c.clear()
+    assert c.stats()["bytes"] == 0
+
+
+def test_key_is_canonical_and_ignores_field_order():
     a = {"state": "hi", "questions": {"d": {"type": "choice", "criteria": {"a": "x", "b": "y"}}}}
     b = {
-        "questions": {"d": {"criteria": {"b": "y", "a": "x"}, "type": "choice"}},
+        "questions": {"d": {"criteria": {"a": "x", "b": "y"}, "type": "choice"}},
         "state": "hi",
         "model": "z",
     }
@@ -141,6 +176,8 @@ def test_duplicates_in_one_call_run_once(started):  # noqa: F811
     assert sum(c[0] for c in model.calls) == 2
     assert [r["timing"]["cached"] for r in out] == [False, False, True]
     assert probs(out[0]) == probs(out[2])
+    st = eng.cache_stats()  # the duplicate is a hit, matching its timing.cached marker
+    assert st["hits"] == 1 and st["misses"] == 2
 
 
 def test_no_cache_bypasses_lookup_but_stores(started):  # noqa: F811

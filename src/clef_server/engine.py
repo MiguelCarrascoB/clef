@@ -496,7 +496,9 @@ class Engine:
                 requested = (getattr(cfg, "model", None) or "").partition("@")[0] or registry.DEFAULT_MODEL_ID
                 self.spec = ModelSpec(requested, "unknown", None, None, WEIGHTS_GB)
         self.model: DecisionModel | None = None  # set on the worker thread once loaded
-        self.cache = ResultCache(int(getattr(cfg, "cache_size", 10000)))  # D3
+        self.cache = ResultCache(
+            int(getattr(cfg, "cache_size", 10000)), int(getattr(cfg, "cache_mb", 256)) * 1024 * 1024
+        )  # D3
         register = getattr(stats, "set_cache_source", None)
         if register is not None:
             register(self.cache_stats)
@@ -609,6 +611,7 @@ class Engine:
                     hits[i] = _as_hit(hit)
                 elif key in first:
                     dups[i] = first[key]
+                    self.cache.note_dup()
                 else:
                     first[key] = i
         todo = [i for i in range(n) if i not in hits and i not in dups]
