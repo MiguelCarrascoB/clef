@@ -89,7 +89,8 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_DATABASE_URL` (planned, v3.2) | unset | SQLAlchemy URL. Unset: `sqlite:///<state_dir>/clef.db`. `postgresql://` / `postgres://` are normalised to `postgresql+psycopg://` (needs the `postgres` extra). See Storage |
 | `CLEF_DATABASE_POOL_SIZE` (planned, v3.2) | `5` | Postgres pool size (`max_overflow` = the same); ignored on SQLite; `>= 1` |
 | `CLEF_MODEL` (planned, v3.2) | `clef-flash` | `<id>[@<revision>]` from the model catalog (`clef-flash`, `clef`). `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` stay as aliases, see Decision model interface |
-| `CLEF_MASK_FREE` (planned, v3.2) | `0` | `1`: text batches call the backbone with `attention_mask=None` and the head uses CPU lengths (D2; becomes the default only after `bench/parity.py` passes) |
+| `CLEF_MASK_FREE` | `0` | `1`: text batches call the backbone with `attention_mask=None` and the head uses CPU lengths (D2; becomes the default only after `bench/parity.py` passes) |
+| `CLEF_FAST_HEAD` | `0` | `1`: the batch-vectorised, sync-free joint head `fast_joint_head` (D2; same maths as the release head, opt-in until `bench/perf_check.sh` passes on the GPU) |
 | `CLEF_CACHE_SIZE` (planned, v3.2) | `10000` | result-cache entries (in-memory LRU); `0` = off |
 | `CLEF_JOB_TZ` (planned, v3.2) | `UTC` | IANA zone for job windows that give no `tz` and for `CLEF_JOB_WINDOW` |
 | `CLEF_JOB_WINDOW` (planned, v3.2) | empty | default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |
