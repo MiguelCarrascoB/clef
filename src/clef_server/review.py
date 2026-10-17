@@ -230,8 +230,17 @@ class ReviewStore:
             )
         return rid
 
-    def set_state(self, ids: list[str], state: str, *, purge: bool = False, by: str | None = None) -> None:
-        """Move rows to ``state``; ``purge`` drops the stored text; a resolving state stamps who and when."""
+    def set_state(
+        self,
+        ids: list[str],
+        state: str,
+        *,
+        purge: bool = False,
+        by: str | None = None,
+        only_from: tuple[str, ...] | None = None,
+    ) -> None:
+        """Move rows to ``state`` (only rows now in ``only_from``, when given); ``purge`` drops the stored
+        text; a resolving state stamps who and when."""
         if not ids:
             return
         values: dict[str, Any] = {"state": state}
@@ -240,7 +249,10 @@ class ReviewStore:
         if state in ("resolved", "discarded", "accepted", "rejected", "permanent_other"):
             values.update(resolved_at=time.time(), resolved_by=by)
         with self.db.tx() as conn:
-            conn.execute(update(R).where(R.c.id.in_(ids)).values(**values))
+            stmt = update(R).where(R.c.id.in_(ids))
+            if only_from is not None:
+                stmt = stmt.where(R.c.state.in_(only_from))
+            conn.execute(stmt.values(**values))
 
     def bump_attempts(self, ids: list[str], max_attempts: int = 2) -> None:
         """The items were sent through a check and are still unplaced: reroutes += 1; at ``max_attempts`` they
@@ -250,12 +262,32 @@ class ReviewStore:
         with self.db.tx() as conn:
             conn.execute(
                 update(R)
-                .where(R.c.id.in_(ids))
+                .where(R.c.id.in_(ids), R.c.state.in_(OPEN_ITEM))
                 .values(
                     reroutes=R.c.reroutes + 1,
                     state=case((R.c.reroutes + 1 >= max_attempts, "permanent_other"), else_="buffered"),
                 )
             )
+
+    def resolve_many(self, rows: list[tuple[str, str, dict[str, Any]]], by: str) -> None:
+        """Resolve buffered items with a label: ``(id, label, prediction)``; the text is dropped (D17)."""
+        if not rows:
+            return
+        now = time.time()
+        with self.db.tx() as conn:
+            for rid, label, prediction in rows:
+                conn.execute(
+                    update(R)
+                    .where(R.c.id == rid, R.c.state.in_(OPEN_ITEM))
+                    .values(
+                        state="resolved",
+                        label=label,
+                        input=None,
+                        prediction=canonical(prediction),
+                        resolved_at=now,
+                        resolved_by=by,
+                    )
+                )
 
     def update_row(self, review_id: str, **fields: Any) -> None:
         """Set columns on one row; dict values for JSON columns are serialised."""

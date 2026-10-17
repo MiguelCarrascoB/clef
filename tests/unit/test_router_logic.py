@@ -165,8 +165,8 @@ def test_proposal_schema_uses_only_the_portable_keywords():
             for v in node:
                 walk(v)
 
-    walk(proposal_schema(3))
-    assert seen <= {"type", "items", "required", "additionalProperties", "maxItems"}
+    walk(proposal_schema())
+    assert seen <= {"type", "items", "required", "additionalProperties"}
 
 
 def test_build_prompt_lists_current_labels_and_numbers_and_truncates_items():

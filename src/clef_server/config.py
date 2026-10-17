@@ -240,9 +240,12 @@ class Config:
     llm_timeout_s: float = field(default_factory=lambda: _float("CLEF_LLM_TIMEOUT_S", 60.0))
     router_batch: int = field(default_factory=lambda: _int("CLEF_ROUTER_BATCH", 20))  # items per LLM call
     router_cold_batch: int = field(default_factory=lambda: _int("CLEF_ROUTER_COLD_BATCH", 20))
-    router_flush_s: float = field(default_factory=lambda: _float("CLEF_ROUTER_FLUSH_S", 3600.0))
+    router_mode: str = field(
+        default_factory=lambda: _str("CLEF_ROUTER_MODE", "review").lower()
+    )  # review|auto
+    router_flush_s: float = field(default_factory=lambda: _float("CLEF_ROUTER_FLUSH_S", 600.0))
     router_max_input_chars: int = field(default_factory=lambda: _int("CLEF_ROUTER_MAX_INPUT_CHARS", 500))
-    router_max_new_per_day: int = field(default_factory=lambda: _int("CLEF_ROUTER_MAX_NEW_PER_DAY", 5))
+    router_max_new_per_day: int = field(default_factory=lambda: _int("CLEF_ROUTER_MAX_NEW_PER_DAY", 10))
     review_ttl_days: float = field(default_factory=lambda: _float("CLEF_REVIEW_TTL_DAYS", 30.0))  # 0 = keep
 
     def __post_init__(self) -> None:
@@ -271,6 +274,8 @@ class Config:
             raise ValueError("CLEF_CACHE_SIZE must be >= 0 (0 = off)")
         if self.cache_mb < 0:
             raise ValueError("CLEF_CACHE_MB must be >= 0 (0 = off)")
+        if self.router_mode not in ("review", "auto"):
+            raise ValueError("CLEF_ROUTER_MODE must be review or auto")
         if self.llm_timeout_s <= 0:
             raise ValueError("CLEF_LLM_TIMEOUT_S must be > 0")
         if not 2 <= self.router_batch <= 100 or not 2 <= self.router_cold_batch <= 100:

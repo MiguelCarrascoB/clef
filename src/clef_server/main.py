@@ -106,7 +106,7 @@ ERRORS: dict[int | str, dict[str, Any]] = {
     }.items()
 }
 # Feature modules: each exposes router(ctx: AppContext) -> APIRouter (see appctx.py). One line each.
-FEATURES: list[str] = ["evaluation", "compat", "jobs", "admin"]
+FEATURES: list[str] = ["evaluation", "compat", "jobs", "admin", "router"]
 
 
 class ApiError(Exception):
@@ -781,7 +781,11 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                 functools.partial(
                     store.put,
                     name,
-                    body.model_dump(),
+                    # review_threshold joins the stored definition only when set, so an unchanged re-PUT of an
+                    # older classifier stays a no-op
+                    body.model_dump(
+                        exclude=None if body.review_threshold is not None else {"review_threshold"}
+                    ),
                     owner=caller,
                     created_by=caller,
                     model=ctx.model_ref(),
@@ -859,6 +863,12 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             raise ApiError(404, f"classifier {name!r} not found")
         return {"deleted": name}
 
+    async def capture_review(name: str, doc: dict[str, Any], inputs: list[Any], results: list[Any]) -> None:
+        """E2: single-label results below review_threshold become Review items (router.py)."""
+        capture = ctx.extra.get("review_capture")  # set by the router feature; ctx exists by request time
+        if capture is not None and doc.get("review_threshold") is not None:
+            await capture(name, doc, inputs, results)
+
     def run_threshold(doc: dict[str, Any], given: float | None) -> float | None:
         if not doc.get("multi_label"):
             if given is not None:
@@ -886,7 +896,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                 model=body.model,
                 **common,
             )
-        return await run_classify(
+        out = await run_classify(
             request,
             labels=doc["labels"],
             instructions=doc.get("instructions"),
@@ -895,6 +905,9 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             model=body.model,
             **common,
         )
+        if not body.images and not body.videos:  # E2: results below review_threshold go to the Review queue
+            await capture_review(name, doc, [body.input], [out])
+        return out
 
     @v1.post(
         "/classifiers/{name}/batch",
@@ -909,7 +922,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         doc = await load_classifier(name, body.version)
         if doc["kind"] == "score":
             raise ApiError(400, "batch is only supported for classify classifiers")
-        return await run_classify_batch(
+        out = await run_classify_batch(
             request,
             inputs=body.inputs,
             labels=doc["labels"],
@@ -919,6 +932,8 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             model=body.model,
             classifier=name,
         )
+        await capture_review(name, doc, body.inputs, out["results"])
+        return out
 
     # ---- observability
     def model_info() -> dict[str, Any]:
