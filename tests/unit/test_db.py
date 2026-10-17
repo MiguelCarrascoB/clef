@@ -609,6 +609,34 @@ def test_jobs_store_the_model_ref_and_404_an_unknown_model():
         assert "model" not in stored  # the payload default stays "the served model"
 
 
+def test_every_job_kind_checks_model_at_submit_and_accepts_null():
+    client, _, app = make_jobs(ModelEngine())
+    ok_req = {"state": "x", "questions": {"q": {"type": "noul"}}}
+    with client:
+        if "evaluate" not in app.state.ctx.extra["job_kinds"]:
+            pytest.skip("evaluate kind not registered in this app")
+        bad = {
+            "classify": {"inputs": ["a"], "labels": LABELS, "model": "gpt-4"},
+            "score": {"inputs": ["a"], "levels": ["lo", "hi"], "model": "gpt-4"},
+            "systemone": {
+                "requests": [ok_req, {**ok_req, "model": "clef-flash"}, {**ok_req, "model": "gpt-4"}]
+            },
+            "evaluate": {"model": "gpt-4", "classifier": "x", "examples": [{"input": "a", "label": "a"}]},
+        }
+        for kind, payload in bad.items():
+            r = submit(client, kind, payload)
+            assert r.status_code == 404 and "'gpt-4' is not served here" in r.json()["detail"], (kind, r.text)
+        good = {
+            "classify": {"inputs": ["a"], "labels": LABELS, "model": None},
+            "score": {"inputs": ["a"], "levels": ["lo", "hi"], "model": None},
+            "systemone": {"requests": [{**ok_req, "model": None}, ok_req]},
+        }
+        for kind, payload in good.items():
+            r = submit(client, kind, payload)
+            assert r.status_code == 202, (kind, r.text)
+            assert wait(client, r.json()["id"])["status"] == "succeeded", kind
+
+
 def test_a_job_submitted_for_another_model_fails_at_run_time():
     state = tempfile.mkdtemp(prefix="clef-db-")
     store = open_store(Config(state_dir=state))
