@@ -11,6 +11,21 @@
   to load is reported unhealthy; `/livez` stays the process-up probe.
 - `CLEF_LOG_FORMAT=json` (`clef serve --log-format json`): app, uvicorn and access log lines as one JSON object per
   line (`ts`, `level`, `logger`, `msg`, `request_id`). The default `text` output is unchanged.
+- **Decision models (C2)**: `CLEF_MODEL=<id>[@<revision>]` picks the served model from a catalog (`clef models`):
+  `clef-flash` (default) or `clef`, the 27B (`Cloudflare/clef@0b331204`, ~55 GB; fits a 24 GB GPU only with
+  `CLEF_QUANT=nf4`, `clef doctor` warns). `clef download --model clef` fetches it. Models come from adapters
+  registered under the `clef.models` entry-point group, so a third-party package can add its own;
+  `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` keep working. `/health` and `/v1/models` report the served model
+  (adapter, revision, capabilities). `Cache-Control: no-cache` on an inference request will bypass the result
+  cache (once it lands).
+
+### Changed
+- **`model` in requests**: optional everywhere (omit it, or send null, for the served model); responses report the
+  served id. A model the server does not serve is now **404** on every route (OpenAI routes:
+  `model_not_found`) instead of being ignored; `/v1/chat/completions` no longer lists `model` in `clef.ignored`.
+  The Hugging Face path id (`/hf/models/{id}`) is still ignored. The Python and JS clients and the console no
+  longer send `model: "clef-flash"`. A `/v1/systemone` choice / score question with more than `CLEF_MAX_LABELS`
+  options is now a 400.
 
 ### Fixed
 - **Console live stream**: a CRLF split across two network chunks was read as a blank line, which could split one

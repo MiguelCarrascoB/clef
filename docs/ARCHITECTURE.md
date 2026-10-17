@@ -868,7 +868,7 @@ transaction at a time on SQLite; the request path reaches the DB only through st
 Supersedes when landed: "Storage: SQLite `<state_dir>/jobs.db`" in Async jobs, the `classifiers.py` row of the
 package layout, and the "Files: `<state_dir>/classifiers/<name>.json`" bullet in Saved classifiers.
 
-## Decision model interface (planned, v3.2)
+## Decision model interface
 
 Scope (D5, D6, D13, D14): one model per process, chosen by `CLEF_MODEL` and a restart. v3.2 ships one adapter,
 `clef-release`, which serves every Cloudflare-style release (`joint_schema_model.py` + `joint_head.*` next to the
@@ -1063,6 +1063,23 @@ lacks, more options than `max_options`); 413 `InputTooLarge`; 503 not ready / OO
 
 Invariants: ONE GPU worker thread, ONE adapter per process; the adapter never edits files in the model dir; every
 result for a record is computed by exactly one `forward` call (cache hits excepted).
+
+As built (C2), beyond the text above:
+- `Engine.model_info()` (the adapter's `info()` or the spec before the load, plus `distribution`: the adapter's
+  `<dist> <version>`) feeds `/health` `model` and the `clef` block of `/v1/models`; `Engine.capabilities()` feeds
+  `fast_path`. `Engine.model` is set only after a successful load (prepare / submit raise EngineNotReady before).
+- `"model": null` is accepted and means the served model (`schemas.DEFAULT_MODEL` is None; clients omit the field).
+- `models.registry.served_model(engine, requested)` is the check main.py, compat_openai and evaluation use: it
+  calls `engine.check_model` and, for test engines without one, returns `requested or "clef-flash"`.
+- Capability validation applies `max_options` (= `CLEF_MAX_LABELS`, 64) to `/v1/systemone` questions too, so a
+  choice / score question with more options is now a 400 there as well.
+- `ClefReleaseAdapter.encode` returns `ReleaseEncoded(raw, length, is_media)`, which also exposes `input_ids` /
+  `media` for the bench scripts; `collate` keeps the release's `"records"` key (its head reads it).
+- The 27B catalog entry is `Cloudflare/clef@0b331204bb13fbd2ca93a64df1956f5b55478ce5` (HF API `sha`, 2026-10-17),
+  `weights_gb` 55.0 (index `total_size` + joint head, measured like clef-flash's 19.0), and carries
+  `options["fits_24gb"] = "nf4"`, which `clef doctor` turns into its WARN (also with `--no-gpu`).
+- The TunableOp directory is created by the engine before the load (prepare_environment does no I/O).
+- Saved-classifier runs (`/v1/classifiers/{name}[/batch]`) take `model` from the request body.
 
 Supersedes when landed: "ONE uvicorn worker per process (one model)" (becomes "one adapter"), the engine's
 `loader` / `load_release_model` wording in Engine interface, "`GET /v1/models` lists `clef-flash`" and "`model`
