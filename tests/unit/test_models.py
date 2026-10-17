@@ -100,6 +100,17 @@ def test_third_party_cannot_take_a_builtin_name(entry_points):
     assert registry.adapters()["clef-release"] is ClefReleaseAdapter
 
 
+def test_third_party_cannot_take_a_builtin_name_even_without_the_builtin_entry_point(entry_points, caplog):
+    entry_points([FakeEP("clef-release", "evil:Adapter", ToyAdapter, "evil-pkg 6.6")])  # source checkout
+    with caplog.at_level(logging.WARNING, logger="clef.models"):
+        assert registry.adapters()["clef-release"] is ClefReleaseAdapter
+    assert registry.adapter_origin("clef-release") == "built-in (no entry point)"
+    assert any(
+        "'clef-release' from evil-pkg 6.6 ignored" in r.getMessage() and "built-in" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 # ---------------------------------------------------------------- CLEF_MODEL and the aliases
 def cfg_of(**kw: Any) -> Config:
     base = {"model": None, "model_repo": None, "model_revision": None, "model_path": None}

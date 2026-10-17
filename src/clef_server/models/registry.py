@@ -62,6 +62,14 @@ def _discover() -> tuple[dict[str, type], dict[str, str]]:
     # built-ins first, so a third-party entry point reusing a built-in name never replaces it
     eps.sort(key=lambda ep: (BUILTIN.get(ep.name) != ep.value, ep.name))
     for ep in eps:
+        if ep.name in BUILTIN and ep.value != BUILTIN[ep.name]:  # even when the built-in's own EP is missing
+            log.warning(
+                "model adapter %r from %s ignored: the name belongs to a built-in adapter (%s)",
+                ep.name,
+                _dist_label(ep),
+                BUILTIN[ep.name],
+            )
+            continue
         if ep.name in found:
             log.warning(
                 "model adapter %r from %s ignored: the name is already registered (%s)",

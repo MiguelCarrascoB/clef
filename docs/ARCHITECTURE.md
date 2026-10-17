@@ -1013,7 +1013,9 @@ def create(cfg: Config) -> DecisionModel
   One fallback: when the `clef-release` entry point is missing (a source checkout on `PYTHONPATH`, or an install
   made before the entry point existed), `adapters()` registers the built-in directly and logs a WARNING (re-install
   to silence it). Without it, every such checkout would fail to load any model. An entry point that fails to
-  import is skipped with a WARNING.
+  import is skipped with a WARNING. A built-in name (`clef-release`) is only taken from an entry point whose value
+  is the built-in ref (`registry.BUILTIN`); any other entry point with that name is ignored with a WARNING, even
+  when the built-in's own entry point is missing, so a third-party package cannot take over `clef-release`.
 - Catalog (`ClefReleaseAdapter.catalog()`): `clef-flash` → `Cloudflare/clef-flash@<MODEL_REVISION>` (today's
   pin, `weights_gb` 19.0); `clef` → `Cloudflare/clef@<sha>` with the full sha taken by C2 from the HF API (never
   typed from memory), `weights_gb` from its index.
