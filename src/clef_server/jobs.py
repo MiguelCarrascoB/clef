@@ -350,7 +350,7 @@ class JobStore:
                 ],
             )
             failed = sum(1 for it in items if isinstance(it, dict) and "error" in it)
-            # F1: no explicit count -> jobs.tokens sums the stored rows' input_tokens (batch usage)
+            # an explicit count wins; otherwise jobs.tokens sums the rows' input_tokens (batch usage)
             if not tokens:
                 tokens = sum(int(it.get("input_tokens") or 0) for it in items if isinstance(it, dict))
             conn.execute(
@@ -1590,10 +1590,9 @@ class JobRunner:
         expired = handle.expired and not cancelled  # the user's cancel wins over the clock
         status, error = ("cancelled" if cancelled or expired else "succeeded"), (EXPIRED if expired else None)
         if status == "succeeded" and not spec.get("completed_if_all_failed"):
+            # A kind with "completed_if_all_failed" (batch, OpenAI semantics) skips this check.
             now = await asyncio.to_thread(self.store.get, job_id)
-            all_failed = now and now["done"] > 0 and now["failed"] >= now["done"]
-            # F1: a kind with "completed_if_all_failed" (batch) ends succeeded even when every item failed
-            if all_failed and not spec.get("completed_if_all_failed"):  # nothing worked: not a success
+            if now and now["done"] > 0 and now["failed"] >= now["done"]:  # nothing worked: not a success
                 status = "failed"
                 error = f"all {now['done']} item(s) failed" + (
                     f" ({handle.first_error})" if handle.first_error else ""
@@ -1705,7 +1704,7 @@ async def run_chunked(
             row = {"index": k, "error": out.message} if isinstance(out, ItemError) else shape(k, out)
             tally(row)
             rows.append(row)
-        await job.add_items(rows, tokens=sum(int(r.get("input_tokens") or 0) for r in rows))
+        await job.add_items(rows)
         i = j
         await asyncio.sleep(0)  # let interactive requests reach the engine queue before the next chunk
 
