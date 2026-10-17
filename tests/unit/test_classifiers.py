@@ -171,6 +171,48 @@ def test_concurrent_puts_respect_cap_and_never_reuse_a_version(db):
     assert versions == list(range(len(versions), 0, -1)) and len(versions) > 1  # gap-free, never reused
 
 
+def test_concurrent_first_puts_of_a_new_name_get_distinct_versions(db):
+    store = ClassifierStore(db, max_classifiers=50)
+    for trial in range(5):
+        name = f"fresh{trial}"
+        barrier = threading.Barrier(4)
+        errors: list[BaseException] = []
+        got: list[int] = []
+
+        def first_put(i: int, name=name, barrier=barrier, got=got, errors=errors) -> None:
+            barrier.wait()
+            try:
+                got.append(store.put(name, {**DEF, "labels": [f"l{i}", "z"]}, owner=f"u{i}")["version"])
+            except BaseException as exc:  # an IntegrityError here was the bug: SELECT FOR UPDATE on no row
+                errors.append(exc)
+
+        threads = [threading.Thread(target=first_put, args=(i,)) for i in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        assert errors == [] and sorted(got) == [1, 2, 3, 4]
+        assert store.owner(name) in {f"u{i}" for i in range(4)}
+
+
+def test_put_runs_the_owner_check_inside_its_transaction(store):
+    seen: list[str | None] = []
+
+    def allow(owner: str | None) -> None:
+        seen.append(owner)
+
+    store.put("t", DEF, owner="alice", check_owner=allow)
+    store.put("t", {**DEF, "labels": ["c", "d"]}, owner="bob", check_owner=allow)
+    assert seen == [None, "alice"]
+
+    def deny(owner: str | None) -> None:
+        raise PermissionError(owner)
+
+    with pytest.raises(PermissionError):
+        store.put("t", {**DEF, "labels": ["e", "f"]}, owner="bob", check_owner=deny)
+    assert store.get("t")["version"] == 2  # nothing was written
+
+
 def test_json_files_are_imported_once(tmp_path, db, caplog):
     folder = tmp_path / "state" / "classifiers"
     folder.mkdir(parents=True)

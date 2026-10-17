@@ -582,7 +582,7 @@ def test_database_errors_are_503(monkeypatch):
 
     with client:
         monkeypatch.setattr(app.state.ctx.store, "list", down)
-        monkeypatch.setattr(app.state.ctx.store, "owner", down)
+        monkeypatch.setattr(app.state.ctx.store, "put", down)
         monkeypatch.setattr(app.state.ctx.extra["jobs"].store, "list", down)
         for r in (
             client.get("/v1/classifiers"),

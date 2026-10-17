@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -163,16 +164,25 @@ class ClassifierStore:
         created_by: str | None = None,
         model: str | None = None,
         *,
+        check_owner: Callable[[str | None], None] | None = None,
         actor: str | None = None,
         ip: str | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         """Append version n+1 (the first PUT creates the name, owned by ``owner``). A definition equal to the
-        latest is a no-op that returns the latest. Writes ``classifier.put`` to the audit log."""
+        latest is a no-op that returns the latest. Writes ``classifier.put`` to the audit log.
+
+        ``check_owner(current_owner)`` runs inside the transaction (None for a new name) and raises to refuse,
+        so the ownership check and the append are atomic."""
         validate_name(name)
         body = _definition(definition)
         with self.db.tx() as conn:
+            # Postgres: SELECT ... FOR UPDATE locks nothing while the name does not exist yet, so two first
+            # PUTs would both insert version 1. Serialise per name first (SQLite's BEGIN IMMEDIATE does).
+            self.db.serialize(conn, f"classifier:{name}")
             head = conn.execute(select(_C).where(_C.c.name == name).with_for_update()).first()
+            if check_owner is not None:
+                check_owner(None if head is None else head.owner)
             now = time.time()
             if head is None:
                 self.db.serialize(conn, "classifiers.count")

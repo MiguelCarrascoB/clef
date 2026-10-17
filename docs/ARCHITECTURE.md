@@ -898,6 +898,11 @@ As built (C1; additions to the interface above, nothing in it changed):
   must replace it, since it would park jobs other tasks are still running.
 - `ClassifierStore.put` / `delete` take keyword-only `actor`, `ip`, `request_id` for the audit row (`actor`
   defaults to `created_by`, then `"anonymous"`). The JSON import writes `classifier.put` rows with actor `import`.
+- `ClassifierStore.put` first takes `db.serialize(conn, "classifier:<name>")` (on Postgres a `SELECT ... FOR UPDATE`
+  on a name that does not exist yet locks nothing, so two first PUTs would both insert version 1), then reads the
+  head. It also takes a keyword-only `check_owner(current_owner)` callback, called inside that transaction (None
+  for a new name) that raises to refuse: the PUT route passes its 403 check there, so the ownership check and the
+  append are atomic. DELETE still checks before its own transaction.
 - `AppContext.model_ref()` / `check_model()` are methods (they read the engine's hooks at call time).
 - Job payloads of `classify` / `score` accept `version` next to `classifier`; the snapshot drops it and records
   `classifier_version`. `EvaluateRequest` has both fields too.

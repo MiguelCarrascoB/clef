@@ -653,14 +653,20 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         principal = getattr(request.state, "principal", None)
         return True if principal is None else bool(principal.has("admin"))
 
-    async def check_owner(request: Request, name: str) -> None:
+    def owner_check(request: Request, name: str) -> Callable[[str | None], None]:
         """403 unless the caller owns ``name``, is admin, or nobody owns it (NULL owner)."""
-        owner = await run_in_threadpool(store.owner, name)
         caller = getattr(request.state, "key_name", None)
-        if owner is not None and owner != caller and not is_admin(request):
-            raise ApiError(
-                403, f"classifier {name!r} belongs to {owner!r}; only its owner or an admin may change it"
-            )
+
+        def check(owner: str | None) -> None:
+            if owner is not None and owner != caller and not is_admin(request):
+                raise ApiError(
+                    403, f"classifier {name!r} belongs to {owner!r}; only its owner or an admin may change it"
+                )
+
+        return check
+
+    async def check_owner(request: Request, name: str) -> None:
+        owner_check(request, name)(await run_in_threadpool(store.owner, name))
 
     owner_errors: dict[int | str, dict[str, Any]] = {
         403: {"model": ErrorBody, "description": "Not the classifier's owner"}
@@ -674,7 +680,6 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     )
     async def put_classifier(name: str, body: ClassifierDef, request: Request) -> dict[str, Any]:
         checked_name(name)
-        await check_owner(request, name)
         caller = getattr(request.state, "key_name", None)
         try:
             if body.kind == "classify":
@@ -689,6 +694,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                     owner=caller,
                     created_by=caller,
                     model=ctx.model_ref(),
+                    check_owner=owner_check(request, name),  # in put's transaction: atomic with the append
                     actor=caller or "anonymous",
                     ip=request.client.host if request.client else None,
                     request_id=_rid(request),
