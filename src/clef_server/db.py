@@ -243,6 +243,7 @@ class Database:
         """``alembic upgrade heads`` in one transaction; a legacy jobs.db is stamped ``0001`` first."""
         from alembic import command
         from alembic.runtime.migration import MigrationContext
+        from alembic.util import CommandError
 
         try:
             with self.tx() as conn:
@@ -251,9 +252,16 @@ class Database:
                     self._legacy_baseline(conn)
                     command.stamp(self._alembic_config(conn), "0001")
                 before = "+".join(sorted(MigrationContext.configure(conn).get_current_heads()))
+                if before and version_state(before) == "ahead":  # a revision this code does not know
+                    raise DatabaseError(
+                        f"database schema {before} is newer than this clef (expects {code_version()}):"
+                        " upgrade clef, or point it at another database"
+                    )
                 command.upgrade(self._alembic_config(conn), "heads")
         except DatabaseError:
             raise
+        except CommandError as exc:
+            raise DatabaseError(f"database upgrade failed on {self.display_url}: {exc}") from exc
         except SADatabaseError as exc:
             raise DatabaseError(f"database upgrade failed on {self.display_url}: {exc.orig}") from exc
         self._version = None

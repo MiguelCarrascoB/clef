@@ -684,6 +684,29 @@ def test_db_current_and_upgrade(cfg, monkeypatch, capsys, db_backend):
     )
 
 
+def test_a_newer_schema_is_one_clear_error(cfg, monkeypatch, capsys, caplog, db_backend):
+    monkeypatch.setenv("CLEF_STATE_DIR", cfg.state_dir)
+    database = open_database(cfg)
+    with database.tx() as conn:
+        conn.execute(text("UPDATE alembic_version SET version_num = '0099'"))
+    database.close()
+    with pytest.raises(DatabaseError, match=r"database schema 0099 is newer than this clef \(expects 0002\)"):
+        open_database(cfg)
+    capsys.readouterr()
+    assert run_cli("db", "upgrade") == 1
+    err = capsys.readouterr().err
+    assert err.startswith("clef db: database schema 0099 is newer") and len(err.strip().splitlines()) == 1
+    from clef_server import main as main_mod
+
+    with caplog.at_level("ERROR", logger="clef"), pytest.raises(SystemExit) as stop:
+        main_mod.run(cfg)
+    assert stop.value.code == 3
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
+        "cannot start: database schema 0099 is newer than this clef (expects 0002): upgrade clef, or point it"
+        " at another database"
+    ]
+
+
 def test_db_upgrade_renames_a_legacy_jobs_db(cfg, monkeypatch, capsys, sqlite_only):
     monkeypatch.setenv("CLEF_STATE_DIR", cfg.state_dir)
     Path(cfg.state_dir).mkdir(parents=True)

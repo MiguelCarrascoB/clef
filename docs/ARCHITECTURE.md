@@ -768,7 +768,10 @@ Alembic layout (`src/clef_server/migrations/`, shipped in the wheel; no `alembic
 
 `schema_version` (= `Database.schema_version()`) is shown in `/health` (`"db": {"dialect", "schema_version", "url":
 display_url}`), in `clef doctor` (a `database` check: connect and report the version; FAIL when the DB is behind or
-ahead of the code) and by `clef db current`. No separate table.
+ahead of the code) and by `clef db current`. No separate table. A database at a revision this code does not know
+(made by a newer clef) is not touched: `upgrade()` raises `DatabaseError("database schema <rev> is newer than this
+clef (expects <head>): upgrade clef, or point it at another database")` (serve logs it on one line and exits 3,
+`clef db upgrade` prints it and exits 1); any other Alembic `CommandError` becomes a `DatabaseError` too.
 
 Tables (new or changed by `0002`):
 
