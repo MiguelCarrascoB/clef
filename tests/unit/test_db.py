@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -469,27 +468,6 @@ class ModelEngine(FakeEngine):
         raise UnknownModelError(f"model {requested!r} is not served here (this server serves 'clef-flash')")
 
 
-@dataclass
-class StubPrincipal:  # what D1 puts on request.state.principal
-    admin: bool
-
-    def has(self, scope: str) -> bool:
-        return self.admin
-
-
-def app_with_principals(**cfg_kw):
-    client, eng, app = make_api(**cfg_kw)
-
-    @app.middleware("http")
-    async def principal(request, call_next):  # X-Admin: 1 / 0 -> a D1-style principal
-        flag = request.headers.get("X-Admin")
-        if flag is not None:
-            request.state.principal = StubPrincipal(admin=flag == "1")
-        return await call_next(request)
-
-    return client, eng, app
-
-
 CLS = {"kind": "classify", "labels": ["billing", "technical"]}
 
 
@@ -521,32 +499,36 @@ def test_classifier_versions_over_http():
 
 
 def test_classifier_owner_is_enforced_for_non_admin_principals():
-    client, _, _ = app_with_principals(api_keys_raw="alice:ka,bob:kb")
-    a, b = {"X-API-Key": "ka"}, {"X-API-Key": "kb"}
-    bob_user, bob_admin = {**b, "X-Admin": "0"}, {**b, "X-Admin": "1"}
+    from test_keys import add_key
+
+    client, _, app = make_api(api_keys_raw="root:kr")  # an env key is admin
+    a = {"X-API-Key": add_key(app, "alice", "classify,classifiers")}
+    b = {"X-API-Key": add_key(app, "bob", "classify,classifiers")}
+    root = {"X-API-Key": "kr"}
     changed = {**CLS, "labels": ["x", "y"]}
     with client:
         assert client.put("/v1/classifiers/tri", json=CLS, headers=a).json()["owner"] == "alice"
-        r = client.put("/v1/classifiers/tri", json=changed, headers=bob_user)
-        assert r.status_code == 403 and "alice" in r.json()["detail"]
-        assert client.delete("/v1/classifiers/tri", headers=bob_user).status_code == 403
-        assert client.post("/v1/classifiers/tri", json={"input": "x"}, headers=bob_user).status_code == 200
-        mine = client.put("/v1/classifiers/tri", json=changed, headers={**a, "X-Admin": "0"})
-        assert mine.json()["version"] == 2
-        r = client.put("/v1/classifiers/tri", json=CLS, headers=bob_admin)  # an admin may
+        r = client.put("/v1/classifiers/tri", json=changed, headers=b)
+        assert r.status_code == 403 and "alice" not in r.json()["detail"]  # only admins may learn the owner
+        assert client.delete("/v1/classifiers/tri", headers=b).status_code == 403
+        assert client.post("/v1/classifiers/tri", json={"input": "x"}, headers=b).status_code == 200
+        assert client.put("/v1/classifiers/tri", json=changed, headers=a).json()["version"] == 2
+        r = client.put("/v1/classifiers/tri", json=CLS, headers=root)  # an admin may
         assert r.status_code == 200 and r.json()["owner"] == "alice" and r.json()["version"] == 3
-        # before D1 every key is an env key = admin: owners are recorded, nothing is refused
-        assert client.put("/v1/classifiers/tri", json=changed, headers=b).status_code == 200
-        assert client.delete("/v1/classifiers/tri", headers=bob_admin).status_code == 200
+        assert client.delete("/v1/classifiers/tri", headers=root).status_code == 200
 
 
-def test_unowned_classifiers_can_be_changed_by_anyone():
-    client, _, app = app_with_principals(api_keys_raw="alice:ka")
+def test_unowned_classifiers_are_admin_only_to_change_once_auth_is_on():
+    from test_keys import add_key
+
+    client, _, app = make_api()
+    headers = {"X-API-Key": add_key(app, "alice", "classify,classifiers")}
     with client:
         app.state.ctx.store.put("open", CLS)  # e.g. imported from a v3.1 JSON file: owner NULL
-        headers = {"X-API-Key": "ka", "X-Admin": "0"}
-        r = client.put("/v1/classifiers/open", json={**CLS, "labels": ["x", "y"]}, headers=headers)
-        assert r.status_code == 200 and r.json()["owner"] is None
+        changed = {**CLS, "labels": ["x", "y"]}
+        assert client.put("/v1/classifiers/open", json=changed, headers=headers).status_code == 403
+        assert client.delete("/v1/classifiers/open", headers=headers).status_code == 403
+        assert client.post("/v1/classifiers/open", json={"input": "x"}, headers=headers).status_code == 200
 
 
 def test_classifier_audit_rows_carry_actor_ip_and_request_id():
@@ -583,6 +565,7 @@ def test_database_errors_are_503(monkeypatch):
     with client:
         monkeypatch.setattr(app.state.ctx.store, "list", down)
         monkeypatch.setattr(app.state.ctx.store, "put", down)
+        monkeypatch.setattr(app.state.ctx.store, "owner_of", down)
         monkeypatch.setattr(app.state.ctx.extra["jobs"].store, "list", down)
         for r in (
             client.get("/v1/classifiers"),

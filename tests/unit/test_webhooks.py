@@ -646,9 +646,12 @@ def test_delivery_id_is_minted_with_the_pending_record_and_survives_to_the_recei
 
 
 def test_failed_delivery_is_visible_and_can_be_redelivered():
-    client, _, app = make(**hook_cfg(), api_keys_raw="alice:ka,bob:kb")
+    from test_keys import add_key
+
+    client, _, app = make(**hook_cfg())
+    hdr = {"X-API-Key": add_key(app, "alice")}
+    other_key = add_key(app, "bob")
     rec = Recorder(404)
-    hdr = {"X-API-Key": "ka"}
     with client:
         with_receiver(app, rec)
         jid = submit(client, headers=hdr, webhook={"url": "https://hooks.example.com/clef"}).json()["id"]
@@ -659,7 +662,8 @@ def test_failed_delivery_is_visible_and_can_be_redelivered():
         assert job["webhook"]["failed_deliveries"] == 1
         assert any("failed for job.succeeded" in w and "redeliver" in w for w in job["warnings"])
         assert (
-            client.post(f"/v1/jobs/{jid}/webhook/redeliver", headers={"X-API-Key": "kb"}).status_code == 404
+            client.post(f"/v1/jobs/{jid}/webhook/redeliver", headers={"X-API-Key": other_key}).status_code
+            == 404
         )
         rec.statuses = [200]  # the receiver is fixed
         r = client.post(f"/v1/jobs/{jid}/webhook/redeliver", headers=hdr)

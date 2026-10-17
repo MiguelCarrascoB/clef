@@ -35,6 +35,29 @@
   `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` keep working. `/health` and `/v1/models` report the served model
   (adapter, revision, capabilities). `Cache-Control: no-cache` on an inference request will bypass the result
   cache (once it lands).
+- **Keys and principals (D1)**: managed API keys (`clef keys create|list|rotate|revoke|update|usage`, the console
+  **Keys** tab, `/v1/admin/keys*`): a principal has scopes (`classify`, `jobs`, `classifiers`, `ops`, `admin`,
+  `urgent`; a missing one is `403`), an optional daily record quota (`429` + `Retry-After`, `X-Quota-Limit` /
+  `X-Quota-Remaining`; cache hits are free, a job is charged at submit and refunded for what it did not run), a
+  per-key rate limit, expiry, revocation and rotation with a 24 h grace. Keys are `clef_live_<id>_<secret>` and only
+  their SHA-256 is stored. `CLEF_API_KEY` / `CLEF_API_KEYS` stay as full-admin break-glass keys; auth turns on with
+  the first of either and never turns off by itself. `/v1/admin/*` always needs an admin key. `GET /v1/whoami`;
+  admins see every job; `GET /v1/admin/audit` lists key, job and classifier changes; classifier owners are now
+  enforced. Env keys can see each other's jobs (they are admins). Moved: the "listening on a non-loopback address
+  without a key" warning is logged at server start (it needs the database to know about managed keys).
+
+### Upgrade notes
+- **Several env keys are all admin.** Before D1, `CLEF_API_KEYS=alice:..,bob:..` meant per-key job and classifier
+  ownership. Now every env key is a full admin (decision D10, deliberate): each env key can see, cancel and delete
+  every job and read its results, edit and delete every saved classifier, mint and revoke managed keys and read the
+  audit log. Nothing breaks on upgrade, but the isolation between those keys is gone. The server logs a WARNING at
+  startup when it sees more than one env key. For separate tenants, create one managed key per tenant
+  (`clef keys create NAME --scope classify,jobs`) and keep a single env key as the operator's break-glass key.
+- **Names must not clash.** A managed key named like an env key (for example `ci` in `CLEF_API_KEYS=ci:..`) is
+  refused with `401` and a startup warning; run `clef keys revoke ci` or rename the env key.
+- **Owner-less data.** Jobs and classifiers created while auth was off (owner NULL) become admin-only to modify or
+  delete once auth is on; reading the results of an owner-less job is admin-only too. Non-admin keys can still run
+  owner-less classifiers.
 
 ### Changed
 - **`model` in requests**: optional everywhere (omit it, or send null, for the served model); responses report the

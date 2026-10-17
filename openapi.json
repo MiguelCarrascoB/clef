@@ -1,6 +1,101 @@
 {
   "components": {
     "schemas": {
+      "AuditEntry": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "actor": {
+            "title": "Actor",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ip"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "ts",
+          "actor",
+          "action",
+          "target",
+          "detail",
+          "ip",
+          "request_id"
+        ],
+        "title": "AuditEntry",
+        "type": "object"
+      },
+      "AuditPage": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/AuditEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "next_before": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before"
+          }
+        },
+        "required": [
+          "entries",
+          "next_before"
+        ],
+        "title": "AuditPage",
+        "type": "object"
+      },
       "BatchRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1566,6 +1661,207 @@
         "title": "JobResultsPage",
         "type": "object"
       },
+      "KeyCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "daily_quota": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "records per UTC day; omit for unlimited",
+            "title": "Daily Quota"
+          },
+          "expires_in_days": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 3650.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires In Days"
+          },
+          "name": {
+            "description": "letters, digits, _ . -, max 64; never reused once created",
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "rate_limit": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "requests/min; omit for CLEF_RATE_LIMIT",
+            "title": "Rate Limit"
+          },
+          "scopes": {
+            "description": "classify, jobs, classifiers, ops, admin, urgent",
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "scopes"
+        ],
+        "title": "KeyCreate",
+        "type": "object"
+      },
+      "KeyInfo": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "number"
+          },
+          "display": {
+            "description": "clef_live_<id>_…",
+            "title": "Display",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "approximate (flushed every 10 s)",
+            "title": "Last Used At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "status": {
+            "description": "active | expiring | expired | revoked",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "display",
+          "created_at",
+          "expires_at",
+          "revoked_at",
+          "last_used_at",
+          "status"
+        ],
+        "title": "KeyInfo",
+        "type": "object"
+      },
+      "KeyUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "daily_quota": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "explicit null clears the quota",
+            "title": "Daily Quota"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "rate_limit": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "explicit null clears the rate limit",
+            "title": "Rate Limit"
+          },
+          "scopes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scopes"
+          }
+        },
+        "title": "KeyUpdate",
+        "type": "object"
+      },
       "MetricsRequest": {
         "additionalProperties": false,
         "description": "Metrics from already-collected scores. No inference.",
@@ -1746,6 +2042,252 @@
         "title": "MetricsRow",
         "type": "object"
       },
+      "PrincipalInfo": {
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "daily_quota": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Quota"
+          },
+          "disabled_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disabled At"
+          },
+          "keys": {
+            "items": {
+              "$ref": "#/components/schemas/KeyInfo"
+            },
+            "title": "Keys",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "rate_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Limit"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "source": {
+            "description": "db | env",
+            "title": "Source",
+            "type": "string"
+          },
+          "used_today": {
+            "title": "Used Today",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "source",
+          "scopes",
+          "daily_quota",
+          "rate_limit",
+          "note",
+          "created_at",
+          "created_by",
+          "disabled_at",
+          "used_today",
+          "keys"
+        ],
+        "title": "PrincipalInfo",
+        "type": "object"
+      },
+      "PrincipalList": {
+        "properties": {
+          "principals": {
+            "items": {
+              "$ref": "#/components/schemas/PrincipalInfo"
+            },
+            "title": "Principals",
+            "type": "array"
+          }
+        },
+        "required": [
+          "principals"
+        ],
+        "title": "PrincipalList",
+        "type": "object"
+      },
+      "PrincipalWithKey": {
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "daily_quota": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Quota"
+          },
+          "disabled_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disabled At"
+          },
+          "key": {
+            "description": "the new secret: shown once, never stored (only its sha256 is)",
+            "title": "Key",
+            "type": "string"
+          },
+          "keys": {
+            "items": {
+              "$ref": "#/components/schemas/KeyInfo"
+            },
+            "title": "Keys",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "rate_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate Limit"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "source": {
+            "description": "db | env",
+            "title": "Source",
+            "type": "string"
+          },
+          "used_today": {
+            "title": "Used Today",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "source",
+          "scopes",
+          "daily_quota",
+          "rate_limit",
+          "note",
+          "created_at",
+          "created_by",
+          "disabled_at",
+          "used_today",
+          "keys",
+          "key"
+        ],
+        "title": "PrincipalWithKey",
+        "type": "object"
+      },
       "Question": {
         "description": "One decision question. `criteria` shape depends on `type`.",
         "properties": {
@@ -1780,6 +2322,54 @@
           "type"
         ],
         "title": "Question",
+        "type": "object"
+      },
+      "RevokeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "one key; omit to disable the principal and revoke all its keys",
+            "title": "Key Id"
+          }
+        },
+        "title": "RevokeRequest",
+        "type": "object"
+      },
+      "RotateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_in_days": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 3650.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "expiry of the new key",
+            "title": "Expires In Days"
+          },
+          "grace_s": {
+            "default": 86400,
+            "description": "how long the old keys keep working",
+            "maximum": 31536000.0,
+            "minimum": 0.0,
+            "title": "Grace S",
+            "type": "number"
+          }
+        },
+        "title": "RotateRequest",
         "type": "object"
       },
       "ScoreRequest": {
@@ -2122,6 +2712,55 @@
         "title": "Usage",
         "type": "object"
       },
+      "UsageDay": {
+        "properties": {
+          "day": {
+            "title": "Day",
+            "type": "string"
+          },
+          "records": {
+            "title": "Records",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "day",
+          "records",
+          "requests",
+          "rejected"
+        ],
+        "title": "UsageDay",
+        "type": "object"
+      },
+      "UsageInfo": {
+        "properties": {
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/UsageDay"
+            },
+            "title": "Days",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "days"
+        ],
+        "title": "UsageInfo",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -2210,6 +2849,106 @@
           "url"
         ],
         "title": "WebhookSpec",
+        "type": "object"
+      },
+      "WhoAmI": {
+        "properties": {
+          "auth": {
+            "title": "Auth",
+            "type": "boolean"
+          },
+          "daily_quota": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Quota"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "scopes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scopes"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "used_today": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used Today"
+          }
+        },
+        "required": [
+          "auth",
+          "name",
+          "source",
+          "scopes",
+          "daily_quota",
+          "used_today",
+          "key_id",
+          "expires_at"
+        ],
+        "title": "WhoAmI",
         "type": "object"
       }
     }
@@ -2334,25 +3073,65 @@
         "summary": "Copy-paste ready request bodies"
       }
     },
-    "/v1/batch": {
-      "post": {
-        "operationId": "batch_v1_batch_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BatchRequest"
-              }
+    "/v1/admin/audit": {
+      "get": {
+        "operationId": "audit_log_v1_admin_audit_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
             }
           },
-          "required": true
-        },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "description": "prefix, e.g. key.",
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "prefix, e.g. key.",
+              "title": "Action"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BatchResponse"
+                  "$ref": "#/components/schemas/AuditPage"
                 }
               }
             },
@@ -2377,6 +3156,16 @@
               }
             },
             "description": "Missing/invalid API key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
           },
           "404": {
             "content": {
@@ -2426,7 +3215,1004 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Model not ready or GPU out of memory"
+          }
+        },
+        "summary": "Audit log of admin actions (newest first)",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/keys": {
+      "get": {
+        "operationId": "list_keys_v1_admin_keys_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_disabled",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Disabled",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrincipalList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing/invalid API key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unknown classifier, or a model this server does not serve"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many saved classifiers"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Model not ready or GPU out of memory"
+          }
+        },
+        "summary": "Principals and their keys (env principals read-only)",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "operationId": "create_key_v1_admin_keys_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeyCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrincipalWithKey"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing/invalid API key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unknown classifier, or a model this server does not serve"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many saved classifiers"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Model not ready or GPU out of memory"
+          }
+        },
+        "summary": "Create a principal and its first key (the secret is shown once)",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/keys/{name}": {
+      "patch": {
+        "operationId": "update_key_v1_admin_keys__name__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeyUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrincipalInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing/invalid API key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unknown classifier, or a model this server does not serve"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many saved classifiers"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Model not ready or GPU out of memory"
+          }
+        },
+        "summary": "Change scopes, quota, rate limit or note (explicit null clears quota / rate limit)",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/keys/{name}/revoke": {
+      "post": {
+        "operationId": "revoke_key_v1_admin_keys__name__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RevokeRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrincipalInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing/invalid API key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unknown classifier, or a model this server does not serve"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many saved classifiers"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Model not ready or GPU out of memory"
+          }
+        },
+        "summary": "Revoke one key, or disable the principal (names are never reused)",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/keys/{name}/rotate": {
+      "post": {
+        "operationId": "rotate_key_v1_admin_keys__name__rotate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RotateRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrincipalWithKey"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing/invalid API key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unknown classifier, or a model this server does not serve"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many saved classifiers"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Model not ready or GPU out of memory"
+          }
+        },
+        "summary": "Add a new key; the others keep working for grace_s (default 24 h)",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/keys/{name}/usage": {
+      "get": {
+        "operationId": "usage_v1_admin_keys__name__usage_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 366,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing/invalid API key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unknown classifier, or a model this server does not serve"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many saved classifiers"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Model not ready or GPU out of memory"
+          }
+        },
+        "summary": "Daily records / requests / quota rejections, oldest first",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/batch": {
+      "post": {
+        "operationId": "batch_v1_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing/invalid API key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unknown classifier, or a model this server does not serve"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many saved classifiers"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -2486,6 +4272,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -2524,7 +4320,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -2584,6 +4380,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -2622,7 +4428,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -2751,7 +4557,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -2839,6 +4645,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -2887,7 +4703,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -2974,6 +4790,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -3022,7 +4848,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -3159,7 +4985,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -3240,6 +5066,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -3288,7 +5124,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -3359,6 +5195,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -3407,7 +5253,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -3487,6 +5333,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -3535,7 +5391,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -3605,6 +5461,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -3653,7 +5519,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -3723,6 +5589,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -3771,7 +5647,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -3841,6 +5717,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -3889,7 +5775,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -3962,6 +5848,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4010,7 +5906,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -4085,6 +5981,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4133,7 +6039,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -4258,6 +6164,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4306,7 +6222,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -4397,6 +6313,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4445,7 +6371,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -4519,6 +6445,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4567,7 +6503,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -4639,6 +6575,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4687,7 +6633,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -4761,6 +6707,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4809,7 +6765,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -4928,6 +6884,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -4976,7 +6942,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -5074,6 +7040,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5122,7 +7098,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -5218,6 +7194,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5266,7 +7252,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -5328,6 +7314,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5366,7 +7362,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -5437,6 +7433,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5485,7 +7491,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -5555,6 +7561,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5603,7 +7619,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -5679,6 +7695,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5727,7 +7753,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -5820,6 +7846,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5868,7 +7904,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -5938,6 +7974,16 @@
             },
             "description": "Missing/invalid API key"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
           "404": {
             "content": {
               "application/json": {
@@ -5986,7 +8032,7 @@
                 }
               }
             },
-            "description": "Rate limit exceeded (see Retry-After)"
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
           },
           "500": {
             "content": {
@@ -6010,6 +8056,117 @@
           }
         },
         "summary": "Decide one request"
+      }
+    },
+    "/v1/whoami": {
+      "get": {
+        "operationId": "whoami_v1_whoami_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmI"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Missing/invalid API key"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The key lacks the route's scope, or the classifier belongs to another key"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Unknown classifier, or a model this server does not serve"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Too many saved classifiers"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Request too large"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limit or daily quota exceeded (see Retry-After)"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Internal error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Model not ready or GPU out of memory"
+          }
+        },
+        "summary": "The calling key's principal, scopes and quota",
+        "tags": [
+          "admin"
+        ]
       }
     }
   }

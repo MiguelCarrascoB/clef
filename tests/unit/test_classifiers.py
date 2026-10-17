@@ -196,16 +196,16 @@ def test_concurrent_first_puts_of_a_new_name_get_distinct_versions(db):
 
 
 def test_put_runs_the_owner_check_inside_its_transaction(store):
-    seen: list[str | None] = []
+    seen: list[tuple[bool, str | None]] = []
 
-    def allow(owner: str | None) -> None:
-        seen.append(owner)
+    def allow(exists: bool, owner: str | None) -> None:
+        seen.append((exists, owner))
 
     store.put("t", DEF, owner="alice", check_owner=allow)
     store.put("t", {**DEF, "labels": ["c", "d"]}, owner="bob", check_owner=allow)
-    assert seen == [None, "alice"]
+    assert seen == [(False, None), (True, "alice")]
 
-    def deny(owner: str | None) -> None:
+    def deny(exists: bool, owner: str | None) -> None:
         raise PermissionError(owner)
 
     with pytest.raises(PermissionError):

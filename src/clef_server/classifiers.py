@@ -155,6 +155,13 @@ class ClassifierStore:
         with self.db.read() as conn:
             return conn.execute(select(_C.c.owner).where(_C.c.name == name)).scalar()
 
+    def owner_of(self, name: str) -> tuple[bool, str | None]:
+        """``(exists, owner)``: owner-less (auth-off) is ``(True, None)``, a new name is ``(False, None)``."""
+        validate_name(name)
+        with self.db.read() as conn:
+            row = conn.execute(select(_C.c.owner).where(_C.c.name == name)).first()
+        return (False, None) if row is None else (True, row[0])
+
     # ---- writes
     def put(
         self,
@@ -164,7 +171,7 @@ class ClassifierStore:
         created_by: str | None = None,
         model: str | None = None,
         *,
-        check_owner: Callable[[str | None], None] | None = None,
+        check_owner: Callable[[bool, str | None], None] | None = None,
         actor: str | None = None,
         ip: str | None = None,
         request_id: str | None = None,
@@ -172,8 +179,8 @@ class ClassifierStore:
         """Append version n+1 (the first PUT creates the name, owned by ``owner``). A definition equal to the
         latest is a no-op that returns the latest. Writes ``classifier.put`` to the audit log.
 
-        ``check_owner(current_owner)`` runs inside the transaction (None for a new name) and raises to refuse,
-        so the ownership check and the append are atomic."""
+        ``check_owner(exists, current_owner)`` runs inside the transaction (exists is False for a new name)
+        and raises to refuse, so the ownership check and the append are atomic."""
         validate_name(name)
         body = _definition(definition)
         with self.db.tx() as conn:
@@ -182,7 +189,7 @@ class ClassifierStore:
             self.db.serialize(conn, f"classifier:{name}")
             head = conn.execute(select(_C).where(_C.c.name == name).with_for_update()).first()
             if check_owner is not None:
-                check_owner(None if head is None else head.owner)
+                check_owner(head is not None, None if head is None else head.owner)
             now = time.time()
             if head is None:
                 self.db.serialize(conn, "classifiers.count")

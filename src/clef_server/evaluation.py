@@ -526,7 +526,7 @@ def _attach_inputs(preds: list[dict[str, Any]], rows: list[EvalRow], offset: int
 
 def router(ctx: AppContext) -> APIRouter:
     cfg = ctx.cfg
-    r = APIRouter(prefix="/v1", tags=["evaluation"], dependencies=ctx.auth, responses=ctx.errors)
+    r = APIRouter(prefix="/v1", tags=["evaluation"], dependencies=ctx.scope("classify"), responses=ctx.errors)
 
     def resolve_sync(body: EvaluateRequest) -> Spec:
         """Request -> Spec: load the saved classifier, enforce label/row/gold validity.

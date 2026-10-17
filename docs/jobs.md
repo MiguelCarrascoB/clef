@@ -299,7 +299,7 @@ tokens) are the same as for the synchronous endpoints.
 **Ownership.** With auth off, every caller sees every job. With `CLEF_API_KEY` / `CLEF_API_KEYS` on, a job is
 owned by the key name that submitted it (`default` for `CLEF_API_KEY`); other keys get `404` for it (not `403`)
 and do not see it in `GET /v1/jobs`. There is no admin view: read the database (see [Storage](#storage)) if you
-need one. Jobs submitted while auth was off stay visible to all keys after you turn it on. Webhook URLs and
+need one. Jobs submitted while auth was off (no owner) become admin-only once you turn auth on: other keys get `404` for them. Webhook URLs and
 metadata are visible to the owner.
 
 **Persistence and restart.** Jobs, their submitted payloads (your inputs) and result rows live in the database

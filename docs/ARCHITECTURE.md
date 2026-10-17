@@ -339,7 +339,7 @@ appears in `openapi.json`.
 
 ### Auth, rate limit, CORS (`security.py`)
 
-- Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration). When any key exists every `/v1/*` route, and the
+- Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration; every env key is a full admin, and startup warns when there is more than one). When any key exists every `/v1/*` route, and the
   Hugging Face routes (`/hf/models/*`, `/models/*`), need `X-API-Key: <key>` or `Authorization: Bearer <key>` (401 +
   `WWW-Authenticate: Bearer` otherwise; the OpenAI and HF routes render that in their own error shape). For SSE
   `/v1/events?key=<key>` is also accepted for plain `EventSource` clients, which cannot set headers (the console
@@ -520,7 +520,7 @@ Guide: [jobs.md](jobs.md).
   becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
   `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
 - Ownership: with auth on, a job belongs to the key name that submitted it and other keys get 404 (also in the
-  list); jobs created while auth was off stay visible to every key.
+  list); jobs created while auth was off (owner NULL) are visible to admins only once auth is on.
 - Webhooks: events `job.succeeded`, `job.failed`, `job.cancelled` (default) and opt-in `job.progress` (at most one
   per 10 s, one attempt). Headers `X-Clef-Event`, `X-Clef-Delivery`, and with a secret `X-Clef-Timestamp` and
   `X-Clef-Signature: sha256=` HMAC-SHA256 of `"<timestamp>.<raw body>"`. 2xx = delivered; 408 / 425 / 429 / 5xx and
@@ -859,7 +859,8 @@ becomes version 1 with `owner` NULL and `created_by` `import`; the directory is 
 Routes (changes; every existing body stays valid):
 - `PUT /v1/classifiers/{name}` -> 200 the definition with `version`, `owner`, `model`. Owner = the caller's
   principal on the first PUT (NULL with auth off). A later PUT or DELETE by another principal is 403 unless the
-  caller has `admin`; anyone may change a classifier whose owner is NULL. The admin test is one helper: the
+  caller has `admin`; a classifier whose owner is NULL (created while auth was off, or imported) is admin-only to
+  change or delete once auth is on (running it stays open to `classify`). The 403 text does not name the owner. The admin test is one helper: the
   request's `principal.has("admin")` when `request.state.principal` is set (D1), else any caller with a key is
   admin (until D1 lands every key is an env key, and env principals have every scope), so before D1 the owner is
   recorded but no PUT / DELETE is refused.
@@ -1146,7 +1147,7 @@ Superseded (applied): "ONE uvicorn worker per process (one model)" (now "one mod
 lists `clef-flash`" and "`model` defaults to `"clef-flash"`" in the Classification and Compat sections. The
 `load_release_model` wording in Engine interface stays: the engine still calls the release's `load_release_model`.
 
-## Keys and principals (planned, v3.2)
+## Keys and principals
 
 Model: a **principal** is a name with scopes, a daily quota and a status; it owns jobs, classifiers, routers, files
 and batches (all keyed by name, as `jobs.owner` is today). A principal has 1 to 5 active **keys** (overlapping
@@ -1196,8 +1197,10 @@ CREATE TABLE api_usage (
     PRIMARY KEY (principal, day)
 );
 ```
-Every write to `api_principals` / `api_keys` bumps `clef_meta.keys_gen` in the same transaction. Key actions are
-written to `audit_log` (Storage) in the same transaction.
+Every write to `api_principals` / `api_keys` bumps `clef_meta.keys_gen` in the same transaction, except the
+`last_used_at` flush (it would reload every cache every 10 s under traffic). Key actions are
+written to `audit_log` (Storage) in the same transaction. CORS (`security.install_cors`) gains `PATCH` in
+`allow_methods` and `X-Quota-Limit`, `X-Quota-Remaining` in `expose_headers`.
 
 Scopes: `classify`, `jobs`, `classifiers`, `ops`, `admin`, `urgent`. `admin` implies all the others.
 
@@ -1253,8 +1256,10 @@ class QuotaExceeded(Exception):
 
 class Quotas:                            # keystore.py; in-memory and authoritative (one server per DB)
     def reserve(self, principal: Principal | None, n: int) -> Reservation | None
-        # None for env principals / auth off / no quota. Raises QuotaExceeded when used_today + n > daily_quota.
-        # Records the reservation on today's UTC row at once.
+        # None for env principals / auth off. A DB principal without a quota still gets a Reservation: usage is
+        # counted (Keys tab, used_today) but never refused. Raises QuotaExceeded when daily_quota is set and
+        # used_today + n > daily_quota. Records the reservation on today's UTC row at once.
+    def remaining(self, principal: Principal | None) -> tuple[int, int] | None   # (limit, left); None = no quota
     def refund(self, reservation: Reservation, n: int) -> None   # n <= reservation.n; same day row
     def used(self, name: str, day: str | None = None) -> int
     def reject(self, name: str) -> None                          # api_usage.rejected += 1
@@ -1269,8 +1274,11 @@ class Reservation:
 Request path: `require_key` sets `request.state.principal` (or `None` with auth off) and keeps
 `request.state.key_name = principal.name` (log, `by_key`, job owner, rate-limit identity unchanged). The rate
 limiter uses `principal.rate_limit or CLEF_RATE_LIMIT`. `ctx.infer` calls `ctx.quotas.reserve(principal, len(reqs))`
-before inference and refunds the whole reservation when the request ends in a 5xx. Cache hits do NOT count: the
-reservation is settled after the cache lookup and only computed records are charged (hits cost no GPU time). Every quota'd response carries `X-Quota-Limit` and `X-Quota-Remaining`. Over quota:
+before inference and refunds the whole reservation when the request ends in an error (nothing was computed for a
+4xx raised before the engine either; a partly computed failure is rare enough to ignore). Cache hits do NOT count:
+the reservation is settled after the cache lookup (`ctx.prepare`) and only computed records are charged (hits
+cost no GPU time). Every response of a quota'd principal to a route that reserves carries `X-Quota-Limit` and
+`X-Quota-Remaining` (also on the 429; CORS exposes them). Over quota:
 429 `daily quota exceeded (N records/day)` + `Retry-After` (OpenAI shape `insufficient_quota`). Jobs reserve at
 submit (Job scheduler).
 
@@ -1294,8 +1302,13 @@ principal even when auth is off: 401 `admin routes need a key: set CLEF_API_KEY 
 
 Errors: 400 bad name (`KEY_NAME_RE`) or unknown scope; 404 unknown principal or key id; 409 name exists, is a
 tombstone (disabled names are never reused, D19), or equals an env key name; 409 a 6th active key; 403 changing an
-env principal, or a DB admin removing its own `admin` scope / revoking its own last key without `?force=true`.
-Startup logs a WARNING for an env name that is also a DB principal (the env key wins).
+env principal that has no DB row of the same name, or a DB admin removing its own `admin` scope / revoking its own last key without `?force=true`.
+A DB principal whose name equals an env key name is **refused**: `Authenticator.resolve` answers 401 for its keys
+(otherwise it would inherit the env principal's job / classifier ownership and rate-limit bucket), and startup logs
+a WARNING naming the clash (fix: `clef keys revoke NAME` or rename the env key). The admin API and the CLI still act
+on that DB row (revoke, rotate, update), so it can be cleaned up; a pure env key stays read-only. The server is the
+authority: the CLI reads the env of the shell it runs in, which can differ from the server's, and the server
+decides at request time.
 
 CLI (`clef keys`, direct DB, works with the server stopped; the first DB principal turns auth on and the command
 prints `auth is now required for every /v1 route`; secrets are printed once):
@@ -1319,9 +1332,43 @@ Invariants: no plaintext secret is ever stored or logged; the request path does 
 row is never deleted; env keys always work and are always admin; auth, once on because of a DB principal, never
 turns off by itself.
 
+As built (D1; additions and deviations, nothing above changed in meaning):
+- `Principal`, `ALL_SCOPES` and the key helpers live in `keystore.py`; `security.Authenticator` composes the old
+  `KeyAuth` (kept, now only the constant-time env walk) with the `KeyCache`.
+- `ctx.scope(*names)` returns one dependency that also runs `require_key`; no names = any valid key (`/v1/whoami`).
+  The callable carries `clef_scope = names`: the default-deny test (`tests/unit/test_keys.py`) looks for it on every
+  `/v1/*`, `/hf/*`, `/models/*` route (newer FastAPI keeps included routers lazy, so it walks
+  `effective_route_contexts()`). New routes in other workstreams (E2's routers and review, F1's files and batches)
+  fail that test until they use `ctx.scope`.
+- Wiring: `create_app` builds `KeyCache` and `Quotas` and loads both synchronously (auth is right from the first
+  request, also in tests that never start the lifespan). Their background tasks start from the first `on_startup`
+  hook (so `recover()` in jobs can refund into loaded counters) and stop from the last-running `on_shutdown` hook,
+  which flushes usage and `last_used_at`. A failed reload keeps the last good cache.
+- `Quotas`: `reserve` returns a `Reservation` for every DB principal (usage is counted even without a quota) and
+  counts `requests` / `rejected` itself. The flush is UPDATE-then-INSERT per row in one transaction (portable;
+  a refund below the stored count clamps at 0), not a dialect upsert. `history(name, days)` is zero-filled and
+  merges unflushed deltas; `remaining(principal)` feeds the headers. `flush` holds a dedicated lock for the whole
+  write, so the shutdown flush waits for a periodic one still running and never writes the same delta twice.
+  Quota counters live in one process's memory, so they are exact only because the Postgres advisory lock
+  (`PG_LOCK_KEY`, see Database) refuses a second server on the same database; SQLite is one file in one state
+  dir. Do not bypass the lock (for example by running two servers against one database).
+- `ctx.infer`: reserve `len(reqs)` before any work (429 `insufficient_quota`), `ctx.prepare` (cache lookup),
+  refund `len(prepared.hits)`, then `decide_prepared`. Any exception (4xx before the engine included) refunds what
+  is still held. Headers come from `request.state.quota`, added by `GuardMiddleware` for every route.
+- Jobs: `JobStore.create(..., quota_day, quota_reserved)`; the count per kind is `jobs.job_records` (a kind may
+  give `"records": fn(parsed)`). `JobStore.settle_quota(job_id=None)` refunds `quota_reserved - done` of failed /
+  cancelled jobs once (it then sets `quota_reserved = done`, the net charge). The runner calls it after every
+  failed / cancelled finish and for all jobs at startup. Cache hits inside jobs are not refunded (the whole job is
+  reserved at submit); E1 may refine that. `job.cancel` is audited after the cancel, `job.delete` in the delete's
+  own transaction. Admins see every job (`scoped = auth_enabled and not admin`).
+- `ApiError` has an optional `code` (OpenAI `insufficient_quota`; type `insufficient_quota` too); 403 renders as
+  `permission_denied`.
+- `bind_warning(cfg, auth_enabled)` runs in the lifespan and mentions `clef keys create`.
+- CLI: `clef keys` also has `update` and `usage`; `--expires` takes `90d` or a date (valid through that UTC day).
+
 Supersedes when landed: the Keys bullet of "Auth, rate limit, CORS" (`KeyAuth`, "auth off -> `key` is `null`"), the
-`security.py` row's "multi-key auth", and "jobs created while auth was off stay visible to every key" (still true)
-plus "other keys get 404" (admins now see all).
+`security.py` row's "multi-key auth", and "jobs created while auth was off stay visible to every key" (no longer: owner-less jobs are
+admin-only) plus "other keys get 404" (admins now see all).
 
 ## Result cache
 
@@ -1741,7 +1788,7 @@ existing tests a contract change forces. Every workstream may append to `CHANGEL
 | --- | --- | --- |
 | C1 DB | `db.py`, `dbschema.py`, `migrations/**` | `jobs.py` (store port, `claim_next`, `jobs.model`, payload `model` default + submit check, `classifier_version`), `classifiers.py`, `classify.py` (`version` on `ClassifierRunRequest` / `ClassifierBatchRequest` only), `evaluation.py` (`version` and the server-set `classifier_version` next to `classifier` on `EvaluateRequest`, its `ctx.store.get` lookup, and the `classifier_version` line in `snapshot_job`), `main.py` (create_app: `open_database`, store wiring, `AppContext(...)` db/model fields; classifier routes; `/health` `db`; lifespan close), `appctx.py` (`db`, `model_ref`, `check_model`), `paths.py` (`database_path`, `jobs_db` kept for the legacy copy; the copy and its locking live in `db.py`), `config.py` (`CLEF_DATABASE_*`), `cli.py` (`db`, `backup`, `classifiers export`), `doctor.py` (database check), `pyproject.toml` (sqlalchemy, alembic, `postgres` extra), `docker-compose.yml` (comment), `docs/jobs.md`, `SECURITY.md` |
 | C2 models | `models/__init__.py`, `models/base.py`, `models/registry.py`, `models/clef_release.py` | `engine.py`, `offload.py`, `backend.py` (TunableOp path per model, `fast_path` from capabilities), `paths.py` (`resolve_model_path(spec)`, `WEIGHTS_GB`), `config.py` (`CLEF_MODEL`, aliases), `schemas.py`, `classify.py`, `evaluation.py` (`model`), `compat_openai.py`, `compat_hf.py`, `main.py` (`infer` / `decide` / `prepare` region, `Cache-Control` read, `map_exception` UnknownModel, `/health` `model`, OpenAPI title, `/schema-example`), `appctx.py` (`prepare`, `decide_prepared`), `doctor.py` (model files from the adapter), `cli.py` (`download --model`, `models`), `pyproject.toml` (entry points), `clef_client/*`, `clients/js/*`, `static/screens/{playground,batch}.js`, `static/util.js`, `bench/parity.py` |
-| D1 keys | `keystore.py`, `admin.py`, `static/screens/keys.js` | `security.py`, `main.py` (auth / rate-limit region, `ctx.scope` on core routes, quota in `infer`, `FEATURES` += `admin`, `AppContext(...)` D1 fields, 403 in `ERRORS`), `appctx.py`, `jobs.py` (scopes, admin view, `auth_enabled`, audit calls), `compat_openai.py`, `compat_hf.py`, `compat_errors.py` (403), `evaluation.py` (scopes), `cli.py` (`keys`), `config.py` (none expected), `static/app.js`, `static/api.js`, `static/components/topbar.js`, `docs/remote-access.md`, `SECURITY.md` |
+| D1 keys | `keystore.py`, `admin.py`, `static/screens/keys.js` | `security.py`, `main.py` (auth / rate-limit region, `ctx.scope` on core routes, quota in `infer`, `FEATURES` += `admin`, `AppContext(...)` D1 fields, 403 in `ERRORS`), `appctx.py`, `jobs.py` (scopes, admin view, `auth_enabled`, audit calls, quota reserve at submit and refund when a job ends: `JobStore.create(quota_day, quota_reserved)`, `JobStore.settle_quota`), `compat_openai.py`, `compat_hf.py`, `compat_errors.py` (403), `evaluation.py` (scopes), `cli.py` (`keys`), `config.py` (none expected), `static/app.js`, `static/api.js`, `static/components/topbar.js`, `static/styles.css` (an appended `/* D1 */` block), `docs/remote-access.md`, `SECURITY.md` |
 | D2 perf | `bench/` scripts as needed | `models/clef_release.py` (forward, head), `backend.py` (`prepare_environment`), `config.py` (`CLEF_MASK_FREE`), `docs/performance.md`, `docs/hardware-results.md` |
 | D3 cache | `cache.py` | `engine.py` (`prepare` / `submit` cache calls, `cache_stats`), `stats.py` (`cache` block), `config.py` (`CLEF_CACHE_SIZE`) |
 | E1 scheduler | | `jobs.py`, `evaluation.py` (`job.decide`), `config.py` (`CLEF_JOB_*`), `pyproject.toml` (`tzdata`), `clef_client/*`, `clients/js/*` (job fields), `static/screens/batch.js` (job fields, optional), `docs/jobs.md` |

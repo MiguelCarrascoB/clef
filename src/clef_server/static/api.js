@@ -6,6 +6,7 @@ export function getKey() {
 }
 export function setKey(v) {
   try { v ? localStorage.setItem(KEY, v) : localStorage.removeItem(KEY); } catch { /* ignore */ }
+  window.dispatchEvent(new CustomEvent('clef:key')); // the shell re-reads /v1/whoami (tabs depend on the scopes)
 }
 
 export class ApiError extends Error {
@@ -151,3 +152,13 @@ export const classifyBatch = (body, signal) => request('/v1/classify/batch', { m
 export const classifierBatch = (name, body, signal) => request(`/v1/classifiers/${encodeURIComponent(name)}/batch`, { method: 'POST', body, signal });
 export const evaluateMetrics = (body, signal) => request('/v1/evaluate/metrics', { method: 'POST', body, signal });
 export const NAME_RE =/^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+// ---- keys and principals (D1) ---------------------------------------------------------------------
+export const whoami = () => request('/v1/whoami');
+export const listKeys = (disabled) => request(`/v1/admin/keys${disabled ? '?include_disabled=true' : ''}`);
+export const createKey = (body) => request('/v1/admin/keys', { method: 'POST', body });
+export const updateKey = (name, body, force) => request(`/v1/admin/keys/${encodeURIComponent(name)}${force ? '?force=true' : ''}`, { method: 'PATCH', body });
+export const rotateKey = (name, body) => request(`/v1/admin/keys/${encodeURIComponent(name)}/rotate`, { method: 'POST', body });
+export const revokeKey = (name, keyId, force) => request(`/v1/admin/keys/${encodeURIComponent(name)}/revoke${force ? '?force=true' : ''}`, { method: 'POST', body: keyId ? { key_id: keyId } : {} });
+export const keyUsage = (name, days = 30) => request(`/v1/admin/keys/${encodeURIComponent(name)}/usage?days=${days}`);
+export const audit = (before) => request(`/v1/admin/audit?limit=50${before != null ? `&before=${before}` : ''}`);
