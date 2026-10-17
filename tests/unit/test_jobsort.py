@@ -13,7 +13,17 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from test_jobs import LABELS, SlowEngine, all_rows, make, open_store, submit, wait
+from test_jobs import (
+    LABELS,
+    SlowEngine,
+    all_rows,
+    hold_runner,
+    make,
+    open_store,
+    submit,
+    wait,
+)
+from test_keys import add_key, hdr
 
 from clef_server.config import Config
 from clef_server.engine import Prepared
@@ -224,6 +234,98 @@ def test_cancel_mid_window_keeps_earlier_windows_only():
         assert job["status"] == "cancelled" and job["progress"]["done"] % 16 == 0
         rows = all_rows(client, jid)
     assert [r["index"] for r in rows] == list(range(len(rows)))
+
+
+# ------------------------------------------------------------------ with the job scheduler (E1 seam)
+
+
+class OwnerProbe(TwoStepEngine):
+    """TwoStepEngine that records which owner each background micro-batch serves and how many overlap."""
+
+    def __init__(self, delay: float = 0.01) -> None:
+        super().__init__(delay)
+        self.inflight = self.max_inflight = 0
+        self.seq: list[str] = []
+
+    async def submit(self, prepared, priority="interactive"):
+        if priority != "background":
+            return await super().submit(prepared, priority)
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        text = json.dumps(prepared.records[0]["state"])
+        self.seq.append("a" if "ownerA" in text else "b" if "ownerB" in text else "?")
+        try:
+            return await super().submit(prepared, priority)
+        finally:
+            self.inflight -= 1
+
+
+def test_two_principals_still_interleave_with_a_sort_window_and_one_chunk_is_in_flight(monkeypatch):
+    eng = OwnerProbe()
+    client, _, app = make(eng, api_key="root", max_microbatch=4, job_sort_window=8)
+    ha, hb = hdr(add_key(app, "alice", "jobs")), hdr(add_key(app, "bob", "jobs"))
+    hold = hold_runner(monkeypatch, app.state.ctx.extra["jobs"].store)
+    with client:
+        ids = {}
+        for name, h in (("A", ha), ("B", hb)):
+            body = {"inputs": [f"owner{name}-{i}" for i in range(24)], "labels": LABELS}
+            ids[name] = submit(client, payload=body, headers=h).json()["id"]
+        hold.clear()
+        client.portal.call(app.state.ctx.extra["jobs"].poke)
+        for name, h in (("A", ha), ("B", hb)):
+            assert wait(client, ids[name], headers=h)["status"] == "succeeded"
+    assert eng.max_inflight == 1  # the turn gate wraps the sorter's hand-off: one chunk across all jobs
+    assert sorted(eng.seq) == ["a"] * 6 + ["b"] * 6
+    first = "".join(eng.seq[:10])
+    assert "aaa" not in first and "bbb" not in first, eng.seq
+
+
+class HitsEngine(TwoStepEngine):
+    """The first record of every window is a result-cache hit (no forward)."""
+
+    async def prepare(self, records, cache=True):
+        prepared = await super().prepare(records, cache)
+        first = records[0]
+        hit = {
+            "model": first["model"],
+            "answers": {q: self.answer(q, spec) for q, spec in first["questions"].items()},
+            "usage": {"input_tokens": 1},
+            "timing": {},
+        }
+        prepared.hits[0] = hit
+        return prepared
+
+
+def test_cache_hits_in_a_sorted_window_are_not_charged():
+    eng = HitsEngine()
+    client, _, app = make(eng, api_key="root", max_microbatch=4, job_sort_window=8)
+    h = hdr(add_key(app, "ci", "jobs", daily_quota=100))
+    with client:
+        body = {"inputs": inputs(16), "labels": LABELS}  # two windows of 8, one hit each
+        jid = submit(client, payload=body, headers=h).json()["id"]
+        assert app.state.ctx.quotas.used("ci") == 16
+        assert wait(client, jid, headers=h)["status"] == "succeeded"
+        for _ in range(100):
+            if app.state.ctx.quotas.used("ci") == 14:
+                break
+            time.sleep(0.02)
+        assert app.state.ctx.quotas.used("ci") == 14
+        assert app.state.ctx.extra["jobs"].store.get(jid)["quota_reserved"] == 14
+    assert sum(len(b) for b in eng.batches) == 14  # the hits never reached the engine
+
+
+def test_an_expired_job_stops_cleanly_in_the_sorted_path():
+    eng = TwoStepEngine(delay=0.05)
+    client, _, _ = make(eng, max_microbatch=4, job_sort_window=8)
+    with client:
+        body = {"inputs": inputs(160), "labels": LABELS}
+        jid = submit(client, payload=body, expire_after_s=0.6).json()["id"]
+        job = wait(client, jid)
+        assert job["status"] == "cancelled" and job["expired"] is True and job["error"] == "expired"
+        done = job["progress"]["done"]
+        assert 0 < done < 160 and done % 8 == 0  # whole windows only: nothing out of order
+        rows = all_rows(client, jid)
+    assert [r["index"] for r in rows] == list(range(done))
 
 
 # ------------------------------------------------------------------ interactive priority
