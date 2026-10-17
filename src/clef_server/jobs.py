@@ -293,10 +293,16 @@ class JobStore:
                 ],
             )
             failed = sum(1 for it in items if isinstance(it, dict) and "error" in it)
+            # F1: jobs.tokens = the sum of input_tokens over the stored rows (batch usage; E1 quotas)
+            tokens = sum(int(it.get("input_tokens") or 0) for it in items if isinstance(it, dict))
             conn.execute(
                 update(_JOBS)
                 .where(_JOBS.c.id == job_id)
-                .values(done=_JOBS.c.done + len(items), failed=_JOBS.c.failed + failed)
+                .values(
+                    done=_JOBS.c.done + len(items),
+                    failed=_JOBS.c.failed + failed,
+                    tokens=_JOBS.c.tokens + tokens,
+                )
             )
         return start + len(items)
 
@@ -759,7 +765,9 @@ class JobHandle:
         BREAKER_MIN_ITEMS items failed, or >= BREAKER_SAME_SHARE of >= BREAKER_SAME_MIN failed alike."""
         for it in items:
             self._seen += 1
-            if isinstance(it, dict) and "error" in it:
+            if isinstance(it, dict) and "error" in it and not 400 <= (it.get("status_code") or 0) < 500:
+                # F1: a row that carries a 4xx status_code is the client's mistake (a bad batch line), not a
+                # systemic failure; it still counts as failed in the job, but never trips the breaker.
                 msg = str(it["error"])[:200]
                 self._bad += 1
                 self._errors[msg] += 1
@@ -1010,7 +1018,9 @@ class JobRunner:
         status, error = ("cancelled" if cancelled else "succeeded"), None
         if not cancelled:
             now = await asyncio.to_thread(self.store.get, job_id)
-            if now and now["done"] > 0 and now["failed"] >= now["done"]:  # nothing worked: not a success
+            all_failed = now and now["done"] > 0 and now["failed"] >= now["done"]
+            # F1: a kind with "completed_if_all_failed" (batch) ends succeeded even when every item failed
+            if all_failed and not spec.get("completed_if_all_failed"):  # nothing worked: not a success
                 status = "failed"
                 error = f"all {now['done']} item(s) failed" + (
                     f" ({handle.first_error})" if handle.first_error else ""
