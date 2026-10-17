@@ -24,6 +24,31 @@ export function useHealthPolling() {
   }, []);
 }
 
+/** /v1/whoami into the store (S.whoami); re-read when the key changes or the server says 401. */
+export function useWhoami() {
+  useEffect(() => {
+    let stop = false;
+    const load = async () => {
+      try {
+        const { data } = await api.whoami();
+        if (!stop) set({ whoami: data });
+      } catch {
+        if (!stop) set({ whoami: null });
+      }
+    };
+    load();
+    window.addEventListener('clef:key', load);
+    return () => { stop = true; window.removeEventListener('clef:key', load); };
+  }, []);
+}
+
+const whoamiText = (w) => {
+  if (!w) return '';
+  if (!w.auth) return 'auth is off on this server';
+  const quota = w.daily_quota != null ? ` · ${w.used_today ?? 0}/${w.daily_quota} today` : '';
+  return `${w.name} (${w.source}) · ${w.scopes.includes('admin') ? 'admin' : w.scopes.join(', ')}${quota}`;
+};
+
 export function HealthPill() {
   const { health } = useStore();
   const d = health.data;
@@ -39,7 +64,7 @@ export function HealthPill() {
 const shortGpu = (n = '') => n.replace(/^AMD |^NVIDIA |Radeon |GeForce /g, '');
 
 export function Settings({ open, onOpen, onClose }) {
-  const { theme } = useStore();
+  const { theme, whoami } = useStore();
   const [val, setVal] = useState(api.getKey());
   const ref = useRef(null);
   const close = useCallback(() => onClose(), [onClose]);
@@ -58,6 +83,7 @@ export function Settings({ open, onOpen, onClose }) {
         <input type="password" class="input mono" value=${val} autocomplete="off" placeholder="not set"
           onInput=${(e) => setVal(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && save()} /></label>
       ${S.health.state === 'error' || window.__unauth ? html`<div class="muted small">If the server reports 401, enter the key configured in CLEF_API_KEY.</div>` : null}
+      ${whoami ? html`<div class="muted small mono" data-testid="whoami">${whoamiText(whoami)}</div>` : null}
       <div class="row gap"><button class="btn primary sm" type="button" onClick=${save}>Save</button>
         <button class="btn sm" type="button" onClick=${() => { setVal(''); api.setKey(''); onClose(); }}>Clear</button></div>
       <hr />

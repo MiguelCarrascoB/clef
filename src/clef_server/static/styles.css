@@ -392,4 +392,22 @@ button.lg-item { cursor: pointer; } button.lg-item:hover { color: var(--text); }
 .cov-line { stroke: var(--s2); stroke-dasharray: 6 3; } .cov-dot { fill: var(--s2); }
 .thr-line { stroke: var(--text-2); stroke-dasharray: none; }
 @media (max-width: 560px) { .cm-cell { min-width: 40px; height: 38px; } .cm-col { max-width: 56px; } .cm-row { max-width: 84px; } }
+/* D1: Keys screen */
+.keys-page .card-head h2 { margin: 0; }
+.table-wrap { overflow-x: auto; }
+.keys-table td { vertical-align: top; } .keys-table .actions { white-space: nowrap; }
+.row-disabled { opacity: .6; }
+.spark-cell { width: 140px; min-width: 100px; }
+.qbar-wrap { display: flex; flex-direction: column; gap: 3px; min-width: 130px; }
+.qbar { height: 6px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+.qbar-fill { height: 100%; background: var(--accent); } .qbar.warn .qbar-fill { background: var(--warn); } .qbar.bad .qbar-fill { background: var(--bad); }
+.keylist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.keylist li { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip.scope-admin { border-color: var(--warn); color: var(--warn-ink); }
+.scope-pick { display: flex; flex-direction: column; gap: 4px; }
+.check { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
+.secret-card { border-color: var(--warn); }
+.secret-key { overflow-wrap: anywhere; padding: 6px 8px; background: var(--panel-2); border: 1px solid var(--border-2); border-radius: var(--radius-sm); user-select: all; }
+.danger-card { border-color: var(--bad); }
+.audit-detail { max-width: 360px; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
