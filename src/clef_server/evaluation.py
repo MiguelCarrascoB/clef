@@ -681,6 +681,7 @@ def router(ctx: AppContext) -> APIRouter:
         metrics (``n_errors``). Resumable: items already stored are replayed into the metrics and skipped.
         """
         from .jobs import ItemError, JobCancelled, decide_resilient
+        from .jobsort import windowed
 
         total = len(spec.rows)
         job.set_total(total)
@@ -697,7 +698,10 @@ def router(ctx: AppContext) -> APIRouter:
                     n_errors += 1
                 elif "scores" in item:
                     scored.append((item["index"], item["scores"]))
-        size = max(1, int(cfg.max_microbatch))  # job mode shares the engine: keep each forward short
+        sorter = windowed(
+            _ctx, total, lambda i: build_requests(spec, [spec.rows[i]])[0], decide_resilient
+        )  # F2
+        size = sorter.step if sorter else max(1, int(cfg.max_microbatch))  # job mode shares the engine
         cancelled = False
         try:
             for lo in range(start, total, size):
@@ -712,7 +716,11 @@ def router(ctx: AppContext) -> APIRouter:
                     except ValueError as exc:
                         built.append((i, ItemError(str(exc))))
                 good = [r for _, r in built if not isinstance(r, ItemError)]
-                results = iter(await decide_resilient(_ctx, job, good) if good else [])
+                results = iter([])
+                if good:
+                    results = iter(
+                        await (sorter.decide(job, lo, good) if sorter else decide_resilient(_ctx, job, good))
+                    )
                 ok_idx: list[int] = []
                 ok_scores: list[dict[str, float]] = []
                 items: list[dict[str, Any]] = []

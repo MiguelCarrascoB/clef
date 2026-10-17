@@ -224,6 +224,11 @@ class Config:
     # fast_head: sync-free, batch-vectorised joint head. Both only apply to the clef-release adapter.
     mask_free: bool = field(default_factory=lambda: _bool("CLEF_MASK_FREE", False))
     fast_head: bool = field(default_factory=lambda: _bool("CLEF_FAST_HEAD", False))
+    # F2: job throughput, default OFF until bench/sort_check.sh shows a gain over 10% (docs/performance.md).
+    # job_sort_window: jobs sort N items at a time by token length (0 = off; 256-1024 recommended);
+    # tokenize_ahead: the next window is encoded on CPU threads while the current one is on the GPU.
+    job_sort_window: int = field(default_factory=lambda: _int("CLEF_JOB_SORT_WINDOW", 0))
+    tokenize_ahead: bool = field(default_factory=lambda: _bool("CLEF_TOKENIZE_AHEAD", False))
 
     def __post_init__(self) -> None:
         for name, value, allowed in (
@@ -251,6 +256,8 @@ class Config:
             raise ValueError("CLEF_CACHE_SIZE must be >= 0 (0 = off)")
         if self.cache_mb < 0:
             raise ValueError("CLEF_CACHE_MB must be >= 0 (0 = off)")
+        if self.job_sort_window < 0:
+            raise ValueError("CLEF_JOB_SORT_WINDOW must be >= 0 (0 = off; 256-1024 recommended)")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
         # C2: CLEF_MODEL syntax and the @rev / CLEF_MODEL_REVISION alias (an unknown id is a load error)
         if self.model:

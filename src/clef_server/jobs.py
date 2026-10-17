@@ -37,7 +37,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
-from . import dbschema
+from . import dbschema, jobsort
 from .appctx import AppContext
 from .classify import (
     Labels,
@@ -1096,7 +1096,8 @@ async def run_chunked(
 ) -> None:
     """Feed items ``job.resume_from .. n`` through the engine, ONE chunk in flight, persisting after each."""
     job.set_total(n)
-    size = max(1, int(ctx.cfg.max_microbatch))
+    sorter = jobsort.windowed(ctx, n, build, decide_resilient)  # F2: None unless a flag is on
+    size = sorter.step if sorter else max(1, int(ctx.cfg.max_microbatch))
     i = job.resume_from
     while i < n:
         if job.cancelled:
@@ -1109,7 +1110,11 @@ async def run_chunked(
             except (ValueError, ValidationError) as exc:
                 built.append((k, ItemError(_msg(exc))))
         good = [r for _, r in built if not isinstance(r, ItemError)]
-        results = iter(await decide_resilient(ctx, job, good) if good else [])
+        results = iter([])
+        if good:
+            results = iter(
+                await (sorter.decide(job, i, good) if sorter else decide_resilient(ctx, job, good))
+            )
         rows = []
         for k, r in built:
             out = r if isinstance(r, ItemError) else next(results)
