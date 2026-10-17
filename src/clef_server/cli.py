@@ -711,6 +711,152 @@ def cmd_classifiers(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---- D1: keys (direct database access; works with the server stopped: this is the bootstrap)
+
+
+def _parse_duration(text: str) -> float:
+    """``90d``, ``24h``, ``30m``, ``45s`` or plain seconds -> seconds."""
+    units = {"d": 86400.0, "h": 3600.0, "m": 60.0, "s": 1.0}
+    raw = text.strip().lower()
+    try:
+        return float(raw[:-1]) * units[raw[-1]] if raw and raw[-1] in units else float(raw)
+    except ValueError:
+        raise ValueError(f"{text!r} is not a duration (use 90d, 24h, 30m or seconds)") from None
+
+
+def _parse_expiry(text: str) -> float:
+    """``--expires``: a duration from now (``90d``) or a date (``2027-01-31``, valid through that UTC day)."""
+    from datetime import datetime, timedelta, timezone
+
+    if len(text) == 10 and text[4:5] == "-":
+        try:
+            day = datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise ValueError(f"{text!r} is not a date (YYYY-MM-DD)") from None
+        return (day + timedelta(days=1)).timestamp()
+    return time.time() + _parse_duration(text)
+
+
+def _opt_int(text: str) -> int | None:
+    """``--quota N`` / ``none``."""
+    if text.strip().lower() in ("none", "null", "off", "unlimited"):
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number (or 'none')") from None
+
+
+def cmd_keys(args: argparse.Namespace) -> int:
+    db = _db_module()
+    if db is None:
+        print(f"clef keys: {NEEDS_SERVER_EXTRA}", file=sys.stderr)
+        return 2
+    from clef_server.keystore import KeyStore, KeystoreError, Quotas, cli_actor
+
+    cfg = load_config()
+    try:
+        if not cfg.database_url:
+            db.migrate_legacy_file(cfg)
+        database = db.Database(db.database_url(cfg))
+        try:
+            database.upgrade()  # a fresh state dir works: `clef keys create` is the bootstrap
+            return _keys_command(args, KeyStore(database), Quotas(database), cfg, cli_actor())
+        finally:
+            database.close()
+    except (KeystoreError, ValueError, db.DatabaseError) as exc:
+        print(f"clef keys: {exc}", file=sys.stderr)
+        return 1
+
+
+def _keys_command(args: argparse.Namespace, store: Any, quotas: Any, cfg: Any, actor: Any) -> int:
+    cmd = args.keys_command
+    env_names = frozenset(cfg.api_keys())
+    as_json = getattr(args, "json", False)
+    if cmd in ("revoke", "update", "rotate") and args.name in env_names:
+        raise ValueError(f"{args.name!r} is an env key (CLEF_API_KEY / CLEF_API_KEYS): change it there")
+    if cmd in ("create", "rotate"):
+        expires = _parse_expiry(args.expires) if args.expires else None
+        first = False
+        if cmd == "create":
+            first = not cfg.auth_required and not store.list_principals(include_disabled=True)
+            row, secret = store.create_principal(
+                args.name,
+                args.scope,
+                actor=actor,
+                daily_quota=args.quota,
+                rate_limit=args.rate_limit,
+                note=args.note,
+                expires_at=expires,
+                env_names=env_names,
+            )
+        else:
+            grace = _parse_duration(args.grace)
+            row, secret = store.rotate(args.name, actor=actor, grace_s=grace, expires_at=expires)
+        if as_json:
+            print(json.dumps({**row, "key": secret}, indent=2))
+        else:
+            verb = "created" if cmd == "create" else f"rotated (the old keys work for {args.grace})"
+            print(f"principal {row['name']!r} {verb}; scopes: {','.join(row['scopes'])}")
+            print(f"key: {secret}")
+            print("Store it now: only its hash is kept, so it cannot be shown again.")
+        if first:
+            print("auth is now required for every /v1 route", file=sys.stderr if as_json else sys.stdout)
+        return 0
+    quotas.load()
+    if cmd == "list":
+        envs = [
+            {"name": n, "source": "env", "scopes": ["admin"], "daily_quota": None, "used_today": 0}
+            | {"keys": [], "disabled_at": None}
+            for n in sorted(env_names)
+        ]
+        rows = envs + [{**r, "used_today": quotas.used(r["name"])} for r in store.list_principals(args.all)]
+        if as_json:
+            print(json.dumps({"principals": rows}, indent=2))
+        elif not rows:
+            print("no principals (auth is off); create one: clef keys create NAME --scope admin")
+        else:
+            print(f"{'NAME':<20} {'SRC':<4} {'SCOPES':<34} {'QUOTA':>9} {'USED':>8}  KEYS")
+            for r in rows:
+                keys = ", ".join(f"{k['id']} {k['status']}" for k in r["keys"]) or "-"
+                name = r["name"] + (" (disabled)" if r["disabled_at"] else "")
+                scopes = "all (env key)" if r["source"] == "env" else ",".join(r["scopes"])
+                quota = "-" if r["daily_quota"] is None else r["daily_quota"]
+                print(f"{name:<20} {r['source']:<4} {scopes:<34} {quota!s:>9} {r['used_today']:>8}  {keys}")
+        return 0
+    if cmd == "revoke":
+        store.revoke(args.name, actor=actor, key_id=args.key_id)
+        what = f"key {args.key_id} revoked" if args.key_id else f"principal {args.name!r} disabled"
+        print(what)
+        return 0
+    if cmd == "update":
+        given = vars(args)  # the update flags default to SUPPRESS: "--quota none" (None) differs from absent
+        pairs = (
+            ("scope", "scopes"),
+            ("quota", "daily_quota"),
+            ("rate_limit", "rate_limit"),
+            ("note", "note"),
+        )
+        changes = {field: given[flag] for flag, field in pairs if flag in given}
+        if not changes:
+            raise ValueError("nothing to change (give --scope, --quota, --rate-limit or --note)")
+        row = store.update_principal(args.name, changes, actor=actor)
+        print(f"updated {row['name']!r}: scopes {','.join(row['scopes'])}, quota {row['daily_quota']}")
+        return 0
+    if cmd == "usage":
+        if store.get(args.name) is None:
+            raise ValueError(f"principal {args.name!r} not found")
+        days = quotas.history(args.name, args.days)
+        if as_json:
+            print(json.dumps({"name": args.name, "days": days}, indent=2))
+        else:
+            print(f"{'DAY':<12} {'RECORDS':>10} {'REQUESTS':>10} {'REJECTED':>10}")
+            for d in days:
+                print(f"{d['day']:<12} {d['records']:>10} {d['requests']:>10} {d['rejected']:>10}")
+        return 0
+    return 2
+
+
 def cmd_version(_args: argparse.Namespace) -> int:
     from clef_server.config import VERSION
 
@@ -842,6 +988,41 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("models", help="list the model catalog and installed adapters (* = selected)")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_models)
+
+    # D1: keys (direct database access; the first `create` is the bootstrap)
+    sp = sub.add_parser("keys", help="API keys and principals: create, list, rotate, revoke, update, usage")
+    ksub = sp.add_subparsers(dest="keys_command", metavar="<keys command>", required=True)
+    kp = ksub.add_parser("create", help="a principal and its first key (printed once)")
+    kp.add_argument("name")
+    scopes_help = "comma-separated: classify,jobs,classifiers,ops,admin,urgent"
+    kp.add_argument("--scope", required=True, metavar="S", help=scopes_help)
+    kp.add_argument("--quota", type=int, metavar="N", help="records per UTC day (default unlimited)")
+    kp.add_argument("--rate-limit", type=int, metavar="N", help="requests/min (default CLEF_RATE_LIMIT)")
+    kp.add_argument("--expires", metavar="90d|2027-01-31", help="expiry of the key (default never)")
+    kp.add_argument("--note", metavar="TEXT")
+    kp.add_argument("--json", action="store_true")
+    kp = ksub.add_parser("list", help="principals and key statuses")
+    kp.add_argument("--all", action="store_true", help="include disabled principals")
+    kp.add_argument("--json", action="store_true")
+    kp = ksub.add_parser("rotate", help="a new key; the old ones keep working for --grace")
+    kp.add_argument("name")
+    kp.add_argument("--grace", default="24h", metavar="24h", help="how long the old keys keep working")
+    kp.add_argument("--expires", metavar="90d|2027-01-31", help="expiry of the new key")
+    kp.add_argument("--json", action="store_true")
+    kp = ksub.add_parser("revoke", help="one key (--key-id) or the whole principal")
+    kp.add_argument("name")
+    kp.add_argument("--key-id", metavar="ID")
+    kp = ksub.add_parser("update", help="scopes, quota, rate limit or note")
+    kp.add_argument("name")
+    kp.add_argument("--scope", metavar="S", default=argparse.SUPPRESS)
+    kp.add_argument("--quota", type=_opt_int, metavar="N|none", default=argparse.SUPPRESS)
+    kp.add_argument("--rate-limit", type=_opt_int, metavar="N|none", default=argparse.SUPPRESS)
+    kp.add_argument("--note", metavar="TEXT", default=argparse.SUPPRESS)
+    kp = ksub.add_parser("usage", help="daily records / requests / quota rejections")
+    kp.add_argument("name")
+    kp.add_argument("--days", type=int, default=30, metavar="N")
+    kp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_keys)
     return p
 
 

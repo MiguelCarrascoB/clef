@@ -23,7 +23,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import case, insert, select, update
-from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Connection
 
 from . import dbschema as t
@@ -643,24 +642,28 @@ class Quotas:
         if not snap:
             return
         usage = t.api_usage
-        ins = (postgresql if self.db.dialect == "postgresql" else sqlite).insert(usage)
-        stmt = ins.on_conflict_do_update(
-            index_elements=[usage.c.principal, usage.c.day],
-            set_={
-                "records": case(
-                    (usage.c.records + ins.excluded.records < 0, 0),
-                    else_=usage.c.records + ins.excluded.records,
-                ),
-                "requests": usage.c.requests + ins.excluded.requests,
-                "rejected": usage.c.rejected + ins.excluded.rejected,
-            },
-        )
-        rows = [
-            {"principal": p, "day": d, "records": max(0, v[0]), "requests": v[1], "rejected": v[2]}
-            for (p, d), v in snap.items()
-        ]
-        with self.db.tx() as conn:
-            conn.execute(stmt, rows)
+        with self.db.tx() as conn:  # per row: UPDATE, else INSERT (few rows; one writer, so no race)
+            for (name, day), (records, requests, rejected) in snap.items():
+                grown = usage.c.records + records
+                done = conn.execute(
+                    update(usage)
+                    .where(usage.c.principal == name, usage.c.day == day)
+                    .values(
+                        records=case((grown < 0, 0), else_=grown),  # a refund never goes below zero
+                        requests=usage.c.requests + requests,
+                        rejected=usage.c.rejected + rejected,
+                    )
+                )
+                if done.rowcount == 0:
+                    conn.execute(
+                        insert(usage).values(
+                            principal=name,
+                            day=day,
+                            records=max(0, records),
+                            requests=requests,
+                            rejected=rejected,
+                        )
+                    )
         with self._lock:  # committed: move what was flushed from delta to base
             for key, v in snap.items():
                 d, b = self._delta[key], self._base.setdefault(key, [0, 0, 0])
