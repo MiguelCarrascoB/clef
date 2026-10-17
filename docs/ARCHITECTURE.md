@@ -1469,9 +1469,12 @@ Policy:
 - Expiry: `expire_after_s` counts from `eligible_at` (the first moment the job could take a turn, i.e. when its
   window first opens; D19). An expired job stops between chunks and ends `cancelled` with `error = "expired"`
   (no new status; `JobInfo.expired: true`).
-- Quota at submit: inside `JobStore.create`'s transaction, `ctx.quotas.reserve(principal, total)` charges the
-  whole job to the submit day (`quota_day`, `quota_reserved`); 429 when it does not fit. On `cancelled` / `failed`
-  / expiry, `total - done` is refunded to the same day. Env principals and auth off: no reservation.
+- Quota at submit, in this order: idempotency lookup (a replay returns the existing job and is **not** charged) →
+  validate / snapshot → `ctx.quotas.reserve(principal, total)` (in memory; 429 when it does not fit) →
+  `JobStore.create(..., quota_day, quota_reserved)`. If `create` raises (`JobsFull`, an idempotency race that
+  returns another job, a DB error), the reservation is refunded in full before the error is returned. The whole
+  job is charged to the submit day; on `cancelled` / `failed` / expiry, `total - done` is refunded to that day.
+  Env principals and auth off: no reservation.
 
 Python API (for E2-free kinds and F1, so they never edit `jobs.py`):
 ```python
@@ -1577,7 +1580,7 @@ Batch: `{"id", "object": "batch", "endpoint", "errors", "input_file_id", "comple
 opens). The SDK's `extra_body={"clef": {...}}` lands as the top-level `clef` field.
 
 Mapping to jobs (one batch = one job of kind `batch`, visible in `GET /v1/jobs?kind=batch`; submitted through
-`JobRunner.submit(..., expire_after_s=86400, completed_if_all_failed=True)` via the kind spec):
+`JobRunner.submit(..., expire_after_s=86400)`; the `batch` kind spec itself sets `"completed_if_all_failed": True`):
 - Create validates at submit, in the threadpool: the file exists, belongs to the caller and has `purpose=batch`;
   every line is JSON with a unique `custom_id`, `method == "POST"` and `url == endpoint`; at most
   `min(CLEF_MAX_BATCH_LINES, CLEF_MAX_JOB_ITEMS)` lines. A structural failure creates the batch with status
@@ -1621,7 +1624,7 @@ existing tests a contract change forces. Every workstream may append to `CHANGEL
 
 | WS | Creates | Modifies |
 | --- | --- | --- |
-| C1 DB | `db.py`, `dbschema.py`, `migrations/**` | `jobs.py` (store port, `claim_next`, `jobs.model`, payload `model` default + submit check), `classifiers.py`, `main.py` (create_app: `open_database`, store wiring, `AppContext(...)` db/model fields; classifier routes; `/health` `db`; lifespan close), `appctx.py` (`db`, `model_ref`, `check_model`), `paths.py` (`database_path`, legacy rename), `config.py` (`CLEF_DATABASE_*`), `cli.py` (`db`, `backup`, `classifiers export`), `doctor.py` (database check), `pyproject.toml` (sqlalchemy, alembic, `postgres` extra), `docker-compose.yml` (comment), `docs/jobs.md`, `SECURITY.md` |
+| C1 DB | `db.py`, `dbschema.py`, `migrations/**` | `jobs.py` (store port, `claim_next`, `jobs.model`, payload `model` default + submit check, `classifier_version`), `classifiers.py`, `classify.py` (`version` on `ClassifierRunRequest` / `ClassifierBatchRequest` only), `evaluation.py` (`version` next to `classifier` on `EvaluateRequest` and its `ctx.store.get` lookup only), `main.py` (create_app: `open_database`, store wiring, `AppContext(...)` db/model fields; classifier routes; `/health` `db`; lifespan close), `appctx.py` (`db`, `model_ref`, `check_model`), `paths.py` (`database_path`, legacy rename), `config.py` (`CLEF_DATABASE_*`), `cli.py` (`db`, `backup`, `classifiers export`), `doctor.py` (database check), `pyproject.toml` (sqlalchemy, alembic, `postgres` extra), `docker-compose.yml` (comment), `docs/jobs.md`, `SECURITY.md` |
 | C2 models | `models/__init__.py`, `models/base.py`, `models/registry.py`, `models/clef_release.py` | `engine.py`, `offload.py`, `backend.py` (TunableOp path per model, `fast_path` from capabilities), `paths.py` (`resolve_model_path(spec)`, `WEIGHTS_GB`), `config.py` (`CLEF_MODEL`, aliases), `schemas.py`, `classify.py`, `evaluation.py` (`model`), `compat_openai.py`, `compat_hf.py`, `main.py` (`infer` / `decide` / `prepare` region, `Cache-Control` read, `map_exception` UnknownModel, `/health` `model`, OpenAPI title, `/schema-example`), `appctx.py` (`prepare`, `decide_prepared`), `doctor.py` (model files from the adapter), `cli.py` (`download --model`, `models`), `pyproject.toml` (entry points), `clef_client/*`, `clients/js/*`, `static/screens/{playground,batch}.js`, `static/util.js`, `bench/parity.py` |
 | D1 keys | `keystore.py`, `admin.py`, `static/screens/keys.js` | `security.py`, `main.py` (auth / rate-limit region, `ctx.scope` on core routes, quota in `infer`, `FEATURES` += `admin`, `AppContext(...)` D1 fields, 403 in `ERRORS`), `appctx.py`, `jobs.py` (scopes, admin view, `auth_enabled`, audit calls), `compat_openai.py`, `compat_hf.py`, `compat_errors.py` (403), `evaluation.py` (scopes), `cli.py` (`keys`), `config.py` (none expected), `static/app.js`, `static/api.js`, `static/components/topbar.js`, `docs/remote-access.md`, `SECURITY.md` |
 | D2 perf | `bench/` scripts as needed | `models/clef_release.py` (forward, head), `backend.py` (`prepare_environment`), `config.py` (`CLEF_MASK_FREE`), `docs/performance.md`, `docs/hardware-results.md` |
@@ -1638,6 +1641,7 @@ Same-wave shared files and how they split:
 | C | `main.py` | C1: `create_app` store / DB construction, the `AppContext(...)` call, classifier routes, `/health` `db` key, lifespan close. C2: `map_exception`, `infer` / `decide` / `prepare`, `/health` `model` key, title, `/schema-example`. Distinct hunks; the two `/health` keys are adjacent lines (keep both). C2 passes its new ctx fields by appending keyword arguments at the end of the `AppContext(...)` call |
 | C | `appctx.py` | append-only: C1 adds `db`, `model_ref`, `check_model`; C2 adds `prepare`, `decide_prepared`. The `model_ref` / `check_model` hook lets C1 store and validate models in `jobs.py` without C2 touching it (C2 implements `Engine.model_ref` / `check_model`; fakes fall back) |
 | C | `jobs.py` | C1 only. C2 must not edit it; the model default and the submit 404 are C1's, through `ctx.check_model` |
+| C | `classify.py`, `evaluation.py` | C1: only the classifier `version` field (`ClassifierRunRequest`, `ClassifierBatchRequest`, `EvaluateRequest`) and the versioned `store.get(name, version)` lookup. C2: the `model` fields / defaults and the evaluate `model` check. Different fields; each adds its field on its own line |
 | C | `config.py`, `pyproject.toml` | append-only blocks (`# C1`, `# C2`); different sections of `pyproject.toml` (extras vs `[project.entry-points]`) |
 | C | `paths.py` | C1: state-dir / DB helpers (new functions). C2: `resolve_model_path`, `WEIGHTS_GB`, `MODEL_MARKER`. Different functions |
 | C | `cli.py` | C1: new `db`, `backup`, `classifiers` subparsers and `cmd_*` functions. C2: the `download` parser + `cmd_download`, new `models` subparser. New subparsers are appended in `build_parser` in that order (C1 block, then C2 block) |
