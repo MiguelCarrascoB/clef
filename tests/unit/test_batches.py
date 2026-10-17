@@ -344,8 +344,7 @@ def test_structural_problems_fail_the_batch_with_line_numbers(api):
     assert sql(app, "SELECT COUNT(*) FROM jobs WHERE status = 'queued'")[0][0] == 0
 
 
-def test_empty_and_oversized_inputs(api):
-    client, _, _ = api
+def test_empty_and_oversized_inputs():  # no `api` fixture: a second app on one Postgres database is refused
     small, _, _ = make(Eng(), max_batch_lines=2)
     with small:
         fid = upload(small, jsonl(*[line(f"c{i}") for i in range(3)])).json()["id"]
