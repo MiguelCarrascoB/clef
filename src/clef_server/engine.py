@@ -40,6 +40,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import logging
+import os
 import sys
 import threading
 import time
@@ -833,6 +834,10 @@ class Engine:
                 self._warnings.append(warn)
                 log.warning("%s", warn)
             self._device = b.device
+            tuned = os.environ.get("PYTORCH_TUNABLEOP_FILENAME")  # per model (backend.prepare_environment)
+            if tuned and os.environ.get("PYTORCH_TUNABLEOP_ENABLED") == "1":
+                with contextlib.suppress(OSError):
+                    Path(tuned).parent.mkdir(parents=True, exist_ok=True)
             adapter = self._make_model()
             path = adapter.resolve()
             self._model_path = None if path is None else str(path)

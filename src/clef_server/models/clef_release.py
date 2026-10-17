@@ -1,5 +1,5 @@
-"""The `clef-release` adapter: every Cloudflare-style clef release (`joint_schema_model.py` + `joint_head.*` next to
-the weights). Serves `clef-flash` (9B) and `clef` (27B); both releases ship the same model code.
+"""The `clef-release` adapter: every Cloudflare-style clef release (`joint_schema_model.py` + `joint_head.*`
+next to the weights). Serves `clef-flash` (9B) and `clef` (27B); both releases ship the same model code.
 
 Torch is imported lazily (inside `load` and the tensor methods), so the catalog is cheap to read. The model
 directory is never modified: its `joint_schema_model.py` is imported under a per-revision module name, and the

@@ -1,4 +1,4 @@
-"""Model registry: adapters from the ``clef.models`` entry points, the model catalog, and `CLEF_MODEL` resolution.
+"""Model registry: adapters from the ``clef.models`` entry points, the model catalog, `CLEF_MODEL` resolution.
 
 Torch-free at import. Built-in adapters register through the same entry-point group as third-party ones
 (pyproject.toml ``[project.entry-points."clef.models"]``). A third-party package adds an adapter with::
@@ -148,9 +148,10 @@ def resolve_spec(cfg: Any) -> ModelSpec:
 
     1. CLEF_MODEL=<id>[@<rev>] picks the catalog entry; unset = clef-flash, unless CLEF_MODEL_REPO names a
        catalog entry's repo (then that entry).
-    2. @<rev> (alias CLEF_MODEL_REVISION; Config refuses both set and different) overrides the pinned revision.
+    2. @<rev> (alias CLEF_MODEL_REVISION; Config refuses both set and different) overrides the pin.
     3. CLEF_MODEL_REPO overrides the entry's repo.
-    4. CLEF_MODEL_PATH is the local release dir; the ref is <id>@<rev> when a revision was given, else <id>@local.
+    4. CLEF_MODEL_PATH is the local release dir; the ref is <id>@<rev> when a revision was given, else
+       <id>@local.
     """
     model_id, rev = parse_model(getattr(cfg, "model", None))
     repo = getattr(cfg, "model_repo", None) or None
@@ -161,7 +162,7 @@ def resolve_spec(cfg: Any) -> ModelSpec:
     spec = cat.get(model_id)
     if spec is None:
         known = ", ".join(sorted(cat)) or "none"
-        raise UnknownModel(f"CLEF_MODEL={model_id!r} is not a known model (known: {known}; see `clef models`)")
+        raise UnknownModel(f"CLEF_MODEL={model_id!r} is not a known model (known: {known}; `clef models`)")
     changes: dict[str, Any] = {}
     if repo:
         changes["repo"] = repo
@@ -190,7 +191,7 @@ def served_model(engine: Any, requested: str | None) -> str:
 
 
 def model_slug(environ: Mapping[str, str] = os.environ) -> str:
-    """`<id>@<rev8>` for per-model state dirs (TunableOp), from the environment alone. Never raises, no I/O."""
+    """`<id>@<rev8>` for per-model state dirs (TunableOp), from the environment alone. Never raises."""
     try:
         model_id, rev = parse_model(environ.get("CLEF_MODEL"))
     except ValueError:

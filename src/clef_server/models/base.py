@@ -1,7 +1,9 @@
-"""The decision model interface: what the engine drives, and what an adapter (built-in or third-party) implements.
+"""The decision model interface: what the engine drives and what an adapter (built-in or third-party)
+implements.
 
 Torch-free at import. One adapter instance per process (D6). An adapter is found through the ``clef.models``
-entry-point group (see registry.py); `DecisionModel` is the generic part (identity, capabilities, files, load),
+entry-point group (see registry.py); `DecisionModel` is the generic part (identity, capabilities, files,
+load),
 `LocalTensorAdapter` adds the tensor steps the engine's worker thread calls for every micro-batch:
 
     encode (any thread) -> collate (CPU batch) -> to_device -> forward (worker, inference mode) -> answer
@@ -159,7 +161,7 @@ class LocalTensorAdapter(DecisionModel, Protocol):
     """A model that runs in this process as tensors. What the engine's worker drives."""
 
     def encode(self, record: Record) -> Encoded:
-        """Any thread (holds its own tokenizer lock). Raises engine.InputTooLarge when the input cannot fit."""
+        """Any thread (holds its own tokenizer lock). Raises engine.InputTooLarge when it cannot fit."""
         raise NotImplementedError
 
     def collate(self, encs: list[Encoded], pad_to: int | None) -> dict:
