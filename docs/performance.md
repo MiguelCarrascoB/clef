@@ -137,3 +137,13 @@ Offload latency is the PCIe copy of the layers kept in host RAM, partly hidden b
 | `bench/parity.py` | probability parity across dtypes and quantization, and engine parity (`--engine-dump` / `--compare`) |
 | `bench/perf_check.sh` | the D2 GPU check: profile, parity per flag, `clef bench` A/B, TunableOp on/off; PASS/FAIL table |
 | `bench/memory_bench.py` | one smaller-memory setting per process: device and host memory, latency, parity against a saved bf16 reference |
+| `bench/vllm/vllm_check.sh` | vLLM vs clef (pending GPU run, see below) |
+
+## vLLM benchmark (pending GPU run)
+
+vLLM serves clef-flash natively through its own `/v1/systemone` (vllm-project/vllm#61308, merged 2026-10-13, nightly
+images only). Whether it is worth an adapter is decided by measurement: `bench/vllm/vllm_check.sh` runs clef (flags
+off, and `CLEF_MASK_FREE=1 CLEF_FAST_HEAD=1`) and a pinned `vllm/vllm-openai-rocm` nightly container on the same
+records at concurrency 1, 8, 16 and 32, checks parity against clef, and prints a decision table. The proposed rule is
+parity (0 top-1 flips, max |dp| <= 2e-3) and at least 1.3x req/s at concurrency 16 with p95 no worse. No vLLM number
+exists yet; the steps, sources and open risks (ROCm in Docker on WSL) are in `bench/vllm/README.md`.
