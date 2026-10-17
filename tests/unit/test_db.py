@@ -630,6 +630,11 @@ def test_every_job_kind_checks_model_at_submit_and_accepts_null():
             "classify": {"inputs": ["a"], "labels": LABELS, "model": None},
             "score": {"inputs": ["a"], "levels": ["lo", "hi"], "model": None},
             "systemone": {"requests": [{**ok_req, "model": None}, ok_req]},
+            "evaluate": {
+                "labels": ["billing", "technical"],
+                "rows": [{"input": "a", "gold": "billing"}, {"input": "b", "gold": "technical"}],
+                "model": None,
+            },
         }
         for kind, payload in good.items():
             r = submit(client, kind, payload)
