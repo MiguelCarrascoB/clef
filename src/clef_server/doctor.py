@@ -26,6 +26,7 @@ from . import backend as backend_mod
 from .config import VERSION, Config
 from .models import UnknownModel
 from .models import registry as model_registry
+from .models.base import safetensors_gb
 from .paths import MODEL_MARKER, WEIGHTS_GB, ModelNotFound, resolve_model_path
 
 OK, WARN, FAIL, SKIP = "OK", "WARN", "FAIL", "SKIP"
@@ -339,8 +340,15 @@ def _selected_spec(cfg: Config) -> Any:
 
 
 def _spec_weights_gb(cfg: Config) -> float:
+    """What the engine's preflight uses: the weights on disk when present, else the catalog estimate."""
     spec = _selected_spec(cfg)
-    return spec.weights_gb if spec is not None else WEIGHTS_GB
+    if spec is None:
+        return WEIGHTS_GB
+    try:
+        on_disk = safetensors_gb(resolve_model_path(cfg))
+    except Exception:  # not downloaded (ModelNotFound), no huggingface_hub...
+        on_disk = 0.0
+    return on_disk if on_disk > 1.0 else spec.weights_gb
 
 
 def check_model(r: Report, cfg: Config) -> Any:
