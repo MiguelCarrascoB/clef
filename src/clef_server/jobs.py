@@ -5,9 +5,9 @@ webhook dispatcher. See docs/jobs.md for the contract.
 
 * One runner, jobs FIFO, one at a time. A job feeds the engine in chunks of ``max_microbatch`` records and
   keeps ONE chunk in flight, so interactive requests queue behind at most one chunk.
-* SQLite (``<state_dir>/jobs.db``) holds jobs and result rows. Rows are persisted per chunk, so a job
-  interrupted by a restart is resumed from the last persisted row (kinds that do not declare themselves
-  ``resumable`` restart from scratch).
+* The database (``ctx.db``: SQLite ``<state_dir>/clef.db`` or ``CLEF_DATABASE_URL``) holds jobs and result
+  rows. Rows are persisted per chunk, so a job interrupted by a restart is resumed from the last persisted row
+  (kinds that do not declare themselves ``resumable`` restart from scratch).
 * Kinds are pluggable: ``ctx.extra["job_kinds"][name] = {"validate": fn, "run": async_fn, "resumable": bool}``
   (``resumable`` optional).
 """
@@ -22,20 +22,22 @@ import json
 import logging
 import re
 import secrets
-import sqlite3
-import threading
 import time
 import uuid
 from collections import Counter
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import and_, case, delete, func, insert, or_, select, update
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
+from . import dbschema
 from .appctx import AppContext
 from .classify import (
     Labels,
@@ -48,9 +50,10 @@ from .classify import (
     score_result,
     score_to_systemone,
 )
+from .db import Database, audit
 from .engine import EngineNotReady, GpuOutOfMemory
-from .paths import jobs_db
-from .schemas import DEFAULT_MODEL, SystemOneRequest, check_limits, format_errors
+from .keystore import QuotaExceeded, Reservation
+from .schemas import SystemOneRequest, check_limits, format_errors
 from .webhooks import DEFAULT_EVENTS, WebhookDispatcher, WebhookPolicy, WebhookRefused
 
 log = logging.getLogger("clef")
@@ -93,50 +96,11 @@ def _iso(ts: float | None) -> str | None:
 
 # ------------------------------------------------------------------ storage
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS jobs (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    id TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL,
-    status TEXT NOT NULL,
-    owner TEXT,
-    payload TEXT NOT NULL,
-    metadata TEXT,
-    webhook TEXT,
-    deliveries TEXT NOT NULL DEFAULT '{}',
-    total INTEGER,
-    done INTEGER NOT NULL DEFAULT 0,
-    failed INTEGER NOT NULL DEFAULT 0,
-    created_at REAL NOT NULL,
-    started_at REAL,
-    finished_at REAL,
-    run_started_at REAL,
-    run_base_done INTEGER NOT NULL DEFAULT 0,
-    resumes INTEGER NOT NULL DEFAULT 0,
-    cancel_requested INTEGER NOT NULL DEFAULT 0,
-    error TEXT,
-    result TEXT,
-    idem_key TEXT
-);
-CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, seq);
-CREATE TABLE IF NOT EXISTS items (
-    job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    idx INTEGER NOT NULL,
-    data TEXT NOT NULL,
-    PRIMARY KEY (job_id, idx)
-) WITHOUT ROWID;
-"""
-
-
-_IDEM_INDEX = (
-    "CREATE UNIQUE INDEX IF NOT EXISTS jobs_idem ON jobs(COALESCE(owner, ''), idem_key)"
-    " WHERE idem_key IS NOT NULL"
-)
-
-_COLS = (
-    "seq, id, kind, status, owner, metadata, webhook, deliveries, total, done, failed, created_at,"
-    " started_at, finished_at, run_started_at, run_base_done, resumes, cancel_requested, error, result"
-)  # everything but `payload` (can be tens of MB)
+_JOBS = dbschema.jobs
+_COLS = [c for c in _JOBS.c if c.name != "payload"]  # everything but `payload` (can be tens of MB)
+_ACTIVE_SQL = ("queued", "running", "interrupted")
+_RUNNABLE = ("queued", "interrupted")
+_DONE_SQL = ("succeeded", "failed", "cancelled")
 
 
 def _loads(raw: str | None) -> Any:
@@ -144,34 +108,29 @@ def _loads(raw: str | None) -> Any:
 
 
 class JobStore:
-    """Thread-safe sqlite wrapper (one connection, one lock; every call is short)."""
+    """Jobs and their result rows on the shared :class:`~clef_server.db.Database` (every call is short).
 
-    def __init__(self, path: Any):
-        self._lock = threading.RLock()
-        self._db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None, timeout=30)
-        self._db.row_factory = sqlite3.Row
-        with contextlib.suppress(sqlite3.Error):
-            self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=NORMAL")
-        self._db.execute("PRAGMA foreign_keys=ON")
-        self._db.executescript(_SCHEMA)
-        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(jobs)")}
-        if "idem_key" not in cols:  # database created before Idempotency-Key support
-            self._db.execute("ALTER TABLE jobs ADD COLUMN idem_key TEXT")
-        self._db.execute(_IDEM_INDEX)
+    Writes go through ``db.tx()``: one transaction each (BEGIN IMMEDIATE under the process lock on SQLite).
+    Helpers that take ``conn`` run inside the caller's transaction.
+    """
+
+    def __init__(self, db: Database):
+        self.db = db
 
     def close(self) -> None:
-        with self._lock:
-            self._db.close()
+        self.db.close()
 
-    def _row(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
+    def _row(self, row: Any) -> dict[str, Any] | None:
         if row is None:
             return None
-        d = dict(row)
+        d = dict(row._mapping)
         for k in ("metadata", "webhook", "deliveries", "result"):
             d[k] = _loads(d[k])
         d["cancel_requested"] = bool(d["cancel_requested"])
         return d
+
+    def _get(self, conn: Connection, job_id: str) -> dict[str, Any] | None:
+        return self._row(conn.execute(select(*_COLS).where(_JOBS.c.id == job_id)).first())
 
     # ---- jobs
     def create(
@@ -183,111 +142,134 @@ class JobStore:
         webhook: dict[str, Any] | None,
         max_active: int,
         idem_key: str | None = None,
+        model: str | None = None,
+        quota_day: str | None = None,
+        quota_reserved: int = 0,
     ) -> dict[str, Any]:
         """Insert a queued job. With ``idem_key``, a job this owner already submitted under it is returned
-        instead (``row["replayed"]`` is True)."""
+        instead (``row["replayed"]`` is True). ``model`` = the model ref served at submit (``jobs.model``).
+        ``quota_day`` / ``quota_reserved``: the daily quota reservation made for it (D1)."""
         job_id = "job_" + secrets.token_hex(10)
-        with self._lock:
-            if idem_key:
-                found = self.find_idem(owner, idem_key)
-                if found:
-                    return {**found, "replayed": True}
-            (n,) = self._db.execute(
-                "SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running','interrupted')"
-            ).fetchone()
-            if max_active > 0 and n >= max_active:
-                raise JobsFull(f"too many queued jobs (max {max_active}); retry later or cancel some")
-            self._db.execute(
-                "INSERT INTO jobs (id, kind, status, owner, payload, metadata, webhook, created_at, idem_key)"
-                " VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
-                (
-                    job_id,
-                    kind,
-                    owner,
-                    json.dumps(payload, separators=(",", ":")),
-                    None if metadata is None else json.dumps(metadata),
-                    None if webhook is None else json.dumps(webhook),
-                    time.time(),
-                    idem_key or None,
-                ),
-            )
-            return self.get(job_id) or {}
+        try:
+            with self.db.tx() as conn:
+                if idem_key:
+                    found = self._find_idem(conn, owner, idem_key)
+                    if found:
+                        return {**found, "replayed": True}
+                self.db.serialize(conn, "jobs.create")  # count-then-insert (max_active) on Postgres
+                n = conn.execute(
+                    select(func.count()).select_from(_JOBS).where(_JOBS.c.status.in_(_ACTIVE_SQL))
+                ).scalar_one()
+                if max_active > 0 and n >= max_active:
+                    raise JobsFull(f"too many queued jobs (max {max_active}); retry later or cancel some")
+                conn.execute(
+                    insert(_JOBS).values(
+                        id=job_id,
+                        kind=kind,
+                        status="queued",
+                        owner=owner,
+                        payload=json.dumps(payload, separators=(",", ":")),
+                        metadata=None if metadata is None else json.dumps(metadata),
+                        webhook=None if webhook is None else json.dumps(webhook),
+                        created_at=time.time(),
+                        idem_key=idem_key or None,
+                        model=model,
+                        quota_day=quota_day,
+                        quota_reserved=quota_reserved,
+                    )
+                )
+                return self._get(conn, job_id) or {}
+        except IntegrityError:
+            # Postgres: a concurrent submit with the same Idempotency-Key won the unique index.
+            found = self.find_idem(owner, idem_key) if idem_key else None
+            if found:
+                return {**found, "replayed": True}
+            raise
+
+    def _find_idem(self, conn: Connection, owner: str | None, idem_key: str) -> dict[str, Any] | None:
+        return self._row(
+            conn.execute(
+                select(*_COLS).where(
+                    func.coalesce(_JOBS.c.owner, "") == (owner or ""), _JOBS.c.idem_key == idem_key
+                )
+            ).first()
+        )
 
     def find_idem(self, owner: str | None, idem_key: str) -> dict[str, Any] | None:
-        with self._lock:
-            return self._row(
-                self._db.execute(
-                    f"SELECT {_COLS} FROM jobs WHERE COALESCE(owner, '')=? AND idem_key=?",
-                    (owner or "", idem_key),
-                ).fetchone()
-            )
+        with self.db.read() as conn:
+            return self._find_idem(conn, owner, idem_key)
 
     def get(self, job_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            return self._row(self._db.execute(f"SELECT {_COLS} FROM jobs WHERE id=?", (job_id,)).fetchone())
+        with self.db.read() as conn:
+            return self._get(conn, job_id)
 
     def list(
         self, owner: str | None, scoped: bool, status: str | None, kind: str | None, limit: int, offset: int
     ) -> tuple[list[dict[str, Any]], int]:
-        where, args = ["1=1"], []
+        where = []
         if scoped:
-            where.append("(owner IS NULL OR owner=?)")
-            args.append(owner)
+            where.append(_JOBS.c.owner == owner)  # owner-less jobs (auth-off era) are admin-only
         if status:
-            where.append("status=?")
-            args.append(status)
+            where.append(_JOBS.c.status == status)
         if kind:
-            where.append("kind=?")
-            args.append(kind)
-        clause = " AND ".join(where)
-        with self._lock:
-            (total,) = self._db.execute(f"SELECT COUNT(*) FROM jobs WHERE {clause}", args).fetchone()
-            rows = self._db.execute(
-                f"SELECT {_COLS} FROM jobs WHERE {clause} ORDER BY seq DESC LIMIT ? OFFSET ?",
-                [*args, limit, offset],
-            ).fetchall()
+            where.append(_JOBS.c.kind == kind)
+        with self.db.read() as conn:
+            total = conn.execute(select(func.count()).select_from(_JOBS).where(*where)).scalar_one()
+            rows = conn.execute(
+                select(*_COLS).where(*where).order_by(_JOBS.c.seq.desc()).limit(limit).offset(offset)
+            ).all()
         return [self._row(r) for r in rows], total  # type: ignore[misc]
 
-    def next_runnable(self) -> dict[str, Any] | None:
-        with self._lock:
-            return self._row(
-                self._db.execute(
-                    f"SELECT {_COLS} FROM jobs WHERE status IN ('queued','interrupted')"
-                    " ORDER BY (status='interrupted') DESC, seq LIMIT 1"
-                ).fetchone()
+    def _claim(self, conn: Connection, job_id: str, now: float) -> bool:
+        cur = conn.execute(
+            update(_JOBS)
+            .where(_JOBS.c.id == job_id, _JOBS.c.status.in_(_RUNNABLE))
+            .values(
+                status="running",
+                started_at=func.coalesce(_JOBS.c.started_at, now),
+                run_started_at=now,
+                run_base_done=_JOBS.c.done,
+                finished_at=None,
             )
+        )
+        return cur.rowcount == 1
+
+    def claim_next(self) -> dict[str, Any] | None:
+        """Pick the next runnable job and set it ``running``, in ONE transaction.
+
+        Interrupted jobs first (they were running), then FIFO by ``seq``. ``FOR UPDATE SKIP LOCKED`` on
+        Postgres; on SQLite ``BEGIN IMMEDIATE`` serialises. The returned row is the running job plus
+        ``claimed_from`` (its status before the claim: "queued" or "interrupted"). None once the server lock
+        on Postgres is lost (another server may own the database; this one is exiting).
+        """
+        if self.db.lock_lost:
+            return None
+        with self.db.tx() as conn:
+            row = conn.execute(
+                select(_JOBS.c.id, _JOBS.c.status)
+                .where(_JOBS.c.status.in_(_RUNNABLE))
+                .order_by(case((_JOBS.c.status == "interrupted", 0), else_=1), _JOBS.c.seq)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            ).first()
+            if row is None or not self._claim(conn, row.id, time.time()):
+                return None
+            claimed = self._get(conn, row.id)
+            return None if claimed is None else {**claimed, "claimed_from": row.status}
+
+    def claim(self, job_id: str) -> bool:
+        """queued/interrupted -> running for one id (the caller picked it). False when it was not runnable."""
+        with self.db.tx() as conn:
+            return self._claim(conn, job_id, time.time())
 
     def payload(self, job_id: str) -> str:
-        with self._lock:
-            row = self._db.execute("SELECT payload FROM jobs WHERE id=?", (job_id,)).fetchone()
-        return row["payload"] if row else "{}"
-
-    def mark_running(self, job_id: str, resume_done: int) -> bool:
-        """queued/interrupted -> running. False when a cancel got there first."""
-        now = time.time()
-        with self._lock:
-            cur = self._db.execute(
-                "UPDATE jobs SET status='running', started_at=COALESCE(started_at, ?), run_started_at=?,"
-                " run_base_done=?, finished_at=NULL WHERE id=? AND status IN ('queued','interrupted')",
-                (now, now, resume_done, job_id),
-            )
-            return cur.rowcount == 1
+        with self.db.read() as conn:
+            raw = conn.execute(select(_JOBS.c.payload).where(_JOBS.c.id == job_id)).scalar()
+        return raw if raw is not None else "{}"
 
     def set_total(self, job_id: str, total: int) -> None:
-        with self._lock:
-            self._db.execute("UPDATE jobs SET total=? WHERE id=?", (int(total), job_id))
-
-    @contextlib.contextmanager
-    def _tx(self) -> Iterator[None]:
-        """One write transaction (under the lock): all of its statements land, or none does."""
-        with self._lock:
-            self._db.execute("BEGIN IMMEDIATE")
-            try:
-                yield
-                self._db.execute("COMMIT")
-            except BaseException:
-                self._db.execute("ROLLBACK")
-                raise
+        with self.db.tx() as conn:
+            conn.execute(update(_JOBS).where(_JOBS.c.id == job_id).values(total=int(total)))
 
     def add_items(self, job_id: str, items: list[dict[str, Any]]) -> int:
         """Append rows after the last persisted one (one transaction); returns the new ``done``.
@@ -295,72 +277,105 @@ class JobStore:
         ``done`` is read inside the transaction, so a chunk is stored whole at the right offset or not at
         all: whatever interrupts the job, the rows stay gap-free and a resume recomputes only what is missing.
         """
-        with self._tx():
-            row = self._db.execute("SELECT done FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is None:
+        with self.db.tx() as conn:
+            start = conn.execute(select(_JOBS.c.done).where(_JOBS.c.id == job_id).with_for_update()).scalar()
+            if start is None:
                 raise KeyError(job_id)
-            start = row["done"]
-            self._db.executemany(
-                "INSERT INTO items (job_id, idx, data) VALUES (?, ?, ?)",
+            conn.execute(
+                insert(dbschema.items),
                 [
-                    (job_id, start + i, json.dumps(it, separators=(",", ":"), default=str))
+                    {
+                        "job_id": job_id,
+                        "idx": start + i,
+                        "data": json.dumps(it, separators=(",", ":"), default=str),
+                    }
                     for i, it in enumerate(items)
                 ],
             )
             failed = sum(1 for it in items if isinstance(it, dict) and "error" in it)
-            self._db.execute(
-                "UPDATE jobs SET done=done+?, failed=failed+? WHERE id=?", (len(items), failed, job_id)
+            conn.execute(
+                update(_JOBS)
+                .where(_JOBS.c.id == job_id)
+                .values(done=_JOBS.c.done + len(items), failed=_JOBS.c.failed + failed)
             )
         return start + len(items)
 
-    def _terminal_event(self, job_id: str, status: str) -> str | None:
+    def _terminal_event(self, conn: Connection, job_id: str, status: str) -> str | None:
         """Inside a transaction: mark ``job.<status>`` pending (if subscribed) so a restart retries it.
 
         Written in the same transaction as the status change, so a crash cannot leave a finished job without
         its event. The delivery id is minted here, so every retry (also after a crash) carries the same
         X-Clef-Delivery. Returns the event, or None when the job has no webhook for it.
         """
-        row = self._db.execute("SELECT webhook, deliveries FROM jobs WHERE id=?", (job_id,)).fetchone()
-        hook = row and _loads(row["webhook"])
+        row = conn.execute(select(_JOBS.c.webhook, _JOBS.c.deliveries).where(_JOBS.c.id == job_id)).first()
+        hook = row and _loads(row.webhook)
         event = f"job.{status}"
         if not hook or event not in (hook.get("events") or DEFAULT_EVENTS):
             return None
-        deliveries = json.loads(row["deliveries"] or "{}")
+        deliveries = json.loads(row.deliveries or "{}")
         deliveries[event] = {"id": uuid.uuid4().hex, "event": event, "status": "pending", "attempts": 0}
-        self._db.execute("UPDATE jobs SET deliveries=? WHERE id=?", (json.dumps(deliveries), job_id))
+        conn.execute(update(_JOBS).where(_JOBS.c.id == job_id).values(deliveries=json.dumps(deliveries)))
         return event
 
     def finish(
         self, job_id: str, status: str, error: str | None = None, result: Any = None
     ) -> tuple[bool, str | None]:
         """Active -> ``status`` plus its pending webhook event, in ONE transaction; ``(changed, event)``."""
-        with self._tx():
-            cur = self._db.execute(
-                "UPDATE jobs SET status=?, finished_at=?, error=?, result=?, total=COALESCE(total, done)"
-                " WHERE id=? AND status IN ('queued','running','interrupted')",
-                (
-                    status,
-                    time.time(),
-                    error,
-                    None if result is None else json.dumps(result, default=str),
-                    job_id,
-                ),
+        with self.db.tx() as conn:
+            cur = conn.execute(
+                update(_JOBS)
+                .where(_JOBS.c.id == job_id, _JOBS.c.status.in_(_ACTIVE_SQL))
+                .values(
+                    status=status,
+                    finished_at=time.time(),
+                    error=error,
+                    result=None if result is None else json.dumps(result, default=str),
+                    total=func.coalesce(_JOBS.c.total, _JOBS.c.done),
+                )
             )
             if cur.rowcount != 1:
                 return False, None
-            return True, self._terminal_event(job_id, status)
+            return True, self._terminal_event(conn, job_id, status)
+
+    def settle_quota(self, job_id: str | None = None) -> list[tuple[str, str, int]]:
+        """Hand back the unprocessed part of the reservation of failed / cancelled jobs: ``(owner, day, n)``.
+
+        ``n = quota_reserved - done``; the row's ``quota_reserved`` is then set to ``done`` (what was really
+        charged), so a second call refunds nothing. One job, or (``job_id`` None) every finished one: startup
+        uses that for jobs that ended while the process was stopping.
+        """
+        out: list[tuple[str, str, int]] = []
+        with self.db.tx() as conn:
+            q = select(
+                _JOBS.c.id, _JOBS.c.owner, _JOBS.c.quota_day, _JOBS.c.quota_reserved, _JOBS.c.done
+            ).where(
+                _JOBS.c.status.in_(("failed", "cancelled")),
+                _JOBS.c.quota_reserved > _JOBS.c.done,
+                _JOBS.c.quota_day.is_not(None),
+            )
+            if job_id is not None:
+                q = q.where(_JOBS.c.id == job_id)
+            for r in conn.execute(q).all():
+                conn.execute(update(_JOBS).where(_JOBS.c.id == r.id).values(quota_reserved=r.done))
+                if r.owner:
+                    out.append((r.owner, r.quota_day, r.quota_reserved - r.done))
+        return out
 
     def cancel_queued(self, job_id: str) -> tuple[bool, str | None]:
         """queued/interrupted -> cancelled plus its pending event (one transaction); ``(changed, event)``."""
-        with self._tx():
-            cur = self._db.execute(
-                "UPDATE jobs SET status='cancelled', finished_at=?, total=COALESCE(total, done)"
-                " WHERE id=? AND status IN ('queued','interrupted')",
-                (time.time(), job_id),
+        with self.db.tx() as conn:
+            cur = conn.execute(
+                update(_JOBS)
+                .where(_JOBS.c.id == job_id, _JOBS.c.status.in_(_RUNNABLE))
+                .values(
+                    status="cancelled",
+                    finished_at=time.time(),
+                    total=func.coalesce(_JOBS.c.total, _JOBS.c.done),
+                )
             )
             if cur.rowcount != 1:
                 return False, None
-            return True, self._terminal_event(job_id, "cancelled")
+            return True, self._terminal_event(conn, job_id, "cancelled")
 
     def flag_cancel(self, job_id: str) -> tuple[str | None, str | None]:
         """Cancel a job that is not queued, in ONE transaction; ``(status, event)``.
@@ -369,23 +384,40 @@ class JobStore:
         interrupted (parked by a clean stop or a runner error after the caller saw it running) -> cancelled
         at once, never resumed: ``("cancelled", event)``. Anything else is left alone: ``(None, None)``.
         """
-        with self._tx():
-            row = self._db.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
-            status = row["status"] if row else None
+        with self.db.tx() as conn:
+            status = conn.execute(
+                select(_JOBS.c.status).where(_JOBS.c.id == job_id).with_for_update()
+            ).scalar()
             if status == "running":
-                self._db.execute("UPDATE jobs SET cancel_requested=1 WHERE id=?", (job_id,))
+                conn.execute(update(_JOBS).where(_JOBS.c.id == job_id).values(cancel_requested=1))
                 return "running", None
             if status == "interrupted":
-                return "cancelled", self._cancel_now(job_id)
+                return "cancelled", self._cancel_now(conn, job_id)
             return None, None
 
-    def _cancel_now(self, job_id: str) -> str | None:
+    def _cancel_now(self, conn: Connection, job_id: str) -> str | None:
         """Inside a transaction: a job whose cancel was requested ends cancelled (never resumed)."""
-        self._db.execute(
-            "UPDATE jobs SET status='cancelled', finished_at=?, total=COALESCE(total, done) WHERE id=?",
-            (time.time(), job_id),
+        conn.execute(
+            update(_JOBS)
+            .where(_JOBS.c.id == job_id)
+            .values(
+                status="cancelled", finished_at=time.time(), total=func.coalesce(_JOBS.c.total, _JOBS.c.done)
+            )
         )
-        return self._terminal_event(job_id, "cancelled")
+        return self._terminal_event(conn, job_id, "cancelled")
+
+    def _park(self, conn: Connection, job_id: str, cancel: bool) -> str | None:
+        flag = conn.execute(
+            select(_JOBS.c.cancel_requested)
+            .where(_JOBS.c.id == job_id, _JOBS.c.status == "running")
+            .with_for_update()
+        ).first()
+        if flag is None:
+            return None
+        if cancel or flag.cancel_requested:
+            return self._cancel_now(conn, job_id)
+        conn.execute(update(_JOBS).where(_JOBS.c.id == job_id).values(status="interrupted"))
+        return None
 
     def park(self, job_id: str, cancel: bool = False) -> str | None:
         """Clean stop or runner error: running -> interrupted WITHOUT counting a resume (only a crash counts).
@@ -393,23 +425,15 @@ class JobStore:
         A job whose cancel was requested (in the row, or ``cancel`` from the runner's memory) ends
         ``cancelled`` instead, with its pending event in the same transaction; that event is returned.
         """
-        with self._tx():
-            row = self._db.execute(
-                "SELECT cancel_requested FROM jobs WHERE id=? AND status='running'", (job_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            if cancel or row["cancel_requested"]:
-                return self._cancel_now(job_id)
-            self._db.execute("UPDATE jobs SET status='interrupted' WHERE id=?", (job_id,))
-            return None
+        with self.db.tx() as conn:
+            return self._park(conn, job_id, cancel)
 
     def park_running(self) -> list[str]:
-        """Clean stop safety net: park every job still 'running' (there is one runner). Returns their ids."""
-        with self._lock:
-            ids = [r["id"] for r in self._db.execute("SELECT id FROM jobs WHERE status='running'")]
+        """Clean stop safety net: park every job still 'running' (one server per DB). Returns their ids."""
+        with self.db.tx() as conn:
+            ids = list(conn.execute(select(_JOBS.c.id).where(_JOBS.c.status == "running")).scalars())
             for job_id in ids:
-                self.park(job_id)
+                self._park(conn, job_id, False)
             return ids
 
     def recover(self, max_resumes: int = 0) -> tuple[int, list[str], list[str]]:
@@ -420,107 +444,131 @@ class JobStore:
         otherwise be resumed forever ahead of every other job. The terminal events are recorded pending in
         the same transaction (``pending_deliveries`` sends them). Returns ``(resumed, given_up, cancelled)``.
         """
-        with self._tx():
-            rows = self._db.execute(
-                "SELECT id, status, resumes, cancel_requested FROM jobs"
-                " WHERE status='running' OR (status='interrupted' AND cancel_requested=1)"
-            ).fetchall()
+        with self.db.tx() as conn:
+            rows = conn.execute(
+                select(_JOBS.c.id, _JOBS.c.status, _JOBS.c.resumes, _JOBS.c.cancel_requested)
+                .where(
+                    or_(
+                        _JOBS.c.status == "running",
+                        and_(_JOBS.c.status == "interrupted", _JOBS.c.cancel_requested == 1),
+                    )
+                )
+                .order_by(_JOBS.c.seq)
+            ).all()
             resumed, given_up, cancelled = 0, [], []
             for r in rows:
-                if r["cancel_requested"]:  # the user's cancel wins over resuming or giving up
-                    self._cancel_now(r["id"])
-                    cancelled.append(r["id"])
-                elif max_resumes > 0 and r["resumes"] + 1 > max_resumes:
-                    self._db.execute(
-                        "UPDATE jobs SET status='failed', finished_at=?, error=?, resumes=resumes+1,"
-                        " total=COALESCE(total, done) WHERE id=?",
-                        (time.time(), f"interrupted {r['resumes'] + 1} times, giving up", r["id"]),
+                if r.cancel_requested:  # the user's cancel wins over resuming or giving up
+                    self._cancel_now(conn, r.id)
+                    cancelled.append(r.id)
+                elif max_resumes > 0 and r.resumes + 1 > max_resumes:
+                    conn.execute(
+                        update(_JOBS)
+                        .where(_JOBS.c.id == r.id)
+                        .values(
+                            status="failed",
+                            finished_at=time.time(),
+                            error=f"interrupted {r.resumes + 1} times, giving up",
+                            resumes=_JOBS.c.resumes + 1,
+                            total=func.coalesce(_JOBS.c.total, _JOBS.c.done),
+                        )
                     )
-                    self._terminal_event(r["id"], "failed")
-                    given_up.append(r["id"])
+                    self._terminal_event(conn, r.id, "failed")
+                    given_up.append(r.id)
                 else:
-                    self._db.execute(
-                        "UPDATE jobs SET status='interrupted', resumes=resumes+1 WHERE id=?", (r["id"],)
+                    conn.execute(
+                        update(_JOBS)
+                        .where(_JOBS.c.id == r.id)
+                        .values(status="interrupted", resumes=_JOBS.c.resumes + 1)
                     )
                     resumed += 1
             return resumed, given_up, cancelled
 
     def reset_items(self, job_id: str) -> None:
-        with self._lock:
-            self._db.execute("DELETE FROM items WHERE job_id=?", (job_id,))
-            self._db.execute("UPDATE jobs SET done=0, failed=0, total=NULL WHERE id=?", (job_id,))
+        with self.db.tx() as conn:
+            conn.execute(delete(dbschema.items).where(dbschema.items.c.job_id == job_id))
+            conn.execute(
+                update(_JOBS)
+                .where(_JOBS.c.id == job_id)
+                .values(done=0, failed=0, total=None, run_base_done=0)
+            )
 
     def delete(self, job_id: str) -> bool:
-        with self._lock:
-            cur = self._db.execute(
-                "DELETE FROM jobs WHERE id=? AND status IN ('succeeded','failed','cancelled')", (job_id,)
-            )
+        with self.db.tx() as conn:
+            cur = conn.execute(delete(_JOBS).where(_JOBS.c.id == job_id, _JOBS.c.status.in_(_DONE_SQL)))
             return cur.rowcount == 1
 
     def purge(self, older_than: float) -> int:
         """Delete finished jobs older than ``older_than`` unless a webhook delivery is still pending."""
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT id, deliveries FROM jobs WHERE status IN ('succeeded','failed','cancelled')"
-                " AND finished_at < ?",
-                (older_than,),
-            ).fetchall()
+        with self.db.tx() as conn:
+            rows = conn.execute(
+                select(_JOBS.c.id, _JOBS.c.deliveries).where(
+                    _JOBS.c.status.in_(_DONE_SQL), _JOBS.c.finished_at < older_than
+                )
+            ).all()
             doomed = [
-                r["id"]
+                r.id
                 for r in rows
                 if not any(
-                    rec.get("status") == "pending" for rec in json.loads(r["deliveries"] or "{}").values()
+                    rec.get("status") == "pending" for rec in json.loads(r.deliveries or "{}").values()
                 )
             ]
             for i in range(0, len(doomed), 500):
-                part = doomed[i : i + 500]
-                self._db.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?' * len(part))})", part)
+                conn.execute(delete(_JOBS).where(_JOBS.c.id.in_(doomed[i : i + 500])))
             return len(doomed)
 
     # ---- results
     def items(self, job_id: str, offset: int, limit: int) -> list[tuple[int, str]]:
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT idx, data FROM items WHERE job_id=? AND idx>=? ORDER BY idx LIMIT ?",
-                (job_id, offset, limit),
-            ).fetchall()
-        return [(r["idx"], r["data"]) for r in rows]
+        it = dbschema.items
+        with self.db.read() as conn:
+            rows = conn.execute(
+                select(it.c.idx, it.c.data)
+                .where(it.c.job_id == job_id, it.c.idx >= offset)
+                .order_by(it.c.idx)
+                .limit(limit)
+            ).all()
+        return [(r.idx, r.data) for r in rows]
 
     # ---- webhook deliveries
     def set_delivery(self, job_id: str, event: str, record: dict[str, Any]) -> None:
-        with self._lock:
-            row = self._db.execute("SELECT deliveries FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is None:
+        with self.db.tx() as conn:
+            raw = conn.execute(
+                select(_JOBS.c.deliveries).where(_JOBS.c.id == job_id).with_for_update()
+            ).first()
+            if raw is None:
                 return
-            deliveries = json.loads(row["deliveries"] or "{}")
+            deliveries = json.loads(raw.deliveries or "{}")
             deliveries[event] = record
-            self._db.execute("UPDATE jobs SET deliveries=? WHERE id=?", (json.dumps(deliveries), job_id))
+            conn.execute(update(_JOBS).where(_JOBS.c.id == job_id).values(deliveries=json.dumps(deliveries)))
 
     def redeliver(self, job_id: str, event: str) -> dict[str, Any] | None:
         """failed -> pending (same delivery id, attempts reset). None unless the record exists and failed."""
-        with self._lock:
-            row = self._db.execute("SELECT deliveries FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is None:
+        with self.db.tx() as conn:
+            raw = conn.execute(
+                select(_JOBS.c.deliveries).where(_JOBS.c.id == job_id).with_for_update()
+            ).first()
+            if raw is None:
                 return None
-            deliveries = json.loads(row["deliveries"] or "{}")
+            deliveries = json.loads(raw.deliveries or "{}")
             rec = deliveries.get(event)
             if not rec or rec.get("status") != "failed":
                 return None
             rec = {**rec, "status": "pending", "attempts": 0}
             deliveries[event] = rec
-            self._db.execute("UPDATE jobs SET deliveries=? WHERE id=?", (json.dumps(deliveries), job_id))
+            conn.execute(update(_JOBS).where(_JOBS.c.id == job_id).values(deliveries=json.dumps(deliveries)))
             return rec
 
     def pending_deliveries(self) -> list[tuple[str, str]]:
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT id, deliveries FROM jobs WHERE webhook IS NOT NULL AND deliveries != '{}'"
-            ).fetchall()
+        with self.db.read() as conn:
+            rows = conn.execute(
+                select(_JOBS.c.id, _JOBS.c.deliveries)
+                .where(_JOBS.c.webhook.isnot(None), _JOBS.c.deliveries != "{}")
+                .order_by(_JOBS.c.seq)
+            ).all()
         out = []
         for r in rows:
-            for event, rec in json.loads(r["deliveries"]).items():
+            for event, rec in json.loads(r.deliveries).items():
                 if rec.get("status") == "pending" and event != "job.progress":
-                    out.append((r["id"], event))
+                    out.append((r.id, event))
         return out
 
 
@@ -771,6 +819,7 @@ class JobRunner:
                 job_id,
                 self.ctx.cfg.job_max_resumes,
             )
+        await self.settle()  # jobs that ended failed / cancelled while the server was down
         await asyncio.to_thread(self._purge)
         for job_id, event in await asyncio.to_thread(self.store.pending_deliveries):
             self.dispatcher.enqueue(job_id, event)
@@ -782,16 +831,23 @@ class JobRunner:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        # Safety net for a clean stop that landed outside the kind (e.g. right after mark_running): park the
+        # Safety net for a clean stop that landed outside the kind (e.g. right after claim_next): park the
         # job without counting a resume. A store call still in a worker thread holds the lock: this waits.
         with contextlib.suppress(Exception):
             await asyncio.to_thread(self.store.park_running)
-        await self.dispatcher.close()
-        self.store.close()
+        await self.dispatcher.close()  # the database itself is closed by the app lifespan (ctx.db)
 
     def poke(self) -> None:
         if self.wake is not None:
             self.wake.set()
+
+    async def settle(self, job_id: str | None = None) -> None:
+        """Refund the unprocessed records of a failed / cancelled job (all if ``job_id`` is None)."""
+        quotas = self.ctx.quotas
+        if quotas is None:
+            return
+        for owner, day, n in await asyncio.to_thread(self.store.settle_quota, job_id):
+            quotas.refund(Reservation(owner, day, n), n)
 
     def _purge(self) -> None:
         ttl = self.ctx.cfg.job_ttl_hours
@@ -816,7 +872,7 @@ class JobRunner:
         while True:
             row = None
             try:
-                row = await asyncio.to_thread(self.store.next_runnable)
+                row = await asyncio.to_thread(self.store.claim_next)  # the job is 'running' from here
                 if row is None:
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(self.wake.wait(), timeout=PURGE_INTERVAL_S)
@@ -832,7 +888,12 @@ class JobRunner:
     async def _runner_failed(self, row: dict[str, Any] | None) -> None:
         """The runner itself (not the kind) raised: retry a few times, then fail the job (poison pill)."""
         log.exception("job runner error")
-        if row is not None:
+        if row is None:
+            # claim_next itself failed, possibly after its commit: park whatever is left 'running' (there is
+            # one runner and nothing is executing now), so the job is picked up again without a resume.
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(self.store.park_running)
+        else:
             job_id = row["id"]
             n = self._failures[job_id] = self._failures.get(job_id, 0) + 1
             try:
@@ -840,6 +901,7 @@ class JobRunner:
                 event = await asyncio.to_thread(self.store.park, job_id, job_id in self.cancel_ids)
                 if event:
                     self.dispatcher.enqueue(job_id, event)
+                    await self.settle(job_id)
                 if n >= RUNNER_MAX_FAILURES:
                     self._failures.pop(job_id, None)
                     log.error("jobs: job %s failed %d times in the runner; failing it", job_id, n)
@@ -858,6 +920,7 @@ class JobRunner:
         if cancelled:
             if event:
                 self.dispatcher.enqueue(job_id, event)
+            await self.settle(job_id)
         else:
             # Not queued: flag it if running, or cancel it now if a park (clean stop, runner error) got
             # there first. One atomic store call, not gated on a stale read: a racing park cannot drop it.
@@ -867,12 +930,14 @@ class JobRunner:
                 self.cancel_ids.discard(job_id)
             if event:
                 self.dispatcher.enqueue(job_id, event)
+            if status == "cancelled":
+                await self.settle(job_id)
         return await asyncio.to_thread(self.store.get, job_id) or row
 
     def _finish_sync(
         self, job_id: str, status: str, error: str | None, result: Any
     ) -> tuple[bool, str | None]:
-        """State change + pending event in ONE SQLite transaction (``JobStore.finish``): neither a cancelled
+        """State change + pending event in ONE transaction (``JobStore.finish``): neither a cancelled
         awaiting task (shutdown) nor a hard crash can land between them, so a terminal event is never lost."""
         return self.store.finish(job_id, status, error, result)
 
@@ -892,29 +957,32 @@ class JobRunner:
 
     # ---- execution
     async def _execute(self, row: dict[str, Any]) -> None:
+        """Run a job ``claim_next`` already set 'running' (a cancel may target it from that moment on)."""
         job_id = row["id"]
+        # Never discard cancel_ids here: a cancel that arrived right after the claim is already in it (and in
+        # the row). Stale ids cannot exist: park / finish end a job whose cancel was requested.
+        if row["cancel_requested"]:
+            self.cancel_ids.add(job_id)
         spec = self.kinds().get(row["kind"])
         if spec is None:
             await self._finish(job_id, "failed", error=f"unknown job kind {row['kind']!r}")
             return
-        resuming = row["status"] == "interrupted"
+        served = self.ctx.model_ref()
+        if row.get("model") and served and row["model"] != served:  # one model per process (D6)
+            await self._finish(
+                job_id, "failed", error=f"job was submitted for {row['model']}, this server serves {served}"
+            )
+            return
+        resuming = row.get("claimed_from", row["status"]) == "interrupted"
         done = row["done"] if resuming and spec.get("resumable") else 0
         if resuming and not spec.get("resumable"):
             await asyncio.to_thread(self.store.reset_items, job_id)
         try:
             payload = json.loads(await asyncio.to_thread(self.store.payload, job_id))
             parsed = await asyncio.to_thread(spec["validate"], payload)
-        except (ValueError, ValidationError) as exc:
+        except (ValueError, ValidationError, LookupError) as exc:
             await self._finish(job_id, "failed", error=f"payload is no longer valid: {_msg(exc)}")
             return
-        # Discard BEFORE mark_running: a cancel can only target the job once it is 'running', so one that
-        # arrives right after mark_running is never wiped by this line. Then re-seed from the row.
-        self.cancel_ids.discard(job_id)
-        if not await asyncio.to_thread(self.store.mark_running, job_id, done):
-            return  # cancelled while queued
-        fresh = await asyncio.to_thread(self.store.get, job_id)
-        if fresh and fresh["cancel_requested"]:
-            self.cancel_ids.add(job_id)
         self.current = job_id
         self._wants_progress = "job.progress" in ((row["webhook"] or {}).get("events") or ())
         handle = JobHandle(self, {**row, "done": done})
@@ -923,7 +991,7 @@ class JobRunner:
             result = await spec["run"](self.ctx, parsed, handle)
         except asyncio.CancelledError:
             # Clean shutdown: park without counting a resume (a requested cancel ends it cancelled; its
-            # event is sent on the next start). An add_items still in its worker thread holds the store
+            # event is sent on the next start). An add_items still in its worker thread holds the write
             # lock, so this waits for that chunk to commit; a chunk not yet written is recomputed on resume.
             self.store.park(job_id, cancel=job_id in self.cancel_ids)
             raise
@@ -962,6 +1030,8 @@ class JobRunner:
         _, event = await asyncio.to_thread(self._finish_sync, job_id, status, error, result)
         if event:
             self.dispatcher.enqueue(job_id, event)
+        if status in ("failed", "cancelled"):
+            await self.settle(job_id)
 
 
 def _msg(exc: Exception) -> str:
@@ -1051,13 +1121,28 @@ async def run_chunked(
         await asyncio.sleep(0)  # let interactive requests reach the engine queue before the next chunk
 
 
+def job_records(spec: dict[str, Any], parsed: Any, payload: dict[str, Any]) -> int:
+    """How many records a job will run, for the daily quota (>= 1).
+
+    A kind may give ``"records": callable(parsed) -> int``; else the length of the parsed ``inputs`` /
+    ``requests`` / ``rows`` (the built-in kinds and ``evaluate``), else of the same payload keys.
+    """
+    if callable(spec.get("records")):
+        return max(1, int(spec["records"](parsed)))
+    for name in ("inputs", "requests", "rows"):
+        for src in (getattr(parsed, name, None), payload.get(name)):
+            if isinstance(src, list):
+                return max(1, len(src))
+    return 1
+
+
 # ------------------------------------------------------------------ built-in kinds
 
 
 class _Items(_Base):
     inputs: list[Any] = Field(description="text or any JSON per item")
     instructions: str | None = None
-    model: str = DEFAULT_MODEL
+    model: str | None = Field(None, description="default: the served model")
 
     @field_validator("inputs")
     @classmethod
@@ -1071,6 +1156,10 @@ class ClassifyJob(_Items):
     labels: Labels | None = None
     classifier: str | None = Field(
         None, description="name of a saved classify classifier (instead of labels)"
+    )
+    version: int | None = Field(None, ge=1, description="classifier version (default: the latest)")
+    classifier_version: int | None = Field(
+        None, description="set by the server: the version of `snapshot_of` that was copied"
     )
     multi_label: bool = False
     threshold: float | None = Field(None, ge=0.0, le=1.0)
@@ -1087,6 +1176,10 @@ class ClassifyJob(_Items):
 class ScoreJob(_Items):
     levels: list[str] | None = None
     classifier: str | None = Field(None, description="name of a saved score classifier (instead of levels)")
+    version: int | None = Field(None, ge=1, description="classifier version (default: the latest)")
+    classifier_version: int | None = Field(
+        None, description="set by the server: the version of `snapshot_of` that was copied"
+    )
     snapshot_of: str | None = Field(
         None, description="set by the server: the saved classifier whose definition was copied at submit"
     )
@@ -1115,20 +1208,36 @@ def _max_items(ctx: AppContext, n: int, field_name: str) -> None:
         raise ValueError(f"{field_name}: too many items (max {ctx.cfg.max_job_items}, CLEF_MAX_JOB_ITEMS)")
 
 
-def _resolve_classifier(ctx: AppContext, name: str, kind: str) -> dict[str, Any]:
+def _resolve_classifier(ctx: AppContext, name: str, kind: str, version: int | None = None) -> dict[str, Any]:
     from .classifiers import InvalidName, validate_name
 
     try:
         validate_name(name)
     except InvalidName as exc:
         raise ValueError(f"classifier: {exc}") from exc
-    doc = ctx.store.get(name)
+    doc = ctx.store.get(name) if version is None else ctx.store.get(name, version)
     if doc is None:
+        if version is not None and ctx.store.get(name) is not None:
+            raise ValueError(f"version: classifier {name!r} has no version {version}")
         raise ValueError(f"classifier: {name!r} not found")
     if doc["kind"] != kind:
         other = "score" if kind == "classify" else "classify"
         raise ValueError(f"classifier: {name!r} is a {doc['kind']} classifier; use kind={other!r}")
     return doc
+
+
+def _check_version(classifier: str | None, version: int | None) -> None:
+    if version is not None and classifier is None:
+        raise ValueError("version: only allowed with classifier")
+
+
+def payload_models(payload: dict[str, Any]) -> list[str | None]:
+    """Every ``model`` a job payload asks for (top level, and each SystemOne request)."""
+    models: list[str | None] = [payload.get("model")] if "model" in payload else []
+    reqs = payload.get("requests")
+    if isinstance(reqs, list):
+        models += [r.get("model") for r in reqs if isinstance(r, dict) and "model" in r]
+    return models
 
 
 def _tally_labels(counter: Counter[str], key: str) -> Callable[[dict[str, Any]], None]:
@@ -1159,11 +1268,12 @@ def builtin_kinds(ctx: AppContext) -> dict[str, dict[str, Any]]:
         _max_items(ctx, len(body.inputs), "inputs")
         if (body.labels is None) == (body.classifier is None):
             raise ValueError("labels: give exactly one of labels or classifier")
+        _check_version(body.classifier, body.version)
         instructions, multi, thr = body.instructions, body.multi_label, body.threshold
-        labels = body.labels
+        labels, version = body.labels, None
         if body.classifier is not None:
-            doc = _resolve_classifier(ctx, body.classifier, "classify")
-            labels = doc["labels"]
+            doc = _resolve_classifier(ctx, body.classifier, "classify", body.version)
+            labels, version = doc["labels"], doc.get("version")
             instructions = instructions if instructions is not None else doc.get("instructions")
             multi = bool(doc.get("multi_label")) if "multi_label" not in payload else multi
             thr = thr if thr is not None else doc.get("threshold")
@@ -1172,13 +1282,14 @@ def builtin_kinds(ctx: AppContext) -> dict[str, dict[str, Any]]:
         if thr is not None and not multi:
             raise ValueError("threshold: only allowed with multi_label=true")
         threshold = resolve_threshold(thr, cfg) if multi else None
+        model = ctx.check_model(body.model)
         try:
-            classify_to_systemone(body.inputs[0], labels, instructions, multi, body.model)
+            classify_to_systemone(body.inputs[0], labels, instructions, multi, model)
         except ValidationError as exc:
             raise ValueError(format_errors(list(exc.errors()))) from exc
         return _Parsed(
             inputs=body.inputs, labels=labels, instructions=instructions, multi=multi, threshold=threshold,
-            model=body.model,
+            model=model, version=version,
         )  # fmt: skip
 
     async def run_classify(ctx_: AppContext, p: _Parsed, job: JobHandle) -> dict[str, Any]:
@@ -1205,8 +1316,11 @@ def builtin_kinds(ctx: AppContext) -> dict[str, dict[str, Any]]:
         """Replace ``classifier`` by the definition it resolved to, so a resumed job never mixes versions."""
         if payload.get("classifier") is None:
             return payload
-        snap = {k: v for k, v in payload.items() if k not in ("classifier", "labels", "snapshot_of")}
+        drop = ("classifier", "version", "labels", "snapshot_of", "classifier_version")
+        snap = {k: v for k, v in payload.items() if k not in drop}
         snap.update(labels=p.labels, multi_label=p.multi, snapshot_of=payload["classifier"])
+        if p.version is not None:
+            snap["classifier_version"] = p.version
         if p.instructions is not None:
             snap["instructions"] = p.instructions
         if p.multi and p.threshold is not None:
@@ -1216,8 +1330,11 @@ def builtin_kinds(ctx: AppContext) -> dict[str, dict[str, Any]]:
     def snapshot_score(payload: dict[str, Any], p: _Parsed) -> dict[str, Any]:
         if payload.get("classifier") is None:
             return payload
-        snap = {k: v for k, v in payload.items() if k not in ("classifier", "levels", "snapshot_of")}
+        drop = ("classifier", "version", "levels", "snapshot_of", "classifier_version")
+        snap = {k: v for k, v in payload.items() if k not in drop}
         snap.update(levels=p.levels, snapshot_of=payload["classifier"])
+        if p.version is not None:
+            snap["classifier_version"] = p.version
         if p.instructions is not None:
             snap["instructions"] = p.instructions
         return snap
@@ -1230,20 +1347,24 @@ def builtin_kinds(ctx: AppContext) -> dict[str, dict[str, Any]]:
         _max_items(ctx, len(body.inputs), "inputs")
         if (body.levels is None) == (body.classifier is None):
             raise ValueError("levels: give exactly one of levels or classifier")
-        levels, instructions = body.levels, body.instructions
+        _check_version(body.classifier, body.version)
+        levels, instructions, version = body.levels, body.instructions, None
         if body.classifier is not None:
-            doc = _resolve_classifier(ctx, body.classifier, "score")
-            levels = doc["levels"]
+            doc = _resolve_classifier(ctx, body.classifier, "score", body.version)
+            levels, version = doc["levels"], doc.get("version")
             instructions = instructions if instructions is not None else doc.get("instructions")
         assert levels is not None
         if len(set(levels)) != len(levels) or any(not isinstance(x, str) or not x.strip() for x in levels):
             raise ValueError("levels: must be unique, non-empty strings")
         check_levels_count(levels, cfg.max_labels)
+        model = ctx.check_model(body.model)
         try:
-            score_to_systemone(body.inputs[0], levels, instructions, body.model)
+            score_to_systemone(body.inputs[0], levels, instructions, model)
         except ValidationError as exc:
             raise ValueError(format_errors(list(exc.errors()))) from exc
-        return _Parsed(inputs=body.inputs, levels=levels, instructions=instructions, model=body.model)
+        return _Parsed(
+            inputs=body.inputs, levels=levels, instructions=instructions, model=model, version=version
+        )
 
     async def run_score(ctx_: AppContext, p: _Parsed, job: JobHandle) -> dict[str, Any]:
         counts: Counter[str] = Counter()
@@ -1351,7 +1472,7 @@ def flatten(value: Any, prefix: str = "", csv_safe: bool = False) -> dict[str, s
 
 def router(ctx: AppContext) -> APIRouter:
     cfg, ApiError = ctx.cfg, ctx.api_error  # noqa: N806
-    store = JobStore(jobs_db(cfg))
+    store = JobStore(ctx.db)
     policy = WebhookPolicy(cfg.webhook_allow)
 
     def hook_view(job_id: str) -> dict[str, Any] | None:
@@ -1376,18 +1497,35 @@ def router(ctx: AppContext) -> APIRouter:
     ctx.on_startup.append(runner.start)
     ctx.on_shutdown.append(runner.stop)
 
-    api = APIRouter(prefix="/v1/jobs", tags=["jobs"], dependencies=ctx.auth, responses=ctx.errors)
+    api = APIRouter(prefix="/v1/jobs", tags=["jobs"], dependencies=ctx.scope("jobs"), responses=ctx.errors)
 
     def caller(request: Request) -> str | None:
         return getattr(request.state, "key_name", None)
 
     def scoped(request: Request) -> bool:
-        return cfg.auth_required
+        """Jobs are private to their owner when auth is on; admins see every job, owner-less ones included."""
+        principal = ctx.principal(request)
+        return ctx.auth_enabled() and not (principal is not None and principal.has("admin"))
+
+    async def audit_job(request: Request, action: str, row: dict[str, Any]) -> None:
+        def write() -> None:
+            with ctx.db.tx() as conn:
+                audit(
+                    conn,
+                    caller(request) or "anonymous",
+                    action,
+                    row["id"],
+                    {"kind": row["kind"], "owner": row["owner"]},
+                    request.client.host if request.client else None,
+                    ctx.request_id(request),
+                )
+
+        await run_in_threadpool(write)
 
     async def load(request: Request, job_id: str) -> dict[str, Any]:
         row = await run_in_threadpool(store.get, job_id)
         # Someone else's job is indistinguishable from a missing one.
-        if row is None or (scoped(request) and row["owner"] not in (None, caller(request))):
+        if row is None or (scoped(request) and row["owner"] != caller(request)):
             raise ApiError(404, f"job {job_id!r} not found")
         return row
 
@@ -1431,12 +1569,28 @@ def router(ctx: AppContext) -> APIRouter:
             hook = body.webhook.model_dump(exclude_none=True)
         spec = kinds[body.kind]
         payload = body.payload
+        for requested in payload_models(payload):  # a model this server does not serve: 404 before anything
+            try:
+                ctx.check_model(requested)
+            except LookupError as exc:
+                if isinstance(exc, (KeyError, IndexError)):
+                    raise
+                raise ApiError(404, str(exc)) from exc
         try:
             parsed = await run_in_threadpool(spec["validate"], payload)
             if spec.get("snapshot"):  # saved classifiers are copied into the payload now (see docs/jobs.md)
                 payload = await run_in_threadpool(spec["snapshot"], payload, parsed)
         except (ValueError, ValidationError) as exc:
             raise ApiError(400, f"payload.{_msg(exc)}") from exc
+        principal = ctx.principal(request)
+        try:  # the whole job is charged to the submit day; the unprocessed part comes back when it ends
+            reservation = ctx.quotas.reserve(principal, job_records(spec, parsed, payload))
+        except QuotaExceeded as exc:
+            request.state.quota = (exc.limit, exc.remaining)
+            raise ApiError(
+                429, str(exc), {"Retry-After": str(exc.retry_after)}, code="insufficient_quota"
+            ) from exc
+        request.state.quota = ctx.quotas.remaining(principal)
         try:
             row = await run_in_threadpool(
                 store.create,
@@ -1447,10 +1601,21 @@ def router(ctx: AppContext) -> APIRouter:
                 hook,
                 cfg.max_jobs,
                 idempotency_key,
+                ctx.model_ref(),
+                reservation.day if reservation else None,
+                reservation.n if reservation else 0,
             )
-        except JobsFull as exc:
-            raise ApiError(409, str(exc), {"Retry-After": "30"}) from exc
-        if row.get("replayed"):
+        except BaseException as exc:  # JobsFull, a DB error: nothing was queued, charge nothing
+            if reservation is not None:
+                ctx.quotas.refund(reservation, reservation.n)
+                request.state.quota = ctx.quotas.remaining(principal)
+            if isinstance(exc, JobsFull):
+                raise ApiError(409, str(exc), {"Retry-After": "30"}) from exc
+            raise
+        if row.get("replayed"):  # lost an idempotency race: the other job already holds its reservation
+            if reservation is not None:
+                ctx.quotas.refund(reservation, reservation.n)
+                request.state.quota = ctx.quotas.remaining(principal)
             response.headers["Idempotent-Replay"] = "true"
         else:
             runner.poke()
@@ -1480,7 +1645,9 @@ def router(ctx: AppContext) -> APIRouter:
         row = await load(request, job_id)
         if row["status"] in FINISHED:
             raise ApiError(409, f"job is already {row['status']}")
-        return public_job(await runner.request_cancel(row))
+        out = public_job(await runner.request_cancel(row))
+        await audit_job(request, "job.cancel", row)
+        return out
 
     @api.post(
         "/{job_id}/webhook/redeliver",
@@ -1519,7 +1686,21 @@ def router(ctx: AppContext) -> APIRouter:
         row = await load(request, job_id)
         if row["status"] in ACTIVE:
             raise ApiError(409, f"job is {row['status']}; cancel it first (POST /v1/jobs/{job_id}/cancel)")
-        await run_in_threadpool(store.delete, job_id)
+
+        def remove() -> None:
+            with ctx.db.tx() as conn:  # the delete and its audit row commit together
+                store.delete(job_id)
+                audit(
+                    conn,
+                    caller(request) or "anonymous",
+                    "job.delete",
+                    job_id,
+                    {"kind": row["kind"], "owner": row["owner"]},
+                    request.client.host if request.client else None,
+                    ctx.request_id(request),
+                )
+
+        await run_in_threadpool(remove)
         return {"deleted": job_id}
 
     @api.get(

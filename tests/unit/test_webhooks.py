@@ -11,11 +11,9 @@ from typing import Any
 
 import httpx
 import pytest
-from test_jobs import LABELS, SlowEngine, make, submit, wait
+from test_jobs import LABELS, SlowEngine, make, open_store, submit, wait
 
 from clef_server.config import Config
-from clef_server.jobs import JobStore
-from clef_server.paths import jobs_db
 from clef_server.webhooks import WebhookDispatcher, WebhookPolicy, WebhookRefused, sign
 
 PUBLIC = "93.184.216.34"
@@ -437,10 +435,10 @@ def test_progress_event_is_opt_in():
 
 def test_pending_delivery_is_retried_after_restart():
     state = tempfile.mkdtemp(prefix="clef-jobs-")
-    store = JobStore(jobs_db(Config(state_dir=state)))
+    store = open_store(Config(state_dir=state))
     hook = {"url": "https://hooks.example.com/h", "secret": "s"}
     row = store.create("classify", None, {}, None, hook, 10)
-    store.mark_running(row["id"], 0)
+    store.claim(row["id"])
     store.finish(row["id"], "succeeded")
     store.set_delivery(
         row["id"],
@@ -648,9 +646,12 @@ def test_delivery_id_is_minted_with_the_pending_record_and_survives_to_the_recei
 
 
 def test_failed_delivery_is_visible_and_can_be_redelivered():
-    client, _, app = make(**hook_cfg(), api_keys_raw="alice:ka,bob:kb")
+    from test_keys import add_key
+
+    client, _, app = make(**hook_cfg())
+    hdr = {"X-API-Key": add_key(app, "alice")}
+    other_key = add_key(app, "bob")
     rec = Recorder(404)
-    hdr = {"X-API-Key": "ka"}
     with client:
         with_receiver(app, rec)
         jid = submit(client, headers=hdr, webhook={"url": "https://hooks.example.com/clef"}).json()["id"]
@@ -661,7 +662,8 @@ def test_failed_delivery_is_visible_and_can_be_redelivered():
         assert job["webhook"]["failed_deliveries"] == 1
         assert any("failed for job.succeeded" in w and "redeliver" in w for w in job["warnings"])
         assert (
-            client.post(f"/v1/jobs/{jid}/webhook/redeliver", headers={"X-API-Key": "kb"}).status_code == 404
+            client.post(f"/v1/jobs/{jid}/webhook/redeliver", headers={"X-API-Key": other_key}).status_code
+            == 404
         )
         rec.statuses = [200]  # the receiver is fixed
         r = client.post(f"/v1/jobs/{jid}/webhook/redeliver", headers=hdr)

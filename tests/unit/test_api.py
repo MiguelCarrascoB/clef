@@ -199,7 +199,6 @@ def test_schema_example_livez_openapi(api):
         ({"questions": {"": {"type": "noul"}}}, "question ids must be non-empty"),
         ({"media_kwargs": {"max_pixels": 1}}, "media_kwargs: unknown field"),
         ({"model": 5}, "model:"),
-        ({"model": None}, "model:"),
         ({"images": ["x"] * 9}, "too many images"),
     ],
 )
@@ -1030,18 +1029,19 @@ def no_serve(monkeypatch):
         logging.getLogger(name).handlers.clear()
 
 
-def test_run_warns_when_exposed_without_key(monkeypatch, caplog, no_serve):
-    import clef_server.main as main_mod
+def test_startup_warns_when_exposed_without_key(caplog):
+    """The bind warning moved into the lifespan (D1): a DB key counts as a key, so it needs the database."""
 
-    monkeypatch.setattr(main_mod, "create_app", lambda cfg: None)
-    with caplog.at_level("WARNING", logger="clef"):
-        main_mod.run(Config(host="0.0.0.0"))
-    assert any("NO API key" in r.getMessage() for r in caplog.records)
-    caplog.clear()
-    with caplog.at_level("WARNING", logger="clef"):
-        main_mod.run(Config(host="0.0.0.0", api_key="k"))
-        main_mod.run(Config(host="127.0.0.1"))
-    assert not caplog.records
+    def started(**kw: Any) -> bool:
+        caplog.clear()
+        client, _, _ = make(**kw)
+        with caplog.at_level("WARNING", logger="clef"), client:
+            pass
+        return any("NO API key" in r.getMessage() for r in caplog.records)
+
+    assert started(host="0.0.0.0")
+    assert not started(host="0.0.0.0", api_key="k")
+    assert not started(host="127.0.0.1")
 
 
 # ------------------------------------------------------------------ graceful drain (CLEF_DRAIN_S)

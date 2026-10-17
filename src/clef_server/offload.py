@@ -27,6 +27,8 @@ from typing import Any
 
 import torch
 
+from .models.base import OffloadLayout
+
 log = logging.getLogger("clef.offload")
 
 GB = 1024**3
@@ -34,6 +36,21 @@ LAYER_PREFIX = "model.language_model.layers."
 EMBED_KEY = "model.language_model.embed_tokens"
 HEAD_KEY = "lm_head"
 _LAYER_RE = re.compile(r"^model\.language_model\.layers\.(\d+)\.")
+# The Qwen3.5 names above, as an OffloadLayout: what a layout-less caller gets. Adapters pass their own.
+DEFAULT_LAYOUT = OffloadLayout(
+    layers_prefix=LAYER_PREFIX,
+    embed_key=EMBED_KEY,
+    head_key=HEAD_KEY,
+    device_prefixes=("model.visual", "model.language_model.norm", "model.language_model.rotary_emb"),
+)
+
+
+def _layer_re(layout: OffloadLayout) -> re.Pattern[str]:
+    if layout.layers_prefix == LAYER_PREFIX:
+        return _LAYER_RE
+    return re.compile("^" + re.escape(layout.layers_prefix) + r"(\d+)\.")
+
+
 _DTYPE_BYTES = {"BF16": 2, "F16": 2, "F32": 4, "F64": 8, "I8": 1, "U8": 1, "I32": 4, "I64": 8, "BOOL": 1}
 
 
@@ -58,18 +75,15 @@ class OffloadPlan:
     def host_gb(self) -> float:
         return self.host_bytes / GB
 
-    def device_map(self, device: str) -> dict[str, str]:
+    def device_map(self, device: str, layout: OffloadLayout | None = None) -> dict[str, str]:
         """from_pretrained `device_map`: streamed layers and embeddings on the CPU, the rest on `device`."""
-        dm = {
-            "model.visual": device,
-            "model.language_model.norm": device,
-            "model.language_model.rotary_emb": device,
-            EMBED_KEY: "cpu",
-            HEAD_KEY: "cpu",
-        }
+        layout = layout or DEFAULT_LAYOUT
+        dm = {prefix: device for prefix in layout.device_prefixes}
+        dm[layout.embed_key] = "cpu"
+        dm[layout.head_key] = "cpu"
         streamed = set(self.streamed)
         for i in range(self.n_layers):
-            dm[f"{LAYER_PREFIX}{i}"] = "cpu" if i in streamed else device
+            dm[f"{layout.layers_prefix}{i}"] = "cpu" if i in streamed else device
         return dm
 
 
@@ -91,23 +105,25 @@ def checkpoint_sizes(model_path: str | Path) -> dict[str, int]:
     return sizes
 
 
-def split_sizes(sizes: dict[str, int], dtype_scale: float = 1.0) -> tuple[list[int], int, int, int]:
+def split_sizes(
+    sizes: dict[str, int], dtype_scale: float = 1.0, layout: OffloadLayout | None = None
+) -> tuple[list[int], int, int, int]:
     """(per-layer bytes, embedding bytes (embed + lm_head), other device-bound bytes, head bytes)."""
+    layout = layout or DEFAULT_LAYOUT
+    layer_re = _layer_re(layout)
     layers: dict[int, int] = {}
     embed = other = 0
     for name, size in sizes.items():
         size = int(size * dtype_scale)
-        m = _LAYER_RE.match(name)
+        m = layer_re.match(name)
         if m:
             layers[int(m.group(1))] = layers.get(int(m.group(1)), 0) + size
-        elif name.startswith((EMBED_KEY, HEAD_KEY + ".")):
+        elif name.startswith((layout.embed_key, layout.head_key + ".")):
             embed += size
         else:
             other += size
     if not layers:
-        raise ValueError(
-            "checkpoint has no model.language_model.layers.* tensors: offload does not support it"
-        )
+        raise ValueError(f"checkpoint has no {layout.layers_prefix}* tensors: offload does not support it")
     return [layers[i] for i in range(max(layers) + 1)], embed, other, 0
 
 

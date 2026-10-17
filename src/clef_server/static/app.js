@@ -1,12 +1,13 @@
 // App shell: top bar (tabs, health, settings) + screen router.
 import { html, render, useState, useEffect, useCallback } from './vendor/standalone.module.js';
 import { S, useStore, goTab, applyTheme } from './store.js';
-import { HealthPill, Settings, useHealthPolling } from './components/topbar.js';
+import { HealthPill, Settings, useHealthPolling, useWhoami } from './components/topbar.js';
 import { Playground } from './screens/playground.js';
 import { History } from './screens/history.js';
 import { Batch } from './screens/batch.js';
 import { Evaluate } from './screens/evaluate.js';
 import { Ops } from './screens/ops.js';
+import { Keys } from './screens/keys.js';
 
 const TABS = [
   { id: 'playground', label: 'Playground', view: Playground },
@@ -16,18 +17,24 @@ const TABS = [
   { id: 'ops', label: 'Ops', view: Ops },
 ];
 
+// Shown only to admins (S.whoami from /v1/whoami); the server enforces it anyway.
+const KEYS_TAB = { id: 'keys', label: 'Keys', view: Keys };
+const tabsFor = (who) => (who && who.auth && who.scopes.includes('admin') ? [...TABS, KEYS_TAB] : TABS);
+
 function App() {
-  const { tab, history } = useStore();
+  const { tab, history, whoami } = useStore();
+  const tabs = tabsFor(whoami);
   const [settingsOpen, setSettingsOpen] = useState(false);
   useHealthPolling();
+  useWhoami();
   useEffect(() => {
     const h = () => setSettingsOpen(true);
     window.addEventListener('clef:unauthorized', h);
-    const hash = () => { const t = location.hash.replace('#', ''); if (TABS.some((x) => x.id === t) && t !== S.tab) goTab(t); };
+    const hash = () => { const t = location.hash.replace('#', ''); if (tabsFor(S.whoami).some((x) => x.id === t) && t !== S.tab) goTab(t); };
     window.addEventListener('hashchange', hash);
     return () => { window.removeEventListener('clef:unauthorized', h); window.removeEventListener('hashchange', hash); };
   }, []);
-  const cur = TABS.find((t) => t.id === tab) || TABS[0];
+  const cur = tabs.find((t) => t.id === tab) || TABS[0];
   // On narrow screens the tab strip scrolls sideways: keep the active tab visible.
   useEffect(() => {
     const el = document.querySelector('.tab.active');
@@ -40,7 +47,7 @@ function App() {
     <header class="topbar">
       <div class="brand"><span class="logo" aria-hidden="true">♭</span><span class="brand-name">Clef Console</span></div>
       <nav class="tabs" aria-label="Screens">
-        ${TABS.map((t) => html`<button key=${t.id} type="button" class=${`tab ${cur.id === t.id ? 'active' : ''}`} aria-current=${cur.id === t.id ? 'page' : null}
+        ${tabs.map((t) => html`<button key=${t.id} type="button" class=${`tab ${cur.id === t.id ? 'active' : ''}`} aria-current=${cur.id === t.id ? 'page' : null}
           onClick=${() => goTab(t.id)}>${t.label}${t.id === 'history' && history.length ? html`<span class="count">${history.length}</span>` : null}</button>`)}
       </nav>
       <div class="topbar-right"><${HealthPill} /><${Settings} open=${settingsOpen} onOpen=${open} onClose=${close} /></div>

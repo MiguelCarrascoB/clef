@@ -1,4 +1,4 @@
-"""`clef` command line: serve / stop / status / logs / doctor / download / bench / open / version.
+"""`clef` command line: serve / stop / status / logs / doctor / download / bench / open / version / models.
 
 Stdlib only at import time (no torch, no httpx, no fastapi): `clef --help`, `clef version` and
 `clef doctor --no-gpu` must start fast on a machine without a GPU. Heavy modules are imported lazily
@@ -435,19 +435,39 @@ def free_gb(path: Path) -> float:
     return shutil.disk_usage(probe).free / 1e9
 
 
-def cmd_download(args: argparse.Namespace) -> int:
-    from clef_server import config, paths
+def selected_spec(model: str | None = None) -> Any:
+    """The ModelSpec `clef serve` would load (CLEF_MODEL + aliases), or `model` (`id[@rev]`) instead of
+    CLEF_MODEL. Its revision is the pin even when CLEF_MODEL_PATH is set. Raises ValueError / UnknownModel."""
+    import dataclasses
 
-    repo = os.environ.get("CLEF_MODEL_REPO", config.MODEL_REPO)
-    revision = args.revision or os.environ.get("CLEF_MODEL_REVISION", config.MODEL_REVISION)
+    from clef_server.models.registry import resolve_spec
+
+    cfg = load_config()
+    changes: dict[str, Any] = {"model_path": None}
+    if model:
+        changes["model"] = model
+    return resolve_spec(dataclasses.replace(cfg, **changes))
+
+
+def cmd_download(args: argparse.Namespace) -> int:
+    from clef_server.models import UnknownModel
+
+    try:
+        spec = selected_spec(args.model)
+    except (ValueError, UnknownModel) as exc:
+        print(f"clef: {exc}", file=sys.stderr)
+        return 2
+    repo = spec.repo
+    revision = args.revision or spec.revision or "main"
     target = args.dir or os.environ.get("CLEF_MODEL_PATH") or None
     dest = Path(target).expanduser() if target else hf_cache_dir()
     free = free_gb(dest)
-    print(f"model:       {repo}@{revision[:12]}")
+    need = max(MIN_FREE_GB, spec.weights_gb + 2.0)  # headroom for the partial download
+    print(f"model:       {spec.id} = {repo}@{revision[:12]}")
     print(f"destination: {dest}{'' if target else ' (Hugging Face cache)'}")
-    print(f"size:        about {paths.WEIGHTS_GB:.0f} GB; free space: {free:.1f} GB")
-    if free < MIN_FREE_GB:
-        print(f"clef: need at least {MIN_FREE_GB:.0f} GB free on that disk; aborting", file=sys.stderr)
+    print(f"size:        about {spec.weights_gb:.0f} GB; free space: {free:.1f} GB")
+    if free < need:
+        print(f"clef: need at least {need:.0f} GB free on that disk; aborting", file=sys.stderr)
         return 1
     if not args.yes:
         if not sys.stdin.isatty():
@@ -469,8 +489,52 @@ def cmd_download(args: argparse.Namespace) -> int:
         kwargs["local_dir"] = str(dest)
     path = snapshot_download(repo, **kwargs)  # resumable; re-running continues where it stopped
     print(f"downloaded to {path}")
+    serve = "clef serve" if spec.id == "clef-flash" else f"CLEF_MODEL={spec.id} clef serve"
     if target:
-        print(f"use it with: CLEF_MODEL_PATH={path} clef serve")
+        print(f"use it with: CLEF_MODEL_PATH={path} {serve}")
+    elif spec.id != "clef-flash":
+        print(f"use it with: {serve}")
+    return 0
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    """The model catalog (every installed adapter's ids), marking the one `clef serve` would load."""
+    from clef_server.models import UnknownModel, registry
+
+    try:
+        selected = selected_spec()
+        error = None
+    except (ValueError, UnknownModel) as exc:
+        selected, error = None, str(exc)
+    rows = []
+    for spec in registry.catalog().values():
+        rows.append(
+            {
+                "id": spec.id,
+                "adapter": spec.adapter,
+                "repo": spec.repo,
+                "revision": spec.revision,
+                "weights_gb": spec.weights_gb,
+                "selected": selected is not None and spec.id == selected.id,
+            }
+        )
+    adapters = [
+        {"name": name, "class": f"{cls.__module__}.{cls.__qualname__}", "from": registry.adapter_origin(name)}
+        for name, cls in sorted(registry.adapters().items())
+    ]
+    if args.json:
+        print(json.dumps({"models": rows, "adapters": adapters, "error": error}, indent=2))
+        return 0 if error is None else 1
+    for row in rows:
+        mark = "*" if row["selected"] else " "
+        rev = (row["revision"] or "local")[:12]
+        where = f"{row['repo'] or '-'}@{rev}"
+        print(f"{mark} {row['id']:<16} {where:<36} ~{row['weights_gb']:.0f} GB  ({row['adapter']})")
+    print("adapters: " + ", ".join(f"{a['name']} ({a['from']})" for a in adapters))
+    if error:
+        print(f"clef: {error}", file=sys.stderr)
+        return 1
+    print("select one with CLEF_MODEL=<id>[@<revision>]; fetch it with `clef download --model <id>`")
     return 0
 
 
@@ -489,6 +553,310 @@ def cmd_open(args: argparse.Namespace) -> int:
         print("clef: could not open a browser; open the URL manually", file=sys.stderr)
         return 1
     return 0
+
+
+# ---- C1: database commands (stdlib at import time; clef_server.db is imported inside each command)
+
+NEEDS_SERVER_EXTRA = "needs the server extra: pip install 'clef-local[server]'"
+
+
+def _db_module() -> Any:
+    try:
+        from clef_server import db
+    except ImportError:
+        return None
+    return db
+
+
+def cmd_db(args: argparse.Namespace) -> int:
+    db = _db_module()
+    if db is None:
+        print(f"clef db: {NEEDS_SERVER_EXTRA}", file=sys.stderr)
+        return 2
+    cfg = load_config()
+    try:
+        if args.db_command == "current":
+            url = db.database_url(cfg)
+            version = db.peek_version(url)
+            state = db.version_state(version)
+            shown = {None: "(no database yet)", "": "(empty)", "legacy": "legacy v3.1 jobs schema"}
+            print(f"database: {db.redact_url(url)}")
+            print(f"schema:   {shown.get(version, version)} (this clef expects {db.code_version()}: {state})")
+            return 0 if state == "current" else 1
+        if args.db_command == "upgrade":
+            if not cfg.database_url:
+                db.migrate_legacy_file(cfg)
+            database = db.Database(db.database_url(cfg))
+            try:
+                before = database.schema_version()
+                database.upgrade()
+                print(f"{database.display_url}: schema {before or 'none'} -> {database.schema_version()}")
+            finally:
+                database.close()
+            return 0
+        if args.db_command == "copy":
+            return _db_copy(db, cfg, args)
+    except db.DatabaseError as exc:
+        print(f"clef db: {exc}", file=sys.stderr)
+        return 1
+    return 2
+
+
+def _db_copy(db: Any, cfg: Any, args: argparse.Namespace) -> int:
+    if livez(base_url(cfg)):
+        print(
+            f"clef db copy: a clef server answers on {base_url(cfg)}; stop it first (clef stop)",
+            file=sys.stderr,
+        )
+        return 1
+    src_url, dst_url = db.normalise_url(args.source), db.normalise_url(args.target)
+    if src_url == dst_url:
+        print("clef db copy: --from and --to are the same database", file=sys.stderr)
+        return 1
+    print(f"from: {db.redact_url(src_url)}\nto:   {db.redact_url(dst_url)}")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("clef db copy: pass --yes to copy non-interactively", file=sys.stderr)
+            return 1
+        if input("Copy every table? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("aborted")
+            return 1
+    if db.peek_version(src_url) is None:
+        print(f"clef db copy: {db.redact_url(src_url)} does not exist", file=sys.stderr)
+        return 1
+    source, target = db.Database(src_url), db.Database(dst_url)
+    try:
+        copied = db.copy_database(source, target)
+    finally:
+        source.close()
+        target.close()
+    for name, n in copied.items():
+        if n:
+            print(f"  {name}: {n} row(s)")
+    print(f"copied {sum(copied.values())} row(s); point CLEF_DATABASE_URL at the target to use it")
+    return 0
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    db = _db_module()
+    if db is None:
+        print(f"clef backup: {NEEDS_SERVER_EXTRA}", file=sys.stderr)
+        return 2
+    cfg = load_config()
+    url = db.database_url(cfg)
+    if not url.startswith("sqlite"):
+        print(
+            "clef backup: the database is Postgres; back it up with pg_dump, e.g.\n"
+            f"  pg_dump --format=custom --file clef.dump '{db.redact_url(url)}'  (fill in the password)",
+            file=sys.stderr,
+        )
+        return 2
+    from sqlalchemy.engine import make_url
+
+    from clef_server.paths import database_path, state_dir
+
+    path = database_path(cfg) if not cfg.database_url else Path(make_url(url).database or "")
+    if not path.is_file():
+        print(f"clef backup: no database at {path}", file=sys.stderr)
+        return 1
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    out = Path(args.out).expanduser() if args.out else state_dir(cfg) / "backups" / f"clef-{stamp}.db"
+    if out.exists():
+        print(f"clef backup: {out} already exists", file=sys.stderr)
+        return 1
+    db.backup_sqlite(path, out)
+    print(f"backup written to {out} ({out.stat().st_size / 1e6:.1f} MB)")
+    return 0
+
+
+def cmd_classifiers(args: argparse.Namespace) -> int:
+    db = _db_module()
+    if db is None:
+        print(f"clef classifiers: {NEEDS_SERVER_EXTRA}", file=sys.stderr)
+        return 2
+    from clef_server.classifiers import ClassifierStore, InvalidName, export_file
+
+    cfg = load_config()
+    url = db.database_url(cfg)
+    try:
+        if db.peek_version(url) is None:
+            print(
+                f"clef classifiers: no database at {db.redact_url(url)} (start the server once)",
+                file=sys.stderr,
+            )
+            return 1
+        database = db.Database(url)
+        try:
+            store = ClassifierStore(database)
+            docs = [store.get(args.name)] if args.name else store.list()
+        finally:
+            database.close()
+    except InvalidName as exc:
+        print(f"clef classifiers: {exc}", file=sys.stderr)
+        return 1
+    except db.DatabaseError as exc:
+        print(f"clef classifiers: {exc}", file=sys.stderr)
+        return 1
+    if args.name and docs[0] is None:
+        print(f"clef classifiers: {args.name!r} not found", file=sys.stderr)
+        return 1
+    out = Path(args.out).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    for doc in docs:
+        assert doc is not None
+        target = out / f"{doc['name']}.json"
+        target.write_text(json.dumps(export_file(doc), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"{target} (version {doc['version']})")
+    print(f"exported {len(docs)} classifier(s) to {out}")
+    return 0
+
+
+# ---- D1: keys (direct database access; works with the server stopped: this is the bootstrap)
+
+
+def _parse_duration(text: str) -> float:
+    """``90d``, ``24h``, ``30m``, ``45s`` or plain seconds -> seconds."""
+    units = {"d": 86400.0, "h": 3600.0, "m": 60.0, "s": 1.0}
+    raw = text.strip().lower()
+    try:
+        return float(raw[:-1]) * units[raw[-1]] if raw and raw[-1] in units else float(raw)
+    except ValueError:
+        raise ValueError(f"{text!r} is not a duration (use 90d, 24h, 30m or seconds)") from None
+
+
+def _parse_expiry(text: str) -> float:
+    """``--expires``: a duration from now (``90d``) or a date (``2027-01-31``, valid through that UTC day)."""
+    from datetime import datetime, timedelta, timezone
+
+    if len(text) == 10 and text[4:5] == "-":
+        try:
+            day = datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise ValueError(f"{text!r} is not a date (YYYY-MM-DD)") from None
+        return (day + timedelta(days=1)).timestamp()
+    return time.time() + _parse_duration(text)
+
+
+def _opt_int(text: str) -> int | None:
+    """``--quota N`` / ``none``."""
+    if text.strip().lower() in ("none", "null", "off", "unlimited"):
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number (or 'none')") from None
+
+
+def cmd_keys(args: argparse.Namespace) -> int:
+    db = _db_module()
+    if db is None:
+        print(f"clef keys: {NEEDS_SERVER_EXTRA}", file=sys.stderr)
+        return 2
+    from clef_server.keystore import KeyStore, KeystoreError, Quotas, cli_actor
+
+    cfg = load_config()
+    try:
+        if not cfg.database_url:
+            db.migrate_legacy_file(cfg)
+        database = db.Database(db.database_url(cfg))
+        try:
+            database.upgrade()  # a fresh state dir works: `clef keys create` is the bootstrap
+            return _keys_command(args, KeyStore(database), Quotas(database), cfg, cli_actor())
+        finally:
+            database.close()
+    except (KeystoreError, ValueError, db.DatabaseError) as exc:
+        print(f"clef keys: {exc}", file=sys.stderr)
+        return 1
+
+
+def _keys_command(args: argparse.Namespace, store: Any, quotas: Any, cfg: Any, actor: Any) -> int:
+    cmd = args.keys_command
+    env_names = frozenset(cfg.api_keys())
+    as_json = getattr(args, "json", False)
+    # An env key is read-only, unless a DB principal of the same name exists (the server refuses its keys, so
+    # `revoke` must work on it). The server is the authority: its env may differ from this shell's.
+    if cmd in ("revoke", "update", "rotate") and args.name in env_names and store.get(args.name) is None:
+        raise ValueError(f"{args.name!r} is an env key (CLEF_API_KEY / CLEF_API_KEYS): change it there")
+    if cmd in ("create", "rotate"):
+        expires = _parse_expiry(args.expires) if args.expires else None
+        first = False
+        if cmd == "create":
+            first = not cfg.auth_required and not store.list_principals(include_disabled=True)
+            row, secret = store.create_principal(
+                args.name,
+                args.scope,
+                actor=actor,
+                daily_quota=args.quota,
+                rate_limit=args.rate_limit,
+                note=args.note,
+                expires_at=expires,
+                env_names=env_names,
+            )
+        else:
+            grace = _parse_duration(args.grace)
+            row, secret = store.rotate(args.name, actor=actor, grace_s=grace, expires_at=expires)
+        if as_json:
+            print(json.dumps({**row, "key": secret}, indent=2))
+        else:
+            verb = "created" if cmd == "create" else f"rotated (the old keys work for {args.grace})"
+            print(f"principal {row['name']!r} {verb}; scopes: {','.join(row['scopes'])}")
+            print(f"key: {secret}")
+            print("Store it now: only its hash is kept, so it cannot be shown again.")
+        if first:
+            print("auth is now required for every /v1 route", file=sys.stderr if as_json else sys.stdout)
+        return 0
+    quotas.load()
+    if cmd == "list":
+        envs = [
+            {"name": n, "source": "env", "scopes": ["admin"], "daily_quota": None, "used_today": 0}
+            | {"keys": [], "disabled_at": None}
+            for n in sorted(env_names)
+        ]
+        rows = envs + [{**r, "used_today": quotas.used(r["name"])} for r in store.list_principals(args.all)]
+        if as_json:
+            print(json.dumps({"principals": rows}, indent=2))
+        elif not rows:
+            print("no principals (auth is off); create one: clef keys create NAME --scope admin")
+        else:
+            print(f"{'NAME':<20} {'SRC':<4} {'SCOPES':<34} {'QUOTA':>9} {'USED':>8}  KEYS")
+            for r in rows:
+                keys = ", ".join(f"{k['id']} {k['status']}" for k in r["keys"]) or "-"
+                name = r["name"] + (" (disabled)" if r["disabled_at"] else "")
+                scopes = "all (env key)" if r["source"] == "env" else ",".join(r["scopes"])
+                quota = "-" if r["daily_quota"] is None else r["daily_quota"]
+                print(f"{name:<20} {r['source']:<4} {scopes:<34} {quota!s:>9} {r['used_today']:>8}  {keys}")
+        return 0
+    if cmd == "revoke":
+        store.revoke(args.name, actor=actor, key_id=args.key_id)
+        what = f"key {args.key_id} revoked" if args.key_id else f"principal {args.name!r} disabled"
+        print(what)
+        return 0
+    if cmd == "update":
+        given = vars(args)  # the update flags default to SUPPRESS: "--quota none" (None) differs from absent
+        pairs = (
+            ("scope", "scopes"),
+            ("quota", "daily_quota"),
+            ("rate_limit", "rate_limit"),
+            ("note", "note"),
+        )
+        changes = {field: given[flag] for flag, field in pairs if flag in given}
+        if not changes:
+            raise ValueError("nothing to change (give --scope, --quota, --rate-limit or --note)")
+        row = store.update_principal(args.name, changes, actor=actor)
+        print(f"updated {row['name']!r}: scopes {','.join(row['scopes'])}, quota {row['daily_quota']}")
+        return 0
+    if cmd == "usage":
+        if store.get(args.name) is None:
+            raise ValueError(f"principal {args.name!r} not found")
+        days = quotas.history(args.name, args.days)
+        if as_json:
+            print(json.dumps({"name": args.name, "days": days}, indent=2))
+        else:
+            print(f"{'DAY':<12} {'RECORDS':>10} {'REQUESTS':>10} {'REJECTED':>10}")
+            for d in days:
+                print(f"{d['day']:<12} {d['records']:>10} {d['requests']:>10} {d['rejected']:>10}")
+        return 0
+    return 2
 
 
 def cmd_version(_args: argparse.Namespace) -> int:
@@ -573,7 +941,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_doctor)
 
-    sp = sub.add_parser("download", help="download the pinned model weights (about 19 GB, resumable)")
+    sp = sub.add_parser("download", help="download the pinned model weights (clef-flash ~19 GB, resumable)")
+    sp.add_argument(
+        "--model",
+        metavar="ID[@REV]",
+        help="catalog id (`clef models`); default: the selected model (CLEF_MODEL)",
+    )
     sp.add_argument("--revision", metavar="SHA")
     sp.add_argument("--dir", metavar="DIR", help="download here instead of the Hugging Face cache")
     sp.add_argument("--yes", "-y", action="store_true", help="do not ask for confirmation")
@@ -591,6 +964,67 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("version", help="print the version")
     sp.set_defaults(func=cmd_version)
+
+    # C1: database (direct access via CLEF_DATABASE_URL or the default file; works with the server stopped)
+    sp = sub.add_parser("db", help="database: current, upgrade, copy (see docs/jobs.md)")
+    dbsub = sp.add_subparsers(dest="db_command", metavar="<db command>", required=True)
+    dbsub.add_parser("current", help="schema version and (redacted) database URL")
+    dbsub.add_parser("upgrade", help="migrate to this version's schema (the server also does it at startup)")
+    cp = dbsub.add_parser("copy", help="copy every table into an empty database (e.g. SQLite -> Postgres)")
+    cp.add_argument("--from", dest="source", required=True, metavar="URL", help="source database URL")
+    cp.add_argument("--to", dest="target", required=True, metavar="URL", help="target database URL (empty)")
+    cp.add_argument("--yes", "-y", action="store_true", help="do not ask for confirmation")
+    sp.set_defaults(func=cmd_db)
+
+    sp = sub.add_parser("backup", help="consistent copy of the SQLite database (safe while the server runs)")
+    sp.add_argument("--out", metavar="PATH", help="default <state_dir>/backups/clef-<UTC time>.db")
+    sp.set_defaults(func=cmd_backup)
+
+    sp = sub.add_parser("classifiers", help="saved classifiers: export")
+    csub = sp.add_subparsers(dest="classifiers_command", metavar="<classifiers command>", required=True)
+    ex = csub.add_parser("export", help="latest version of each as <DIR>/<name>.json")
+    ex.add_argument("--out", default="classifiers", metavar="DIR", help="default ./classifiers")
+    ex.add_argument("--name", metavar="NAME", help="only this classifier")
+    sp.set_defaults(func=cmd_classifiers)
+    # C2
+    sp = sub.add_parser("models", help="list the model catalog and installed adapters (* = selected)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_models)
+
+    # D1: keys (direct database access; the first `create` is the bootstrap)
+    sp = sub.add_parser("keys", help="API keys and principals: create, list, rotate, revoke, update, usage")
+    ksub = sp.add_subparsers(dest="keys_command", metavar="<keys command>", required=True)
+    kp = ksub.add_parser("create", help="a principal and its first key (printed once)")
+    kp.add_argument("name")
+    scopes_help = "comma-separated: classify,jobs,classifiers,ops,admin,urgent"
+    kp.add_argument("--scope", required=True, metavar="S", help=scopes_help)
+    kp.add_argument("--quota", type=int, metavar="N", help="records per UTC day (default unlimited)")
+    kp.add_argument("--rate-limit", type=int, metavar="N", help="requests/min (default CLEF_RATE_LIMIT)")
+    kp.add_argument("--expires", metavar="90d|2027-01-31", help="expiry of the key (default never)")
+    kp.add_argument("--note", metavar="TEXT")
+    kp.add_argument("--json", action="store_true")
+    kp = ksub.add_parser("list", help="principals and key statuses")
+    kp.add_argument("--all", action="store_true", help="include disabled principals")
+    kp.add_argument("--json", action="store_true")
+    kp = ksub.add_parser("rotate", help="a new key; the old ones keep working for --grace")
+    kp.add_argument("name")
+    kp.add_argument("--grace", default="24h", metavar="24h", help="how long the old keys keep working")
+    kp.add_argument("--expires", metavar="90d|2027-01-31", help="expiry of the new key")
+    kp.add_argument("--json", action="store_true")
+    kp = ksub.add_parser("revoke", help="one key (--key-id) or the whole principal")
+    kp.add_argument("name")
+    kp.add_argument("--key-id", metavar="ID")
+    kp = ksub.add_parser("update", help="scopes, quota, rate limit or note")
+    kp.add_argument("name")
+    kp.add_argument("--scope", metavar="S", default=argparse.SUPPRESS)
+    kp.add_argument("--quota", type=_opt_int, metavar="N|none", default=argparse.SUPPRESS)
+    kp.add_argument("--rate-limit", type=_opt_int, metavar="N|none", default=argparse.SUPPRESS)
+    kp.add_argument("--note", metavar="TEXT", default=argparse.SUPPRESS)
+    kp = ksub.add_parser("usage", help="daily records / requests / quota rejections")
+    kp.add_argument("name")
+    kp.add_argument("--days", type=int, default=30, metavar="N")
+    kp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_keys)
     return p
 
 

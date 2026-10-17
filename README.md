@@ -37,7 +37,7 @@ ClefClient().classify("Checkout is down", ["billing", "technical"])
 - 🖼️ **Multimodal input:** text, JSON, images and video in the same request.
 - 🔌 **Works with existing clients:** the official OpenAI SDK (structured outputs) and Hugging Face zero-shot clients run against your own machine.
 - 📏 **Measures quality on your data:** accuracy, F1, a confusion matrix and calibration (ECE, Brier), plus a coverage-vs-accuracy curve for choosing an auto-route threshold.
-- ⏱️ **Async jobs and webhooks:** up to 100,000 rows per job, persisted in SQLite and resumable after a restart, with signed callbacks guarded against SSRF.
+- ⏱️ **Async jobs and webhooks:** up to 100,000 rows per job, persisted in SQLite (or Postgres) and resumable after a restart, with signed callbacks guarded against SSRF.
 - 💻 **Runs on the hardware you have:** NVIDIA, AMD (ROCm, also under WSL2), Apple Silicon and CPU. A 24 GB card runs it as is. **16, 12 and 8 GB GPUs** work through CPU layer streaming or int8, and the cost of each option is measured.
 - 🧰 **Comes with tooling:** a `clef` CLI (`serve`, `doctor`, `download`, `bench`), typed sync and async Python clients, a JS/TS client with no dependencies, an OpenAPI schema, Docker images and service files.
 - 🔒 **Local by default:** binds to loopback only, with named API keys, per-key rate limits, SSRF guards and input caps for LAN use.
@@ -153,7 +153,7 @@ flowchart LR
         SEC["security<br/>keys · rate limit · CORS"]
         CORE["classify · score ·<br/>saved classifiers · SystemOne"]
         FEAT["feature modules via AppContext<br/>compat · evaluation · jobs + webhooks"]
-        DB[("SQLite<br/>jobs store")]
+        DB[("SQLite / Postgres<br/>jobs · classifiers")]
     end
     subgraph engine["Engine"]
         Q["request queue<br/>(tokenized on caller threads)"]
@@ -308,7 +308,7 @@ Apache-2.0, see [LICENSE](LICENSE). The model is Cloudflare's [clef-flash](https
 
 - **API compatible con OpenAI** (*structured outputs*) y con *zero-shot* de Hugging Face, además de clientes en Python (síncrono y asíncrono) y en JS/TS.
 - **Evaluación con tus propios datos:** *accuracy*, F1, matriz de confusión, calibración (ECE, Brier) y una curva cobertura-precisión para elegir el umbral de automatización. En la muestra incluida, de 47 tickets, obtuvo *accuracy* 0.87 y ECE 0.04.
-- **Trabajos asíncronos** de hasta 100 000 filas, guardados en SQLite y reanudables, con *webhooks* firmados.
+- **Trabajos asíncronos** de hasta 100 000 filas, guardados en SQLite (o Postgres) y reanudables, con *webhooks* firmados.
 - **Funciona en NVIDIA, AMD (ROCm/WSL2), Apple Silicon y CPU.** En GPUs de 16, 12 u 8 GB funciona con *offload* a CPU o int8, y el coste de cada opción está medido.
 - **Rendimiento medido en una RX 7900 XTX:** p50 de 149 ms por registro y hasta 8.9 req/s con *micro-batching*.
 - **Seguro por defecto:** solo escucha en *loopback*, con claves API con nombre, límite de peticiones y protección contra SSRF.

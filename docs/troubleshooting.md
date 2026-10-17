@@ -148,5 +148,6 @@ See [Smaller GPUs](memory.md) for the numbers.
 - **Not enough disk space**: the weights are ~19 GB; `clef doctor` and `clef download` check this up front.
 - **Where are the logs / state?** `clef logs -f`. The state directory is `~/.local/state/clef` on Linux,
   `~/Library/Application Support/clef` on macOS, `%LOCALAPPDATA%\clef` on Windows (`CLEF_STATE_DIR` overrides;
-  `CLEF_LOG_DIR` is a legacy alias). It holds `server.log`, `server.pid`, `classifiers/` and `jobs.db`.
+  `CLEF_LOG_DIR` is a legacy alias). It holds `server.log`, `server.pid` and `clef.db` (jobs and saved classifiers;
+  after an upgrade from v3.1 also `jobs.db.migrated` and `classifiers.imported/`, which you can delete).
 - **Upgrading from v2**: see the migration notes in the [CHANGELOG](../CHANGELOG.md).

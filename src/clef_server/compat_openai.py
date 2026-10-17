@@ -16,7 +16,9 @@ from .appctx import AppContext
 from .classify import resolve_threshold
 from .compat_errors import openai_error, read_json_object, route_class
 from .compat_schema import Decoded, Plan, SchemaError, build_plan, decode, messages_to_state
-from .schemas import DEFAULT_MODEL, Question, SystemOneRequest
+from .models import UnknownModel
+from .models.registry import served_model
+from .schemas import Question, SystemOneRequest
 
 log = logging.getLogger("clef.compat")
 OWNER = "cloudflare"
@@ -29,8 +31,24 @@ NO_SCHEMA = (
 )
 
 
-def _model_obj(created: int) -> dict[str, Any]:
-    return {"id": DEFAULT_MODEL, "object": "model", "created": created, "owned_by": OWNER}
+def _model_obj(engine: Any, created: int) -> dict[str, Any]:
+    """The one served model in OpenAI format, plus clef's own details."""
+    info: dict[str, Any] = {}
+    fn = getattr(engine, "model_info", None)
+    if callable(fn):
+        try:
+            info = dict(fn())
+        except Exception:
+            log.exception("engine.model_info() failed")
+    model_id = info.get("id") or served_model(engine, None)
+    clef = {
+        "adapter": info.get("adapter"),
+        "revision": info.get("revision"),
+        "ref": info.get("ref") or f"{model_id}@local",
+        "status": getattr(engine, "status", None),
+        "capabilities": info.get("capabilities"),
+    }
+    return {"id": model_id, "object": "model", "created": created, "owned_by": OWNER, "clef": clef}
 
 
 # Request fields that are accepted but have no effect on a single deterministic forward pass.
@@ -56,12 +74,13 @@ IGNORED_FIELDS = (
 
 
 def ignored_fields(body: dict[str, Any]) -> list[str]:
-    """Names of request fields clef accepted but did not use (reported as `clef.ignored`)."""
-    out = [k for k in IGNORED_FIELDS if body.get(k) is not None]
-    model = body.get("model")
-    if model is not None and model != DEFAULT_MODEL:
-        out.insert(0, "model")
-    return out
+    """Names of request fields clef accepted but did not use (reported as `clef.ignored`). `model` is never
+    ignored: an id this server does not serve is 404 `model_not_found`."""
+    return [k for k in IGNORED_FIELDS if body.get(k) is not None]
+
+
+def _not_served(request: Request, exc: UnknownModel) -> JSONResponse:
+    return openai_error(request, 404, str(exc), "model", "model_not_found", {})
 
 
 def _int_param(body: dict[str, Any], key: str) -> int | None:
@@ -144,26 +163,24 @@ def _sse(obj: Any) -> str:
 
 def router(ctx: AppContext) -> APIRouter:
     r = APIRouter(
-        prefix="/v1", dependencies=ctx.auth, responses=ctx.errors, route_class=route_class(ctx, openai_error)
+        prefix="/v1",
+        dependencies=ctx.scope("classify"),
+        responses=ctx.errors,
+        route_class=route_class(ctx, openai_error),
     )
     created_at = int(time.time())
 
-    @r.get("/models", summary="List models (OpenAI format)")
+    @r.get("/models", summary="List the served model (OpenAI format)")
     async def list_models() -> dict[str, Any]:
-        return {"object": "list", "data": [_model_obj(created_at)]}
+        return {"object": "list", "data": [_model_obj(ctx.engine, created_at)]}
 
     @r.get("/models/{model_id:path}", summary="Retrieve a model (OpenAI format)")
     async def get_model(model_id: str, request: Request) -> Any:
-        if model_id != DEFAULT_MODEL:
-            return openai_error(
-                request,
-                404,
-                f"The model '{model_id}' does not exist (clef serves '{DEFAULT_MODEL}')",
-                "model",
-                "model_not_found",
-                {},
-            )
-        return _model_obj(created_at)
+        try:  # the id, id@<revision prefix> or the Hugging Face repo of the served model
+            served_model(ctx.engine, model_id)
+        except UnknownModel as exc:
+            return _not_served(request, exc)
+        return _model_obj(ctx.engine, created_at)
 
     @r.post(
         "/chat/completions",
@@ -172,6 +189,13 @@ def router(ctx: AppContext) -> APIRouter:
     )
     async def chat_completions(request: Request) -> Any:
         body = await read_json_object(request)
+        requested = body.get("model")
+        if requested is not None and not isinstance(requested, str):
+            raise SchemaError("model must be a string", "model")
+        try:  # 404 before any work: one model per server
+            model = served_model(ctx.engine, requested)
+        except UnknownModel as exc:
+            return _not_served(request, exc)
         if _int_param(body, "n") not in (None, 1):
             raise SchemaError(
                 "n > 1 is not supported: clef returns one deterministic decision", "n", "unsupported_value"
@@ -189,7 +213,7 @@ def router(ctx: AppContext) -> APIRouter:
         state, images, videos = messages_to_state(body.get("messages"))
         try:
             sreq = SystemOneRequest(
-                model=DEFAULT_MODEL,
+                model=model,
                 state=state,
                 questions={k: Question(**q) for k, q in plan.questions.items()},
                 images=images or None,
@@ -198,8 +222,12 @@ def router(ctx: AppContext) -> APIRouter:
         except ValueError as exc:  # pydantic: message already names the field
             raise SchemaError(str(exc), None) from exc
         t0 = time.perf_counter()
-        results = await ctx.infer(request, [sreq], batch=False)
+        try:
+            results = await ctx.infer(request, [sreq], batch=False)
+        except UnknownModel as exc:
+            return _not_served(request, exc)
         res = results[0]
+        model = res.get("model") or model
         out = decode(plan, res["answers"], resolve_threshold(None, ctx.cfg))
 
         cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -217,7 +245,9 @@ def router(ctx: AppContext) -> APIRouter:
         }
         if stream:
             return StreamingResponse(
-                _stream(cid, created_at, message, finish, logprobs, usage if include_usage else None, extra),
+                _stream(
+                    cid, created_at, model, message, finish, logprobs, usage if include_usage else None, extra
+                ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -226,7 +256,7 @@ def router(ctx: AppContext) -> APIRouter:
                 "id": cid,
                 "object": "chat.completion",
                 "created": int(time.time()),
-                "model": DEFAULT_MODEL,
+                "model": model,
                 "choices": [{"index": 0, "message": message, "logprobs": logprobs, "finish_reason": finish}],
                 "usage": usage,
                 "system_fingerprint": None,
@@ -254,6 +284,7 @@ def _message(out: Decoded, tool_name: str | None, named: bool) -> tuple[dict[str
 def _stream(
     cid: str,
     created: int,
+    model: str,
     message: dict[str, Any],
     finish: str,
     logprobs: dict[str, Any] | None,
@@ -269,7 +300,7 @@ def _stream(
                 "id": cid,
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": DEFAULT_MODEL,
+                "model": model,
                 "choices": choices,
                 **more,
             }

@@ -11,6 +11,64 @@
   to load is reported unhealthy; `/livez` stays the process-up probe.
 - `CLEF_LOG_FORMAT=json` (`clef serve --log-format json`): app, uvicorn and access log lines as one JSON object per
   line (`ts`, `level`, `logger`, `msg`, `request_id`). The default `text` output is unchanged.
+- **Database layer (C1)**: jobs, saved classifiers and an audit log now live in one database: SQLite
+  `<state_dir>/clef.db` by default, or Postgres with `CLEF_DATABASE_URL=postgresql://...` (`pip install
+  'clef-local[postgres]'`; one clef server per database, enforced with an advisory lock). SQLAlchemy Core + Alembic
+  (new `server` dependencies); every start migrates the schema. On the first start `jobs.db` is copied to
+  `clef.db` (online backup API; the original becomes `jobs.db.migrated`, and a `jobs.db` still open in a running
+  v3.1 server stops the start untouched) and the `classifiers/*.json` files are imported once (the folder becomes `classifiers.imported/`).
+  New commands: `clef db current|upgrade|copy` (copy SQLite to Postgres), `clef backup` (SQLite online backup,
+  safe while serving), `clef classifiers export`. `clef doctor` checks the schema and `/health` has a `db` block.
+  A database that cannot be reached answers `503 database unavailable`.
+  The `requirements/*.txt` locks (and so the Docker images) now include sqlalchemy, alembic and the `postgres`
+  extra (psycopg 3).
+- **Versioned saved classifiers with an owner**: every `PUT /v1/classifiers/{name}` that changes the definition adds
+  a version (an identical PUT is a no-op); `GET ?version=N`, `GET /v1/classifiers/{name}/versions[/{v}]`; runs, jobs
+  and `POST /v1/evaluate` accept `"version"`, and job snapshots record `classifier_version`. The first PUT's key
+  owns the classifier: once per-key principals exist (v3.2 keys), only the owner or an admin may change or delete it.
+- Jobs record the model they were submitted for (`jobs.model`) and fail clearly when the server now serves
+  another one; a payload `model` this server does not serve is `404` at submit.
+- **Decision models (C2)**: `CLEF_MODEL=<id>[@<revision>]` picks the served model from a catalog (`clef models`):
+  `clef-flash` (default) or `clef`, the 27B (`Cloudflare/clef@0b331204`, ~55 GB; fits a 24 GB GPU only with
+  `CLEF_QUANT=nf4`, `clef doctor` warns). `clef download --model clef` fetches it. Models come from adapters
+  registered under the `clef.models` entry-point group, so a third-party package can add its own;
+  `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` keep working. `/health` and `/v1/models` report the served model
+  (adapter, revision, capabilities). `Cache-Control: no-cache` on an inference request will bypass the result
+  cache (once it lands).
+- **Keys and principals (D1)**: managed API keys (`clef keys create|list|rotate|revoke|update|usage`, the console
+  **Keys** tab, `/v1/admin/keys*`): a principal has scopes (`classify`, `jobs`, `classifiers`, `ops`, `admin`,
+  `urgent`; a missing one is `403`), an optional daily record quota (`429` + `Retry-After`, `X-Quota-Limit` /
+  `X-Quota-Remaining`; cache hits are free, a job is charged at submit and refunded for what it did not run), a
+  per-key rate limit, expiry, revocation and rotation with a 24 h grace. Keys are `clef_live_<id>_<secret>` and only
+  their SHA-256 is stored. `CLEF_API_KEY` / `CLEF_API_KEYS` stay as full-admin break-glass keys; auth turns on with
+  the first of either and never turns off by itself. `/v1/admin/*` always needs an admin key. `GET /v1/whoami`;
+  admins see every job; `GET /v1/admin/audit` lists key, job and classifier changes; classifier owners are now
+  enforced. Env keys can see each other's jobs (they are admins). Moved: the "listening on a non-loopback address
+  without a key" warning is logged at server start (it needs the database to know about managed keys).
+
+### Upgrade notes
+- **Several env keys are all admin.** Before D1, `CLEF_API_KEYS=alice:..,bob:..` meant per-key job and classifier
+  ownership. Now every env key is a full admin (decision D10, deliberate): each env key can see, cancel and delete
+  every job and read its results, edit and delete every saved classifier, mint and revoke managed keys and read the
+  audit log. Nothing breaks on upgrade, but the isolation between those keys is gone. The server logs a WARNING at
+  startup when it sees more than one env key. For separate tenants, create one managed key per tenant
+  (`clef keys create NAME --scope classify,jobs`) and keep a single env key as the operator's break-glass key.
+- **Names must not clash.** A managed key named like an env key (for example `ci` in `CLEF_API_KEYS=ci:..`) is
+  refused with `401` and a startup warning; run `clef keys revoke ci` or rename the env key.
+- **Owner-less data.** Jobs and classifiers created while auth was off (owner NULL) become admin-only to modify or
+  delete once auth is on; reading the results of an owner-less job is admin-only too. Non-admin keys can still run
+  owner-less classifiers.
+
+### Changed
+- **`model` in requests**: optional everywhere (omit it, or send null, for the served model); responses report the
+  served id. A model the server does not serve is now **404** on every route (OpenAI routes:
+  `model_not_found`) instead of being ignored; `/v1/chat/completions` no longer lists `model` in `clef.ignored`.
+  The Hugging Face path id (`/hf/models/{id}`) is still ignored. The Python and JS clients and the console no
+  longer send `model: "clef-flash"`. A `/v1/systemone` choice / score question with more than `CLEF_MAX_LABELS`
+  options is now a 400.
+- **TunableOp results are per model** (`CLEF_TUNABLEOP=1`, ROCm): they now live in
+  `<state dir>/tunableop/<model id>@<rev8>/`, so the first ROCm start after upgrading tunes again (a few minutes);
+  the old `<state dir>/tunableop_*.csv` files are no longer read and can be deleted.
 
 ### Fixed
 - **Console live stream**: a CRLF split across two network chunks was read as a blank line, which could split one

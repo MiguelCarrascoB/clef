@@ -35,6 +35,10 @@ Source = "https://github.com/MiguelCarrascoB/clef"
 [project.scripts]
 clef = "clef_server.cli:main"
 
+# C2: decision model adapters (models/registry.py). Third-party packages register theirs in the same group.
+[project.entry-points."clef.models"]
+clef-release = "clef_server.models.clef_release:ClefReleaseAdapter"
+
 # Install the server with ONE backend extra, e.g.  clef-local[server,cuda]  (see requirements/README.md).
 # `server` deliberately does not pull torch: the right torch wheel depends on the platform and GPU.
 [project.optional-dependencies]
@@ -51,6 +55,9 @@ server = [
   "huggingface_hub",
   "einops",
   "psutil",
+  # C1
+  "sqlalchemy>=2.0,<2.1",
+  "alembic>=1.13",
 ]
 # Backends: torch + the optional fast paths for that backend.
 # accelerate (device_map) and torchvision (video processor) are imported by the model code on load.
@@ -63,6 +70,8 @@ mps = ["torch>=2.6", "torchao>=0.17"]
 cpu = ["torch>=2.6", "torchao>=0.17"]
 quant = ["torchao>=0.17"]
 dev = ["pytest", "pytest-asyncio", "ruff", "httpx"]
+# C1: CLEF_DATABASE_URL=postgresql://... (docs/jobs.md)
+postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
 
 [tool.hatch.version]
 path = "src/clef_server/config.py"

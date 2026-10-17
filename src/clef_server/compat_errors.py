@@ -23,8 +23,13 @@ from .schemas import format_errors
 # format(request, status, message, param, code, headers) -> response
 Formatter = Callable[[Request, int, str, str | None, str | None, dict[str, str]], JSONResponse]
 
-_OPENAI_TYPES = {401: "invalid_request_error", 404: "invalid_request_error", 429: "rate_limit_error"}
-_OPENAI_CODES = {401: "invalid_api_key", 429: "rate_limit_exceeded"}
+_OPENAI_TYPES = {
+    401: "invalid_request_error",
+    403: "invalid_request_error",
+    404: "invalid_request_error",
+    429: "rate_limit_error",
+}
+_OPENAI_CODES = {401: "invalid_api_key", 403: "permission_denied", 429: "rate_limit_exceeded"}
 
 
 def openai_error(
@@ -32,6 +37,8 @@ def openai_error(
 ) -> JSONResponse:
     request.state.error = message
     etype = _OPENAI_TYPES.get(status, "server_error" if status >= 500 else "invalid_request_error")
+    if code == "insufficient_quota":  # a spent daily quota is not a rate limit (clients should not retry)
+        etype = "insufficient_quota"
     body = {
         "error": {
             "message": message,
@@ -68,7 +75,8 @@ def route_class(ctx: AppContext, fmt: Formatter) -> type[APIRoute]:
                     return fmt(request, exc.status_code, str(exc.detail), None, None, dict(exc.headers or {}))
                 except Exception as exc:
                     err = ctx.map_exception(exc)  # ApiError passes through; the rest is mapped / logged
-                    return fmt(request, err.status, err.detail, None, None, dict(err.headers))  # type: ignore[attr-defined]
+                    code = getattr(err, "code", None)
+                    return fmt(request, err.status, err.detail, None, code, dict(err.headers))  # type: ignore[attr-defined]
 
             return handler
 

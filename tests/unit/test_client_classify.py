@@ -86,8 +86,7 @@ def test_classify_single():
         "input": "Checkout is down",
         "labels": ["billing", "technical"],
         "instructions": "why?",
-        "model": "clef-flash",
-    }
+    }  # no `model`: the server's own
 
 
 def test_classify_multi():

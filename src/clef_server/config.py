@@ -108,8 +108,9 @@ class Config:
     # model / device
     # None = resolve: ~/models/clef-flash if it holds a release, else the pinned HF cache snapshot (paths.py)
     model_path: str | None = field(default_factory=lambda: os.environ.get("CLEF_MODEL_PATH") or None)
-    model_repo: str = field(default_factory=lambda: _str("CLEF_MODEL_REPO", MODEL_REPO))
-    model_revision: str = field(default_factory=lambda: _str("CLEF_MODEL_REVISION", MODEL_REVISION))
+    # Aliases of CLEF_MODEL (models/registry.py resolve_spec): None = the selected catalog entry's repo / pin.
+    model_repo: str | None = field(default_factory=lambda: _env("CLEF_MODEL_REPO"))
+    model_revision: str | None = field(default_factory=lambda: _env("CLEF_MODEL_REVISION"))
     device: str = field(default_factory=lambda: _str("CLEF_DEVICE", "auto").lower())  # see DEVICES
     dtype: str = field(default_factory=lambda: _str("CLEF_DTYPE", "auto").lower())  # see DTYPES
     quant: str = field(
@@ -207,6 +208,23 @@ class Config:
         default_factory=lambda: _str("CLEF_LOG_FORMAT", "text").lower()
     )  # see LOG_FORMATS
 
+    # C1: database (docs/jobs.md, ARCHITECTURE Storage). Unset = sqlite:///<state_dir>/clef.db.
+    database_url: str | None = field(default_factory=lambda: _env("CLEF_DATABASE_URL"))
+    database_pool_size: int = field(default_factory=lambda: _int("CLEF_DATABASE_POOL_SIZE", 5))
+    # C2: the decision model. CLEF_MODEL=<id>[@<revision>] from the catalog (`clef models`); None = clef-flash
+    # (or the catalog entry whose repo is CLEF_MODEL_REPO). Resolved by models.registry.resolve_spec.
+    model: str | None = field(default_factory=lambda: _env("CLEF_MODEL"))
+
+    # D3: in-memory result cache entries (docs/ARCHITECTURE.md, Result cache); 0 = off.
+    cache_size: int = field(default_factory=lambda: _int("CLEF_CACHE_SIZE", 10000))
+    # Byte budget of the same cache (estimated from the stored JSON); LRU entries go until it fits.
+    cache_mb: int = field(default_factory=lambda: _int("CLEF_CACHE_MB", 256))
+    # D2: opt-in speedups, default OFF until bench/perf_check.sh has measured them (docs/performance.md).
+    # mask_free: text batches call the backbone with attention_mask=None (right-padded + causal = exact);
+    # fast_head: sync-free, batch-vectorised joint head. Both only apply to the clef-release adapter.
+    mask_free: bool = field(default_factory=lambda: _bool("CLEF_MASK_FREE", False))
+    fast_head: bool = field(default_factory=lambda: _bool("CLEF_FAST_HEAD", False))
+
     def __post_init__(self) -> None:
         for name, value, allowed in (
             ("CLEF_DEVICE", self.device.split(":")[0], DEVICES),
@@ -229,7 +247,21 @@ class Config:
             raise ValueError("CLEF_INTERACTIVE_BURST must be >= 1")
         if self.drain_s < 0:
             raise ValueError("CLEF_DRAIN_S must be >= 0 (0 = no drain)")
+        if self.cache_size < 0:
+            raise ValueError("CLEF_CACHE_SIZE must be >= 0 (0 = off)")
+        if self.cache_mb < 0:
+            raise ValueError("CLEF_CACHE_MB must be >= 0 (0 = off)")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
+        # C2: CLEF_MODEL syntax and the @rev / CLEF_MODEL_REVISION alias (an unknown id is a load error)
+        if self.model:
+            model_id, sep, rev = self.model.strip().partition("@")
+            if sep and (not model_id or not rev):
+                raise ValueError(f"CLEF_MODEL={self.model!r} must be <id> or <id>@<revision>")
+            if rev and self.model_revision and rev != self.model_revision:
+                raise ValueError(
+                    f"CLEF_MODEL={self.model!r} and CLEF_MODEL_REVISION={self.model_revision!r} disagree; "
+                    "set only one"
+                )
 
     def api_keys(self) -> dict[str, str]:
         """name -> key (empty dict = auth disabled)."""

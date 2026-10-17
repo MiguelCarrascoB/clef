@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .config import Config
 
-DEFAULT_MODEL = "clef-flash"
+# None = the model this server serves (engine.check_model; GET /v1/models lists it). Responses report its id.
+DEFAULT_MODEL: str | None = None
 
 
 class Question(BaseModel):
@@ -55,7 +56,6 @@ class SystemOneRequest(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "model": DEFAULT_MODEL,
                     "state": {
                         "ticket": {"text": "Checkout errors, orders blocked.", "customers_affected": 1200}
                     },
@@ -73,7 +73,9 @@ class SystemOneRequest(BaseModel):
         },
     )
 
-    model: str = Field(DEFAULT_MODEL, description="Model name (only clef-flash is served)")
+    model: str | None = Field(
+        DEFAULT_MODEL, description="Model id; omit for the served one (GET /v1/models). Others: 404"
+    )
     state: Any = Field(description="Text or any JSON the decisions are based on")
     questions: dict[str, Question] = Field(description="question id -> question (at least one)")
     images: list[str] | None = Field(

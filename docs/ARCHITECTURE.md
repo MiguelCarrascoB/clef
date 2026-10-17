@@ -17,7 +17,7 @@ tests. Change it first, then the code.
 | `clef_server/engine.py` | background model load (`load_model`: standard, quantized or offloaded), single GPU worker thread, micro-batching, length bucketing, warmup |
 | `clef_server/schemas.py` | pydantic v2 SystemOne request/response models + strict validation |
 | `clef_server/classify.py` | classification API models + translation classify/score <-> SystemOne records/answers |
-| `clef_server/classifiers.py` | saved-classifier store (JSON files under `<state_dir>/classifiers/`) |
+| `clef_server/classifiers.py` | saved-classifier store (`ClassifierStore` on `db.py`: versions, owner, audit; one-time import of v3.1 JSON files) |
 | `clef_server/security.py` | multi-key auth, per-key rate limiting, CORS setup |
 | `clef_server/logs.py` | stdlib-only logging: text / JSON formatters, the request-id context, secret redaction for the access log, uvicorn's `log_config` |
 | `clef_server/media.py` | data-URL / (optional) URL fetching with SSRF guard + caps, image/video decode |
@@ -33,18 +33,18 @@ tests. Change it first, then the code.
 | `clef_server/static/` | Clef Console (zero-build Preact + htm SPA, vendored uPlot; screens in `screens/`) served at `/` |
 | `clef_client/` | sync + async Python client (`httpx`), typed classify results |
 | `clients/js/` | dependency-free ESM JS/TS client (`fetch`), Node 18+ and browsers |
-| `clef_server/db.py` (planned, v3.2) | `Database` (SQLAlchemy Core engine from `CLEF_DATABASE_URL`), transactions, Alembic upgrade, `jobs.db`→`clef.db` migration, URL redaction, `audit()` helper |
-| `clef_server/dbschema.py` (planned, v3.2) | the SQLAlchemy `MetaData` and every `Table` in this document (one place; migrations mirror it) |
-| `clef_server/migrations/` (planned, v3.2) | Alembic `env.py`, `script.py.mako`, `versions/NNNN_*.py` |
-| `clef_server/models/` (planned, v3.2) | `base.py` (`DecisionModel`, `LocalTensorAdapter`, `Capabilities`, `ModelSpec`, `UnknownModel`), `registry.py` (`clef.models` entry points, `CLEF_MODEL`), `clef_release.py` (clef-flash, clef 27B) |
+| `clef_server/db.py` | `Database` (SQLAlchemy Core engine from `CLEF_DATABASE_URL`), transactions, Alembic upgrade, `jobs.db`→`clef.db` copy, URL redaction, `audit()` helper |
+| `clef_server/dbschema.py` | the SQLAlchemy `MetaData` and every `Table` in this document (one place; migrations mirror it) |
+| `clef_server/migrations/` | Alembic `env.py`, `script.py.mako`, `versions/NNNN_*.py` |
+| `clef_server/models/` | `base.py` (`DecisionModel`, `LocalTensorAdapter`, `Capabilities`, `ModelSpec`, `UnknownModel`), `registry.py` (`clef.models` entry points, `CLEF_MODEL`), `clef_release.py` (clef-flash, clef 27B) |
 | `clef_server/keystore.py` (planned, v3.2) | principals, hashed keys, key cache, quotas (`Quotas`), on `db.py`; shared by the server and `clef keys` |
 | `clef_server/admin.py` (planned, v3.2) | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
-| `clef_server/cache.py` (planned, v3.2) | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
+| `clef_server/cache.py` | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
 | `clef_server/router.py`, `clef_server/llm.py` (planned, v3.2) | feature module: routers, label-set versions, the Review queue (`/v1/routers*`, `/v1/review*`); the OpenAI-compatible LLM client |
 | `clef_server/batches.py` (planned, v3.2) | feature module: OpenAI `/v1/files*` and `/v1/batches*` on the `batch` job kind |
 
 Invariants (unchanged from v2):
-- ONE uvicorn worker per process (one model), ONE thread ever touches the GPU (the engine worker).
+- ONE uvicorn worker per process (one model adapter, one model), ONE thread ever touches the GPU (the engine worker).
 - Python `>=3.10` (the WSL venv is 3.10): no `typing.Self`, `tomllib`, `ExceptionGroup` or other 3.11+ features.
 - Never edit files in the model directory; wrap or re-implement in the engine.
 
@@ -86,11 +86,13 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_SAMPLE_INTERVAL_S` | `2` | gauge sampling period for the time series (memory, telemetry, queue) |
 | `CLEF_INTERACTIVE_BURST` | `8` | interactive micro-batches in a row before waiting background (job) work gets one; `>= 1` |
 | `CLEF_LOG_FORMAT` | `text` | `text` or `json`: server log lines (app, uvicorn, access log); json = one object per line, see [Logging](#logging-logspy) |
-| `CLEF_DATABASE_URL` (planned, v3.2) | unset | SQLAlchemy URL. Unset: `sqlite:///<state_dir>/clef.db`. `postgresql://` / `postgres://` are normalised to `postgresql+psycopg://` (needs the `postgres` extra). See Storage |
-| `CLEF_DATABASE_POOL_SIZE` (planned, v3.2) | `5` | Postgres pool size (`max_overflow` = the same); ignored on SQLite; `>= 1` |
-| `CLEF_MODEL` (planned, v3.2) | `clef-flash` | `<id>[@<revision>]` from the model catalog (`clef-flash`, `clef`). `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` stay as aliases, see Decision model interface |
-| `CLEF_MASK_FREE` (planned, v3.2) | `0` | `1`: text batches call the backbone with `attention_mask=None` and the head uses CPU lengths (D2; becomes the default only after `bench/parity.py` passes) |
-| `CLEF_CACHE_SIZE` (planned, v3.2) | `10000` | result-cache entries (in-memory LRU); `0` = off |
+| `CLEF_DATABASE_URL` | unset | SQLAlchemy URL. Unset: `sqlite:///<state_dir>/clef.db`. `postgresql://` / `postgres://` are normalised to `postgresql+psycopg://` (needs the `postgres` extra). See Storage |
+| `CLEF_DATABASE_POOL_SIZE` | `5` | Postgres pool size (`max_overflow` = the same); ignored on SQLite; `>= 1` |
+| `CLEF_MODEL` | `clef-flash` | `<id>[@<revision>]` from the model catalog (`clef-flash`, `clef`). `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` stay as aliases, see Decision model interface |
+| `CLEF_MASK_FREE` | `0` | `1`: text batches call the backbone with `attention_mask=None` and the head uses CPU lengths (D2; becomes the default only after `bench/parity.py` passes) |
+| `CLEF_FAST_HEAD` | `0` | `1`: the batch-vectorised, sync-free joint head `fast_joint_head` (D2; same maths as the release head, opt-in until `bench/perf_check.sh` passes on the GPU) |
+| `CLEF_CACHE_SIZE` | `10000` | result-cache entries (in-memory LRU); `0` = off |
+| `CLEF_CACHE_MB` | `256` | result-cache byte budget (stored-JSON size estimate); `0` = off |
 | `CLEF_JOB_TZ` (planned, v3.2) | `UTC` | IANA zone for job windows that give no `tz` and for `CLEF_JOB_WINDOW` |
 | `CLEF_JOB_WINDOW` (planned, v3.2) | empty | default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |
 | `CLEF_JOB_ACTIVE` (planned, v3.2) | `4` | jobs that may be `running` (taking turns) at once; `>= 1` |
@@ -330,14 +332,14 @@ appears in `openapi.json`.
 | `POST /v1/evaluate`, `POST /v1/evaluate/metrics` | accuracy, F1, confusion matrix, calibration | [Evaluation](#evaluation-evaluationpy) |
 | `POST /v1/jobs`, `GET /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/results`, `POST /v1/jobs/{id}/cancel`, `DELETE /v1/jobs/{id}` | async jobs | [Jobs](#async-jobs-and-webhooks-jobspy-webhookspy) |
 | `GET /v1/stats`, `/v1/stats/timeseries`, `/v1/log`, `/v1/events` | observability (console) | below |
-| `GET /v1/classifiers/{name}/versions[/{v}]` (planned, v3.2) | classifier history | Storage |
+| `GET /v1/classifiers/{name}/versions[/{v}]` | classifier history | Storage |
 | `GET /v1/whoami`, `/v1/admin/keys*`, `GET /v1/admin/audit` (planned, v3.2) | principals, keys, quotas, audit | Keys and principals |
 | `/v1/routers*`, `/v1/review*` (planned, v3.2) | self-evolving router, human review queue | Review queue and router |
 | `/v1/files*`, `/v1/batches*` (planned, v3.2) | OpenAI Files + Batch API | OpenAI Files and Batches |
 
 ### Auth, rate limit, CORS (`security.py`)
 
-- Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration). When any key exists every `/v1/*` route, and the
+- Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration; every env key is a full admin, and startup warns when there is more than one). When any key exists every `/v1/*` route, and the
   Hugging Face routes (`/hf/models/*`, `/models/*`), need `X-API-Key: <key>` or `Authorization: Bearer <key>` (401 +
   `WWW-Authenticate: Bearer` otherwise; the OpenAI and HF routes render that in their own error shape). For SSE
   `/v1/events?key=<key>` is also accepted for plain `EventSource` clients, which cannot set headers (the console
@@ -394,7 +396,7 @@ Labels: either a list of unique non-empty strings (`["billing", "technical"]`) o
 - score -> `questions = {"score": {"type": "score", "criteria": levels, "instructions": I}}` (instructions only when
   given).
 - `state` = `input` verbatim (string or any JSON); `images`/`videos` pass through `load_media` exactly as on
-  `/v1/systemone`; `model` defaults to `"clef-flash"`.
+  `/v1/systemone`; `model` is optional (omitted or null = the served model; another id is 404).
 
 #### `POST /v1/classify`
 ```json
@@ -432,16 +434,16 @@ Errors name the index: `inputs[3]: ...`.
 - `PUT /v1/classifiers/{name}` body
   `{"kind": "classify" | "score", "labels": ... (classify), "levels": [...] (score), "instructions": str?,
   "multi_label": false, "threshold": float?, "description": str?}` -> 200 the stored definition +
-  `{"name", "created_at", "updated_at"}` (ISO-8601 UTC; `created_at` kept on overwrite). Validation as above.
+  `{"name", "created_at", "updated_at", "version", "owner", "model"}` (ISO-8601 UTC; `created_at` = version 1). A
+  changed definition adds a version, an identical one is a no-op (Storage). Validation as above.
 - `GET /v1/classifiers` -> `{"classifiers": [<definition>, ...]}` sorted by name.
 - `GET /v1/classifiers/{name}` -> the definition, 404 if missing.
 - `DELETE /v1/classifiers/{name}` -> `{"deleted": "<name>"}`, 404 if missing.
 - `POST /v1/classifiers/{name}` `{"input": ..., "images"?, "videos"?, "threshold"?}` -> the classify (or score)
   response + `"classifier": "<name>"`.
 - `POST /v1/classifiers/{name}/batch` `{"inputs": [...]}` -> the batch response + `"classifier"`.
-- Names: `^[a-z0-9][a-z0-9_-]{0,63}$` (400 otherwise). Files: `<state_dir>/classifiers/<name>.json`, path built only
-  from a validated name, written atomically (temp file + `os.replace`), at most `max_classifiers` (409 beyond).
-  Unreadable/corrupt files are skipped in the list and logged.
+- Names: `^[a-z0-9][a-z0-9_-]{0,63}$` (400 otherwise). Stored in the database (`classifiers` +
+  `classifier_versions`, see Storage), at most `max_classifiers` names (409 beyond).
 
 ### OpenAI and Hugging Face compat (`compat*.py`)
 
@@ -449,7 +451,8 @@ Guide: [openai-compat.md](openai-compat.md). Both dialects translate to ONE Syst
 through `ctx.infer`, so keys, rate limit, log, stats and limits are shared and the probabilities equal the
 equivalent `/v1/systemone` call.
 
-- `GET /v1/models` lists `clef-flash`; `GET /v1/models/{id}` returns it, any other id is 404 `model_not_found`.
+- `GET /v1/models` lists the served model; `GET /v1/models/{id}` returns it, any other id is 404 `model_not_found`
+  (details in Decision model interface).
 - `POST /v1/chat/completions`: the schema comes from `response_format` (`json_schema`) or from exactly one forced
   tool. Each top-level property becomes one question (`compat_schema.py`): string enum -> `choice`; boolean ->
   `noul` (true when P >= 0.5); integer enum, bounded integer (2..64 values) or string enum with `x-clef-ordinal` ->
@@ -499,9 +502,10 @@ Guide: [jobs.md](jobs.md).
   webhook delivery status), `GET /v1/jobs/{id}/results` (JSON pages with `next_offset`, or a full stream with
   `?format=ndjson|csv`; CSV neutralises cells starting with `=`, `+`, `-`, `@`), `POST /v1/jobs/{id}/cancel`,
   `DELETE /v1/jobs/{id}` (409 while queued or running).
-- Storage: SQLite `<state_dir>/jobs.db` (jobs, payloads, result rows, webhook deliveries). Statuses: `queued`,
-  `running`, `succeeded`, `failed`, `cancelled`, `interrupted`. One runner, FIFO, one job at a time and ONE
-  micro-batch in flight (`CLEF_MAX_MICROBATCH` records through `ctx.decide`), so interactive requests interleave.
+- Storage: the database (`ctx.db`: SQLite `<state_dir>/clef.db` or `CLEF_DATABASE_URL`; jobs, payloads, result rows,
+  webhook deliveries; see Storage). Statuses: `queued`, `running`, `succeeded`, `failed`, `cancelled`,
+  `interrupted`. One runner, FIFO, one job at a time and ONE micro-batch in flight (`CLEF_MAX_MICROBATCH` records
+  through `ctx.decide`), so interactive requests interleave.
   A job interrupted by a stop or crash resumes after its last stored row on the next start. Rows are appended in
   one transaction that reads `done` inside it, so an in-flight chunk is either stored whole or recomputed (no gap,
   no duplicate). A clean stop (lifespan shutdown) parks the running job as `interrupted` without counting it;
@@ -516,7 +520,7 @@ Guide: [jobs.md](jobs.md).
   becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
   `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
 - Ownership: with auth on, a job belongs to the key name that submitted it and other keys get 404 (also in the
-  list); jobs created while auth was off stay visible to every key.
+  list); jobs created while auth was off (owner NULL) are visible to admins only once auth is on.
 - Webhooks: events `job.succeeded`, `job.failed`, `job.cancelled` (default) and opt-in `job.progress` (at most one
   per 10 s, one attempt). Headers `X-Clef-Event`, `X-Clef-Delivery`, and with a secret `X-Clef-Timestamp` and
   `X-Clef-Signature: sha256=` HMAC-SHA256 of `"<timestamp>.<raw body>"`. 2xx = delivered; 408 / 425 / 429 / 5xx and
@@ -684,7 +688,7 @@ Rules shared by every planned section:
   coordinator can keep both sides of a conflict. `openapi.json`, `uv.lock` and `CHANGELOG.md` are regenerated or
   merged by the coordinator at the wave merge, never hand-merged.
 
-## Storage (planned, v3.2)
+## Storage
 
 Module boundary: `db.py` owns the engine, connections, transactions, migrations and URL handling. `dbschema.py` owns
 the table definitions. Stores (`JobStore` in `jobs.py`, `ClassifierStore` in `classifiers.py`, `KeyStore` in
@@ -725,17 +729,30 @@ Engine setup:
   `foreign_keys=ON`, `busy_timeout=30000`; writes are serialised by the `tx()` RLock + `BEGIN IMMEDIATE`. A new file
   is created `0600` on POSIX.
 - Postgres: `pool_size=CLEF_DATABASE_POOL_SIZE`, `max_overflow=pool_size`, `pool_pre_ping=True`. At open, a dedicated
-  connection takes `pg_try_advisory_lock(1667032422)` and holds it for the process lifetime; a second server on the
-  same DB fails with `DatabaseError("another clef server holds this database (one server per database)")`. The CLI
-  commands do not take the lock.
+  connection (its own `NullPool` engine, libpq TCP keepalives `keepalives=1`, `keepalives_idle=10`,
+  `keepalives_interval=5`, `keepalives_count=3`; never a pooled connection) takes `pg_try_advisory_lock(1667032422)`
+  and holds it for the process lifetime; a second server on the same DB fails with `DatabaseError("another clef
+  server holds this database (one server per database)")`. The CLI commands do not take the lock.
+- Lock heartbeat (`Database.start_heartbeat`, started by the lifespan): a daemon thread checks every 10 s, on the lock
+  connection, `SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND objid = <key> AND
+  granted` (an error counts as lost: the session, and so the lock, is gone). When lost, a second server may already
+  own the DB: it logs CRITICAL, sets `lock_lost` (`tx()` then raises `DatabaseError`, `claim_next` returns None) and
+  exits the process with status 3 at once (`os._exit`: no shutdown hooks, which would write), so a supervisor
+  restarts it; the restarted server takes the lock again or stops at startup.
 - `open_database` is called once in `create_app` and published as `ctx.db`. `JobStore`, `ClassifierStore` and the
   later stores receive it; nothing else opens connections. The lifespan closes `ctx.db` after the shutdown hooks
   (`runner.stop` no longer closes the store).
 
 `jobs.db` → `clef.db` (only when `CLEF_DATABASE_URL` is unset): if `<state_dir>/clef.db` does not exist and
-`<state_dir>/jobs.db` does, open `jobs.db` with `sqlite3`, run `PRAGMA wal_checkpoint(TRUNCATE)`, close it,
-`os.replace(jobs.db, clef.db)` and delete any leftover `jobs.db-wal` / `jobs.db-shm`. Logged once at INFO. When both
-files exist: a WARNING, and `clef.db` is used.
+`<state_dir>/jobs.db` does, `jobs.db` is copied, never changed in place. Open it with `sqlite3` (timeout 1 s), set
+`PRAGMA locking_mode=EXCLUSIVE` and run `BEGIN EXCLUSIVE; COMMIT` (the lock then lasts until close and fails while
+any other connection, such as a v3.1 server still running, has the file open). If that fails:
+`DatabaseError("jobs.db is in use by another process; stop the old server first")`, and nothing is touched.
+Otherwise remove a stale `clef.db.tmp`, copy with the sqlite3 online backup API into a new `0600` `clef.db.tmp`
+(it reads through `jobs.db-wal`), fsync it, `os.replace` it to `clef.db` and fsync the directory. Then close
+`jobs.db` (SQLite checkpoints and removes its WAL) and rename it `jobs.db.migrated` (`.migrated.N` if taken; a
+leftover `-wal` follows it as `jobs.db.migrated-wal`, a `-shm` is deleted). Logged once at INFO. Idempotent: with
+no `jobs.db` there is nothing to do. When both files exist: a WARNING, and `clef.db` is used.
 
 Alembic layout (`src/clef_server/migrations/`, shipped in the wheel; no `alembic.ini`, `db.py` builds the Alembic
 `Config` in code):
@@ -755,7 +772,10 @@ Alembic layout (`src/clef_server/migrations/`, shipped in the wheel; no `alembic
 
 `schema_version` (= `Database.schema_version()`) is shown in `/health` (`"db": {"dialect", "schema_version", "url":
 display_url}`), in `clef doctor` (a `database` check: connect and report the version; FAIL when the DB is behind or
-ahead of the code) and by `clef db current`. No separate table.
+ahead of the code) and by `clef db current`. No separate table. A database at a revision this code does not know
+(made by a newer clef) is not touched: `upgrade()` raises `DatabaseError("database schema <rev> is newer than this
+clef (expects <head>): upgrade clef, or point it at another database")` (serve logs it on one line and exits 3,
+`clef db upgrade` prints it and exits 1); any other Alembic `CommandError` becomes a `DatabaseError` too.
 
 Tables (new or changed by `0002`):
 
@@ -839,7 +859,11 @@ becomes version 1 with `owner` NULL and `created_by` `import`; the directory is 
 Routes (changes; every existing body stays valid):
 - `PUT /v1/classifiers/{name}` -> 200 the definition with `version`, `owner`, `model`. Owner = the caller's
   principal on the first PUT (NULL with auth off). A later PUT or DELETE by another principal is 403 unless the
-  caller has `admin`; anyone may change a classifier whose owner is NULL.
+  caller has `admin`; a classifier whose owner is NULL (created while auth was off, or imported) is admin-only to
+  change or delete once auth is on (running it stays open to `classify`). The 403 text does not name the owner. The admin test is one helper: the
+  request's `principal.has("admin")` when `request.state.principal` is set (D1), else any caller with a key is
+  admin (until D1 lands every key is an env key, and env principals have every scope), so before D1 the owner is
+  recorded but no PUT / DELETE is refused.
 - `GET /v1/classifiers/{name}?version=N`; `GET /v1/classifiers/{name}/versions` -> `{"name", "versions": [...]}`;
   `GET /v1/classifiers/{name}/versions/{v}` -> that definition. 404 for an unknown name or version.
 - `POST /v1/classifiers/{name}[/batch]`, and the `classifier` field of jobs and `POST /v1/evaluate`, accept an
@@ -853,22 +877,50 @@ clef db upgrade                          # alembic upgrade heads (the server als
 clef db copy --from URL --to URL [--yes] # every table in FK order, 1000 rows per batch; the target is upgraded
                                          # first and must be empty (exit 1 otherwise); Postgres identity sequences
                                          # are reset (setval to max); refuses while a server answers on the port
-clef backup [--out PATH]                 # SQLite: VACUUM INTO <state_dir>/backups/clef-<UTC yyyymmddThhmmssZ>.db
-                                         # (safe while the server runs); Postgres: exit 2 with a pg_dump hint
+clef backup [--out PATH]                 # SQLite: the sqlite3 online backup API into
+                                         # <state_dir>/backups/clef-<UTC yyyymmddThhmmssZ>.db (file 0600; safe
+                                         # while the server runs); Postgres: exit 2 with a pg_dump hint
 clef classifiers export [--out DIR] [--name N]   # latest version of each as <DIR>/<name>.json (today's file format
                                                  # + "version"); default DIR ./classifiers
 ```
 
 Error codes: 403 (not the owner), 404 (unknown version), 409 (`CLEF_MAX_CLASSIFIERS`), 503 `database unavailable`
-(`DatabaseError` and SQLAlchemy `OperationalError` in `map_exception`).
+(`DatabaseError` and SQLAlchemy `OperationalError`: an exception handler registered in `create_app`, plus the
+classifier routes, which map them before `map_exception`; `map_exception` itself stays C2's hunk).
 
 Invariants: payload columns stay out of list selects (the `_COLS` discipline); store APIs are sync; one writer
 transaction at a time on SQLite; the request path reaches the DB only through stores called in the threadpool.
 
-Supersedes when landed: "Storage: SQLite `<state_dir>/jobs.db`" in Async jobs, the `classifiers.py` row of the
+As built (C1; additions to the interface above, nothing in it changed):
+- `Database` also has `serialize(conn, name)` (inside `tx()`: a transaction advisory lock on Postgres for
+  check-then-write sections such as `CLEF_MAX_JOBS` / `CLEF_MAX_CLASSIFIERS`; a no-op on SQLite, where `BEGIN
+  IMMEDIATE` already serialises), `set_meta(conn, key, value)`, `acquire_server_lock()` (called by
+  `open_database`) and `info()` (the cached `/health` block; no I/O). Nested `tx()` / `read()` on the same thread
+  join the open transaction. `db.py` also holds the CLI / doctor helpers (`peek_version` opens nothing for
+  writing, `version_state`, `copy_database`, `backup_sqlite`, `migrate_legacy_file`) and `is_unavailable(exc)`.
+- `claim_next()` returns the running row plus `claimed_from` (`"queued"` | `"interrupted"`, the status before
+  the claim); `run_base_done` is set to `done` by the claim and zeroed by `reset_items`. The runner seeds
+  `cancel_ids` from the claimed row and never discards an id after a claim. `JobStore.close()` closes its
+  `Database` (tests); the server never calls it. When `claim_next` itself raises (possibly after its commit),
+  `_runner_failed(None)` calls `park_running()`: safe with one job at a time, but E1 (`CLEF_JOB_ACTIVE > 1`)
+  must replace it, since it would park jobs other tasks are still running.
+- `ClassifierStore.put` / `delete` take keyword-only `actor`, `ip`, `request_id` for the audit row (`actor`
+  defaults to `created_by`, then `"anonymous"`). The JSON import writes `classifier.put` rows with actor `import`.
+- `ClassifierStore.put` first takes `db.serialize(conn, "classifier:<name>")` (on Postgres a `SELECT ... FOR UPDATE`
+  on a name that does not exist yet locks nothing, so two first PUTs would both insert version 1), then reads the
+  head. It also takes a keyword-only `check_owner(current_owner)` callback, called inside that transaction (None
+  for a new name) that raises to refuse: the PUT route passes its 403 check there, so the ownership check and the
+  append are atomic. DELETE still checks before its own transaction.
+- `AppContext.model_ref()` / `check_model()` are methods (they read the engine's hooks at call time).
+- Job payloads of `classify` / `score` accept `version` next to `classifier`; the snapshot drops it and records
+  `classifier_version`. `EvaluateRequest` has both fields too.
+- The alembic logger is set to WARNING; `upgrade()` logs `database: schema <from> -> <to>` at INFO when it
+  changed something.
+
+Superseded (applied): "Storage: SQLite `<state_dir>/jobs.db`" in Async jobs, the `classifiers.py` row of the
 package layout, and the "Files: `<state_dir>/classifiers/<name>.json`" bullet in Saved classifiers.
 
-## Decision model interface (planned, v3.2)
+## Decision model interface
 
 Scope (D5, D6, D13, D14): one model per process, chosen by `CLEF_MODEL` and a restart. v3.2 ships one adapter,
 `clef-release`, which serves every Cloudflare-style release (`joint_schema_model.py` + `joint_head.*` next to the
@@ -914,7 +966,8 @@ class OffloadLayout:
     layers_prefix: str                        # "model.language_model.layers."
     embed_key: str                            # "model.language_model.embed_tokens"
     head_key: str                             # "lm_head"
-    device_prefixes: tuple[str, ...]          # kept on the device: vision tower, final norm, rotary, joint head
+    device_prefixes: tuple[str, ...]          # kept on the device: vision tower, final norm, rotary (the joint
+                                              # head is not in the device_map: its own module, always on device)
 
 class Encoded(Protocol):                      # opaque to the engine except these
     length: int                               # real tokens (bucketing, usage.input_tokens)
@@ -923,6 +976,7 @@ class Encoded(Protocol):                      # opaque to the engine except thes
 
 class DecisionModel(Protocol):
     name: ClassVar[str]                       # adapter (entry-point) name
+    files: ClassVar[tuple[str, ...]] = ()     # files a complete local release has (`clef doctor` checks them)
     spec: ModelSpec
     capabilities: Capabilities
     @classmethod
@@ -932,7 +986,8 @@ class DecisionModel(Protocol):
     def weights_gb(self, path: Path) -> float # from the safetensors headers
     def load(self, backend: Backend, dtype: Any) -> LoadInfo   # worker thread: standard / quantized / offloaded
     def validate(self, record: Record) -> None  # capability check, ValueError (400) naming the field
-    def info(self) -> dict                    # {"id", "adapter", "revision", "ref", "capabilities"}
+    def info(self) -> dict                    # {"id", "adapter", "revision", "ref", "capabilities"} (JSON:
+                                              # the frozensets become sorted lists)
 
 class LocalTensorAdapter(DecisionModel):     # what the engine drives
     def encode(self, record: Record) -> Encoded         # any thread (holds its own tokenizer lock);
@@ -943,7 +998,9 @@ class LocalTensorAdapter(DecisionModel):     # what the engine drives
     def to_device(self, batch: dict, device: Any) -> dict
     def forward(self, batch: dict) -> list[list[Any]]   # worker thread, inside torch.inference_mode():
                                                         # per record, per question, the option logits
-    def answer(self, enc: Encoded, question: dict, logits: Any) -> dict  # SystemOne answer (softmax inside)
+    def answer(self, q: Any, question: dict, logits: Any) -> dict
+        # one question: q = an element of enc.questions (.question_id, .option_ids), question = the record's
+        # question dict, logits = that question's option logits from forward(). SystemOne answer (softmax inside)
     def pad_id(self) -> int
     def warm_record(self, repeats: int) -> Record
     def offload_layout(self) -> OffloadLayout | None
@@ -959,6 +1016,12 @@ def create(cfg: Config) -> DecisionModel
 - `pyproject.toml`: `[project.entry-points."clef.models"] clef-release = "clef_server.models.clef_release:ClefReleaseAdapter"`.
   Built-ins register exactly like third-party adapters (D14). Entry points are only read from installed
   distributions; the adapter that loaded and its distribution version go in `/health` and the startup log.
+  One fallback: when the `clef-release` entry point is missing (a source checkout on `PYTHONPATH`, or an install
+  made before the entry point existed), `adapters()` registers the built-in directly and logs a WARNING (re-install
+  to silence it). Without it, every such checkout would fail to load any model. An entry point that fails to
+  import is skipped with a WARNING. A built-in name (`clef-release`) is only taken from an entry point whose value
+  is the built-in ref (`registry.BUILTIN`); any other entry point with that name is ignored with a WARNING, even
+  when the built-in's own entry point is missing, so a third-party package cannot take over `clef-release`.
 - Catalog (`ClefReleaseAdapter.catalog()`): `clef-flash` → `Cloudflare/clef-flash@<MODEL_REVISION>` (today's
   pin, `weights_gb` 19.0); `clef` → `Cloudflare/clef@<sha>` with the full sha taken by C2 from the HF API (never
   typed from memory), `weights_gb` from its index.
@@ -983,8 +1046,13 @@ class Engine:
     spec: ModelSpec                    # resolved at construction (torch-free)
     def model_ref(self) -> str         # spec.ref
     def check_model(self, requested: str | None) -> str
-        # None / "" -> spec.id. Accepted: spec.id, f"{spec.id}@{rev}" (full sha or a >= 7-char prefix), spec.repo.
+        # None / "" -> spec.id. Accepted: spec.id, spec.ref (e.g. "clef-flash@local"), spec.repo,
+        # f"{spec.id}@{rev}" (full sha or a >= 7-char prefix).
         # Anything else -> UnknownModel(f"model {requested!r} is not served here (this server serves {spec.id!r})")
+    def validate(self, record: Record) -> None
+        # the loaded model's capability check (ValueError -> 400); media need only be present, not decoded.
+        # main.py's prepare runs it per request after check_limits and BEFORE media decode, prefixing
+        # "<label>[i]." in batches (e.g. "batch[1].questions.d.criteria: too many options (max 64)")
     async def prepare(self, records: list[Record], cache: bool = True) -> Prepared
         # validate + check_model per record, cache lookup (D3; no-op until then), encode the misses in threads
     async def submit(self, prepared: Prepared, priority: str = "interactive") -> list[Result]
@@ -1017,7 +1085,9 @@ Perf hooks (D2, F2, wave G; nothing here changes probabilities by itself):
   backbone with `attention_mask=None` and the head slices by `batch["lengths"]` (sync-free, vectorised). Media
   batches keep the mask. Gate: `bench/parity.py` (max |dp| within the fp16 noise floor, 0 flips).
 - TunableOp results are kept per model: `PYTORCH_TUNABLEOP_FILENAME` under
-  `<state_dir>/tunableop/<spec.id>@<rev8>/` (set by `backend.prepare_environment` from `CLEF_MODEL`).
+  `<state_dir>/tunableop/<spec.id>@<rev8>/` (set by `backend.prepare_environment` from `CLEF_MODEL`, through
+  `registry.model_slug(environ)`: the `resolve_spec` rules over the built-in catalog, so
+  `CLEF_MODEL_REPO=Cloudflare/clef` alone gives the 27B's slug; `@local` with `CLEF_MODEL_PATH` and no revision).
 - Graph capture (wave G) belongs in `forward`, keyed by `(batch["input_ids"].shape)`; warmup already visits every
   bucket <= 1024 at batch sizes {1, max_microbatch}.
 - F2 tokenizes ahead with `ctx.prepare` (below): encoding is not "in flight"; only `submit` enqueues.
@@ -1056,11 +1126,28 @@ lacks, more options than `max_options`); 413 `InputTooLarge`; 503 not ready / OO
 Invariants: ONE GPU worker thread, ONE adapter per process; the adapter never edits files in the model dir; every
 result for a record is computed by exactly one `forward` call (cache hits excepted).
 
-Supersedes when landed: "ONE uvicorn worker per process (one model)" (becomes "one adapter"), the engine's
-`loader` / `load_release_model` wording in Engine interface, "`GET /v1/models` lists `clef-flash`" and "`model`
-defaults to `"clef-flash"`" in the Classification and Compat sections.
+As built (C2), beyond the text above:
+- `Engine.model_info()` (the adapter's `info()` or the spec before the load, plus `distribution`: the adapter's
+  `<dist> <version>`) feeds `/health` `model` and the `clef` block of `/v1/models`; `Engine.capabilities()` feeds
+  `fast_path`. `Engine.model` is set only after a successful load (prepare / submit raise EngineNotReady before).
+- `"model": null` is accepted and means the served model (`schemas.DEFAULT_MODEL` is None; clients omit the field).
+- `models.registry.served_model(engine, requested)` is the check main.py, compat_openai and evaluation use: it
+  calls `engine.check_model` and, for test engines without one, returns `requested or "clef-flash"`.
+- Capability validation applies `max_options` (= `CLEF_MAX_LABELS`, 64) to `/v1/systemone` questions too, so a
+  choice / score question with more options is now a 400 there as well.
+- `ClefReleaseAdapter.encode` returns `ReleaseEncoded(raw, length, is_media)`, which also exposes `input_ids` /
+  `media` for the bench scripts; `collate` keeps the release's `"records"` key (its head reads it).
+- The 27B catalog entry is `Cloudflare/clef@0b331204bb13fbd2ca93a64df1956f5b55478ce5` (HF API `sha`, 2026-10-17),
+  `weights_gb` 55.0 (index `total_size` + joint head, measured like clef-flash's 19.0), and carries
+  `options["fits_24gb"] = "nf4"`, which `clef doctor` turns into its WARN (also with `--no-gpu`).
+- The TunableOp directory is created by the engine before the load (prepare_environment does no I/O).
+- Saved-classifier runs (`/v1/classifiers/{name}[/batch]`) take `model` from the request body.
 
-## Keys and principals (planned, v3.2)
+Superseded (applied): "ONE uvicorn worker per process (one model)" (now "one model adapter"), "`GET /v1/models`
+lists `clef-flash`" and "`model` defaults to `"clef-flash"`" in the Classification and Compat sections. The
+`load_release_model` wording in Engine interface stays: the engine still calls the release's `load_release_model`.
+
+## Keys and principals
 
 Model: a **principal** is a name with scopes, a daily quota and a status; it owns jobs, classifiers, routers, files
 and batches (all keyed by name, as `jobs.owner` is today). A principal has 1 to 5 active **keys** (overlapping
@@ -1110,8 +1197,10 @@ CREATE TABLE api_usage (
     PRIMARY KEY (principal, day)
 );
 ```
-Every write to `api_principals` / `api_keys` bumps `clef_meta.keys_gen` in the same transaction. Key actions are
-written to `audit_log` (Storage) in the same transaction.
+Every write to `api_principals` / `api_keys` bumps `clef_meta.keys_gen` in the same transaction, except the
+`last_used_at` flush (it would reload every cache every 10 s under traffic). Key actions are
+written to `audit_log` (Storage) in the same transaction. CORS (`security.install_cors`) gains `PATCH` in
+`allow_methods` and `X-Quota-Limit`, `X-Quota-Remaining` in `expose_headers`.
 
 Scopes: `classify`, `jobs`, `classifiers`, `ops`, `admin`, `urgent`. `admin` implies all the others.
 
@@ -1167,8 +1256,10 @@ class QuotaExceeded(Exception):
 
 class Quotas:                            # keystore.py; in-memory and authoritative (one server per DB)
     def reserve(self, principal: Principal | None, n: int) -> Reservation | None
-        # None for env principals / auth off / no quota. Raises QuotaExceeded when used_today + n > daily_quota.
-        # Records the reservation on today's UTC row at once.
+        # None for env principals / auth off. A DB principal without a quota still gets a Reservation: usage is
+        # counted (Keys tab, used_today) but never refused. Raises QuotaExceeded when daily_quota is set and
+        # used_today + n > daily_quota. Records the reservation on today's UTC row at once.
+    def remaining(self, principal: Principal | None) -> tuple[int, int] | None   # (limit, left); None = no quota
     def refund(self, reservation: Reservation, n: int) -> None   # n <= reservation.n; same day row
     def used(self, name: str, day: str | None = None) -> int
     def reject(self, name: str) -> None                          # api_usage.rejected += 1
@@ -1183,8 +1274,11 @@ class Reservation:
 Request path: `require_key` sets `request.state.principal` (or `None` with auth off) and keeps
 `request.state.key_name = principal.name` (log, `by_key`, job owner, rate-limit identity unchanged). The rate
 limiter uses `principal.rate_limit or CLEF_RATE_LIMIT`. `ctx.infer` calls `ctx.quotas.reserve(principal, len(reqs))`
-before inference and refunds the whole reservation when the request ends in a 5xx. Cache hits do NOT count: the
-reservation is settled after the cache lookup and only computed records are charged (hits cost no GPU time). Every quota'd response carries `X-Quota-Limit` and `X-Quota-Remaining`. Over quota:
+before inference and refunds the whole reservation when the request ends in an error (nothing was computed for a
+4xx raised before the engine either; a partly computed failure is rare enough to ignore). Cache hits do NOT count:
+the reservation is settled after the cache lookup (`ctx.prepare`) and only computed records are charged (hits
+cost no GPU time). Every response of a quota'd principal to a route that reserves carries `X-Quota-Limit` and
+`X-Quota-Remaining` (also on the 429; CORS exposes them). Over quota:
 429 `daily quota exceeded (N records/day)` + `Retry-After` (OpenAI shape `insufficient_quota`). Jobs reserve at
 submit (Job scheduler).
 
@@ -1208,8 +1302,13 @@ principal even when auth is off: 401 `admin routes need a key: set CLEF_API_KEY 
 
 Errors: 400 bad name (`KEY_NAME_RE`) or unknown scope; 404 unknown principal or key id; 409 name exists, is a
 tombstone (disabled names are never reused, D19), or equals an env key name; 409 a 6th active key; 403 changing an
-env principal, or a DB admin removing its own `admin` scope / revoking its own last key without `?force=true`.
-Startup logs a WARNING for an env name that is also a DB principal (the env key wins).
+env principal that has no DB row of the same name, or a DB admin removing its own `admin` scope / revoking its own last key without `?force=true`.
+A DB principal whose name equals an env key name is **refused**: `Authenticator.resolve` answers 401 for its keys
+(otherwise it would inherit the env principal's job / classifier ownership and rate-limit bucket), and startup logs
+a WARNING naming the clash (fix: `clef keys revoke NAME` or rename the env key). The admin API and the CLI still act
+on that DB row (revoke, rotate, update), so it can be cleaned up; a pure env key stays read-only. The server is the
+authority: the CLI reads the env of the shell it runs in, which can differ from the server's, and the server
+decides at request time.
 
 CLI (`clef keys`, direct DB, works with the server stopped; the first DB principal turns auth on and the command
 prints `auth is now required for every /v1 route`; secrets are printed once):
@@ -1233,11 +1332,45 @@ Invariants: no plaintext secret is ever stored or logged; the request path does 
 row is never deleted; env keys always work and are always admin; auth, once on because of a DB principal, never
 turns off by itself.
 
-Supersedes when landed: the Keys bullet of "Auth, rate limit, CORS" (`KeyAuth`, "auth off -> `key` is `null`"), the
-`security.py` row's "multi-key auth", and "jobs created while auth was off stay visible to every key" (still true)
-plus "other keys get 404" (admins now see all).
+As built (D1; additions and deviations, nothing above changed in meaning):
+- `Principal`, `ALL_SCOPES` and the key helpers live in `keystore.py`; `security.Authenticator` composes the old
+  `KeyAuth` (kept, now only the constant-time env walk) with the `KeyCache`.
+- `ctx.scope(*names)` returns one dependency that also runs `require_key`; no names = any valid key (`/v1/whoami`).
+  The callable carries `clef_scope = names`: the default-deny test (`tests/unit/test_keys.py`) looks for it on every
+  `/v1/*`, `/hf/*`, `/models/*` route (newer FastAPI keeps included routers lazy, so it walks
+  `effective_route_contexts()`). New routes in other workstreams (E2's routers and review, F1's files and batches)
+  fail that test until they use `ctx.scope`.
+- Wiring: `create_app` builds `KeyCache` and `Quotas` and loads both synchronously (auth is right from the first
+  request, also in tests that never start the lifespan). Their background tasks start from the first `on_startup`
+  hook (so `recover()` in jobs can refund into loaded counters) and stop from the last-running `on_shutdown` hook,
+  which flushes usage and `last_used_at`. A failed reload keeps the last good cache.
+- `Quotas`: `reserve` returns a `Reservation` for every DB principal (usage is counted even without a quota) and
+  counts `requests` / `rejected` itself. The flush is UPDATE-then-INSERT per row in one transaction (portable;
+  a refund below the stored count clamps at 0), not a dialect upsert. `history(name, days)` is zero-filled and
+  merges unflushed deltas; `remaining(principal)` feeds the headers. `flush` holds a dedicated lock for the whole
+  write, so the shutdown flush waits for a periodic one still running and never writes the same delta twice.
+  Quota counters live in one process's memory, so they are exact only because the Postgres advisory lock
+  (`PG_LOCK_KEY`, see Database) refuses a second server on the same database; SQLite is one file in one state
+  dir. Do not bypass the lock (for example by running two servers against one database).
+- `ctx.infer`: reserve `len(reqs)` before any work (429 `insufficient_quota`), `ctx.prepare` (cache lookup),
+  refund `len(prepared.hits)`, then `decide_prepared`. Any exception (4xx before the engine included) refunds what
+  is still held. Headers come from `request.state.quota`, added by `GuardMiddleware` for every route.
+- Jobs: `JobStore.create(..., quota_day, quota_reserved)`; the count per kind is `jobs.job_records` (a kind may
+  give `"records": fn(parsed)`). `JobStore.settle_quota(job_id=None)` refunds `quota_reserved - done` of failed /
+  cancelled jobs once (it then sets `quota_reserved = done`, the net charge). The runner calls it after every
+  failed / cancelled finish and for all jobs at startup. Cache hits inside jobs are not refunded (the whole job is
+  reserved at submit); E1 may refine that. `job.cancel` is audited after the cancel, `job.delete` in the delete's
+  own transaction. Admins see every job (`scoped = auth_enabled and not admin`).
+- `ApiError` has an optional `code` (OpenAI `insufficient_quota`; type `insufficient_quota` too); 403 renders as
+  `permission_denied`.
+- `bind_warning(cfg, auth_enabled)` runs in the lifespan and mentions `clef keys create`.
+- CLI: `clef keys` also has `update` and `usage`; `--expires` takes `90d` or a date (valid through that UTC day).
 
-## Result cache (planned, v3.2)
+Supersedes when landed: the Keys bullet of "Auth, rate limit, CORS" (`KeyAuth`, "auth off -> `key` is `null`"), the
+`security.py` row's "multi-key auth", and "jobs created while auth was off stay visible to every key" (no longer: owner-less jobs are
+admin-only) plus "other keys get 404" (admins now see all).
+
+## Result cache
 
 Module boundary: `cache.py` holds `ResultCache`; the engine owns the only instance (`Engine.cache`, built from
 `cfg.cache_size` in `__init__`) and uses it in `Engine.prepare` (lookup) and `Engine.submit` (store). Nothing else
@@ -1245,31 +1378,46 @@ reads or writes it, so interactive routes, jobs, evaluate, batches and the route
 
 ```python
 class ResultCache:
-    def __init__(self, capacity: int = 10000) -> None     # capacity 0 = disabled (every call is a no-op)
-    def key(self, model_ref: str, record: Record) -> str | None
+    def __init__(self, capacity: int = 10000, max_bytes: int = 256 << 20) -> None  # capacity or max_bytes 0 = disabled
+    enabled: bool
+    @staticmethod
+    def key(model_ref: str, record: Record) -> str | None
         # None (not cacheable) when the record has images or videos.
         # Else sha256 hex of canonical JSON (sort_keys=True, separators=(",", ":"), ensure_ascii=False) of
-        # {"m": model_ref, "s": record["state"], "q": record["questions"]}: the state verbatim, every question with
-        # its type, instructions and criteria. Thresholds, the request id and the label order of a multi-label
-        # response are applied after the model and are not in the key.
-    def get(self, key: str) -> Result | None             # moves the entry to the MRU end
-    def put(self, key: str, result: Result) -> None       # stores the result without "timing"; evicts the LRU entry
-    def stats(self) -> dict                               # {"size", "capacity", "hits", "misses", "bypassed"}
+        # {"m": model_ref, "s": record["state"], "q": [[qid, question], ...]}: the state verbatim (the release sorts
+        # it), the questions as an ORDERED list with each choice `criteria` as an ordered [[key, text], ...] list,
+        # because the release lays out questions and options in dict order (a different order is a different forward). `model_ref` is `<id>@<revision>`. Thresholds, the request id and the
+        # label order of a multi-label response are applied after the model and are not in the key.
+    def get(self, key: str) -> Result | None             # a private copy; moves the entry to the MRU end
+    def put(self, key: str, result: Result) -> None       # stores a copy without "timing"; evicts the LRU entry
+    def note_bypass(self, n: int = 1) -> None             # counts lookups skipped (no-cache, media)
+    def clear(self) -> None
+    def stats(self) -> dict   # {"enabled", "size", "capacity", "bytes", "max_bytes", "hits", "misses", "bypassed", "evictions"}
 ```
 
 Semantics:
-- Thread-safe (`threading.Lock`); in memory only, lost on restart. No invalidation: the questions are in the key,
-  and a model change needs a restart (D6).
-- A hit returns the stored result with `usage` as stored (the original `input_tokens`) and `timing` =
-  `{"queue_ms": 0, "forward_ms": 0, "batch_size": 0, "cached": true}` (main adds `total_ms`). Misses carry
-  `"cached": false`. Probabilities are bit-identical to the stored forward.
+- Bounds: `CLEF_CACHE_SIZE` entries and `CLEF_CACHE_MB` bytes (running estimate: `len(json.dumps(stored))`). `put`
+  evicts LRU entries until both hold and skips an entry larger than 1/10 of the byte budget. Memory is about the
+  budget (default 256 MiB at most; typical entries are 1-2 KB so 10000 entries are tens of MB).
+- Thread-safe (`threading.Lock`); in memory only, lost on restart. No invalidation: the questions and the model
+  ref are in the key, and the engine also clears the cache when its model loads.
+- A hit returns a copy of the stored result with `usage` as stored (the original `input_tokens`) and `timing` =
+  `{"queue_ms": 0, "forward_ms": 0, "batch_size": 0, "cached": true}` (main adds `total_ms`). Computed records carry
+  `"cached": false`. **`timing.cached` is the per-record hit marker** for quotas and the request log.
+  Probabilities are bit-identical to the stored forward.
 - Bypass: a request with `Cache-Control: no-cache` (case-insensitive token anywhere in the header) skips the
   lookup and still stores the fresh result. `ctx.infer` reads the header and passes `cache=False` down
-  (`ctx.decide(..., cache=False)` → `engine.prepare(records, cache=False)`); background callers pass it explicitly.
-- Identical records inside one call are computed once (the later ones are filled from the first after the forward).
-- Quotas count cached records like computed ones; the request log and stats count the request as usual.
-- `/v1/stats` gains `"cache": ResultCache.stats() + {"hit_rate"}` (from `Stats.snapshot`, which reads
-  `engine.cache_stats()` when the engine has it).
+  (`ctx.decide(..., cache=False)` -> `engine.prepare(records, cache=False)`); background callers pass it explicitly.
+- Identical records inside one call are computed once; the later ones are filled from the first after the forward
+  and are marked as hits and counted as hits in the stats (`Prepared.dups`; `Prepared.slice` turns a dup whose source was sliced away into a miss).
+- Only successful forwards are stored (`submit` stores them even if a sibling failed). Errors, OOM and media records
+  are never cached.
+- Quotas (contract decision 3): cache hits do **not** count. D1 charges only the results whose
+  `timing.cached` is false. The request log and stats count the request as usual.
+- `/v1/stats` gains `"cache": Engine.cache_stats() + {"hit_rate"}`. The engine registers `cache_stats` with
+  `Stats.set_cache_source` at construction; `Stats.snapshot` reads it. `hit_rate` = hits / (hits + misses).
+- Memory: about 2 KB per entry for a 10-option question (measured, ~20 MB for 10 000 entries); more questions or
+  options scale it linearly.
 
 Env: `CLEF_CACHE_SIZE` (Configuration). Tables: none. Routes: none (header only). Error codes: none.
 
@@ -1638,9 +1786,9 @@ existing tests a contract change forces. Every workstream may append to `CHANGEL
 
 | WS | Creates | Modifies |
 | --- | --- | --- |
-| C1 DB | `db.py`, `dbschema.py`, `migrations/**` | `jobs.py` (store port, `claim_next`, `jobs.model`, payload `model` default + submit check, `classifier_version`), `classifiers.py`, `classify.py` (`version` on `ClassifierRunRequest` / `ClassifierBatchRequest` only), `evaluation.py` (`version` next to `classifier` on `EvaluateRequest` and its `ctx.store.get` lookup only), `main.py` (create_app: `open_database`, store wiring, `AppContext(...)` db/model fields; classifier routes; `/health` `db`; lifespan close), `appctx.py` (`db`, `model_ref`, `check_model`), `paths.py` (`database_path`, legacy rename), `config.py` (`CLEF_DATABASE_*`), `cli.py` (`db`, `backup`, `classifiers export`), `doctor.py` (database check), `pyproject.toml` (sqlalchemy, alembic, `postgres` extra), `docker-compose.yml` (comment), `docs/jobs.md`, `SECURITY.md` |
+| C1 DB | `db.py`, `dbschema.py`, `migrations/**` | `jobs.py` (store port, `claim_next`, `jobs.model`, payload `model` default + submit check, `classifier_version`), `classifiers.py`, `classify.py` (`version` on `ClassifierRunRequest` / `ClassifierBatchRequest` only), `evaluation.py` (`version` and the server-set `classifier_version` next to `classifier` on `EvaluateRequest`, its `ctx.store.get` lookup, and the `classifier_version` line in `snapshot_job`), `main.py` (create_app: `open_database`, store wiring, `AppContext(...)` db/model fields; classifier routes; `/health` `db`; lifespan close), `appctx.py` (`db`, `model_ref`, `check_model`), `paths.py` (`database_path`, `jobs_db` kept for the legacy copy; the copy and its locking live in `db.py`), `config.py` (`CLEF_DATABASE_*`), `cli.py` (`db`, `backup`, `classifiers export`), `doctor.py` (database check), `pyproject.toml` (sqlalchemy, alembic, `postgres` extra), `docker-compose.yml` (comment), `docs/jobs.md`, `SECURITY.md` |
 | C2 models | `models/__init__.py`, `models/base.py`, `models/registry.py`, `models/clef_release.py` | `engine.py`, `offload.py`, `backend.py` (TunableOp path per model, `fast_path` from capabilities), `paths.py` (`resolve_model_path(spec)`, `WEIGHTS_GB`), `config.py` (`CLEF_MODEL`, aliases), `schemas.py`, `classify.py`, `evaluation.py` (`model`), `compat_openai.py`, `compat_hf.py`, `main.py` (`infer` / `decide` / `prepare` region, `Cache-Control` read, `map_exception` UnknownModel, `/health` `model`, OpenAPI title, `/schema-example`), `appctx.py` (`prepare`, `decide_prepared`), `doctor.py` (model files from the adapter), `cli.py` (`download --model`, `models`), `pyproject.toml` (entry points), `clef_client/*`, `clients/js/*`, `static/screens/{playground,batch}.js`, `static/util.js`, `bench/parity.py` |
-| D1 keys | `keystore.py`, `admin.py`, `static/screens/keys.js` | `security.py`, `main.py` (auth / rate-limit region, `ctx.scope` on core routes, quota in `infer`, `FEATURES` += `admin`, `AppContext(...)` D1 fields, 403 in `ERRORS`), `appctx.py`, `jobs.py` (scopes, admin view, `auth_enabled`, audit calls), `compat_openai.py`, `compat_hf.py`, `compat_errors.py` (403), `evaluation.py` (scopes), `cli.py` (`keys`), `config.py` (none expected), `static/app.js`, `static/api.js`, `static/components/topbar.js`, `docs/remote-access.md`, `SECURITY.md` |
+| D1 keys | `keystore.py`, `admin.py`, `static/screens/keys.js` | `security.py`, `main.py` (auth / rate-limit region, `ctx.scope` on core routes, quota in `infer`, `FEATURES` += `admin`, `AppContext(...)` D1 fields, 403 in `ERRORS`), `appctx.py`, `jobs.py` (scopes, admin view, `auth_enabled`, audit calls, quota reserve at submit and refund when a job ends: `JobStore.create(quota_day, quota_reserved)`, `JobStore.settle_quota`), `compat_openai.py`, `compat_hf.py`, `compat_errors.py` (403), `evaluation.py` (scopes), `cli.py` (`keys`), `config.py` (none expected), `static/app.js`, `static/api.js`, `static/components/topbar.js`, `static/styles.css` (an appended `/* D1 */` block), `docs/remote-access.md`, `SECURITY.md` |
 | D2 perf | `bench/` scripts as needed | `models/clef_release.py` (forward, head), `backend.py` (`prepare_environment`), `config.py` (`CLEF_MASK_FREE`), `docs/performance.md`, `docs/hardware-results.md` |
 | D3 cache | `cache.py` | `engine.py` (`prepare` / `submit` cache calls, `cache_stats`), `stats.py` (`cache` block), `config.py` (`CLEF_CACHE_SIZE`) |
 | E1 scheduler | | `jobs.py`, `evaluation.py` (`job.decide`), `config.py` (`CLEF_JOB_*`), `pyproject.toml` (`tzdata`), `clef_client/*`, `clients/js/*` (job fields), `static/screens/batch.js` (job fields, optional), `docs/jobs.md` |
@@ -1655,7 +1803,7 @@ Same-wave shared files and how they split:
 | C | `main.py` | C1: `create_app` store / DB construction, the `AppContext(...)` call, classifier routes, `/health` `db` key, lifespan close. C2: `map_exception`, `infer` / `decide` / `prepare`, `/health` `model` key, title, `/schema-example`. Distinct hunks; the two `/health` keys are adjacent lines (keep both). C2 passes its new ctx fields by appending keyword arguments at the end of the `AppContext(...)` call |
 | C | `appctx.py` | append-only: C1 adds `db`, `model_ref`, `check_model`; C2 adds `prepare`, `decide_prepared`. The `model_ref` / `check_model` hook lets C1 store and validate models in `jobs.py` without C2 touching it (C2 implements `Engine.model_ref` / `check_model`; fakes fall back) |
 | C | `jobs.py` | C1 only. C2 must not edit it; the model default and the submit 404 are C1's, through `ctx.check_model` |
-| C | `classify.py`, `evaluation.py` | C1: only the classifier `version` field (`ClassifierRunRequest`, `ClassifierBatchRequest`, `EvaluateRequest`) and the versioned `store.get(name, version)` lookup. C2: the `model` fields / defaults and the evaluate `model` check. Different fields; each adds its field on its own line |
+| C | `classify.py`, `evaluation.py` | C1: only the classifier `version` field (`ClassifierRunRequest`, `ClassifierBatchRequest`, `EvaluateRequest`, plus `classifier_version` on `EvaluateRequest`), the versioned `store.get(name, version)` lookup and the `classifier_version` line of the evaluate `snapshot_job`. C2: the `model` fields / defaults and the evaluate `model` check. Different fields; each adds its field on its own line |
 | C | `config.py`, `pyproject.toml` | append-only blocks (`# C1`, `# C2`); different sections of `pyproject.toml` (extras vs `[project.entry-points]`) |
 | C | `paths.py` | C1: state-dir / DB helpers (new functions). C2: `resolve_model_path`, `WEIGHTS_GB`, `MODEL_MARKER`. Different functions |
 | C | `cli.py` | C1: new `db`, `backup`, `classifiers` subparsers and `cmd_*` functions. C2: the `download` parser + `cmd_download`, new `models` subparser. New subparsers are appended in `build_parser` in that order (C1 block, then C2 block) |

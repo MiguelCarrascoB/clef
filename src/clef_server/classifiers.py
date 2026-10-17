@@ -1,24 +1,34 @@
-"""Saved-classifier store: one JSON file per classifier under `<state_dir>/classifiers/`.
+"""Saved-classifier store: versioned definitions with an owner, in the database (``classifiers`` +
+``classifier_versions``).
 
-Paths are only ever built from a validated name; writes are atomic (temp file in the same dir + `os.replace`).
+Every PUT appends a version (1, 2, ...; never reused while the name exists); a definition equal to the latest
+is a no-op. ``get`` returns the latest unless a version is asked for. The v3.1 JSON files
+(``<state_dir>/classifiers/*.json``) are imported once at startup (``import_json_dir``).
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
-import os
 import re
-import tempfile
-import threading
+import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy.engine import Connection
+
+from . import dbschema as t
+from .db import Database, audit
+
 log = logging.getLogger("clef")
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SERVER_KEYS = ("name", "created_at", "updated_at", "version", "owner", "model")  # never part of a definition
+_C, _V = t.classifiers, t.classifier_versions
 
 
 class InvalidName(ValueError):
@@ -35,87 +45,299 @@ def validate_name(name: Any) -> str:
     return name
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _parse_iso(raw: Any) -> float | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def _definition(definition: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in definition.items() if k not in _SERVER_KEYS}
+
+
+def _dumps(definition: dict[str, Any]) -> str:
+    return json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+class ClassifierVersion(BaseModel):
+    version: int
+    created_at: str
+    created_by: str | None = None
+    model: str | None = None
+
+
+class ClassifierVersions(BaseModel):
+    name: str
+    versions: list[ClassifierVersion]
 
 
 class ClassifierStore:
-    def __init__(self, directory: str | Path, max_classifiers: int = 1000):
-        self.dir = Path(directory)
+    """``get`` / ``list`` / ``put`` / ``delete`` keep v3.1 shapes (+ ``version``, ``owner``, ``model``)."""
+
+    def __init__(self, db: Database, max_classifiers: int = 1000):
+        self.db = db
         self.max_classifiers = max_classifiers
-        self._lock = threading.Lock()
 
-    def _path(self, name: str) -> Path:
-        validate_name(name)  # validate first, only then build a path
-        path = self.dir / f"{name}.json"
-        if path.resolve().parent != self.dir.resolve():  # belt and braces
-            raise InvalidName("invalid classifier name")
-        return path
+    # ---- reads
+    def _doc(self, head: Any, ver: Any) -> dict[str, Any]:
+        return {
+            **json.loads(ver.definition),
+            "name": head.name,
+            "created_at": _iso(head.created_at),
+            "updated_at": _iso(ver.created_at),
+            "version": ver.version,
+            "owner": head.owner,
+            "model": ver.model,
+        }
 
-    def _read(self, path: Path) -> dict[str, Any] | None:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+    def _get(self, conn: Connection, name: str, version: int | None) -> dict[str, Any] | None:
+        head = conn.execute(select(_C).where(_C.c.name == name)).first()
+        if head is None:
             return None
-        except (OSError, ValueError) as exc:
-            log.warning("skipping unreadable classifier file %s: %s", path.name, exc)
-            return None
-        if not isinstance(data, dict) or data.get("name") != path.stem:
-            log.warning("skipping malformed classifier file %s", path.name)
-            return None
-        return data
+        ver = conn.execute(
+            select(_V).where(
+                _V.c.name == name, _V.c.version == (head.latest_version if version is None else version)
+            )
+        ).first()
+        return None if ver is None else self._doc(head, ver)
 
-    def get(self, name: str) -> dict[str, Any] | None:
-        return self._read(self._path(name))
+    def get(self, name: str, version: int | None = None) -> dict[str, Any] | None:
+        """The latest definition (or ``version``); None for an unknown name or version."""
+        validate_name(name)
+        with self.db.read() as conn:
+            return self._get(conn, name, version)
 
     def list(self) -> list[dict[str, Any]]:
-        if not self.dir.is_dir():
-            return []
+        """The latest version of every classifier, by name."""
+        with self.db.read() as conn:
+            rows = conn.execute(
+                select(_C, _V.c.version, _V.c.definition, _V.c.model, _V.c.created_at.label("v_created"))
+                .join(_V, (_V.c.name == _C.c.name) & (_V.c.version == _C.c.latest_version))
+                .order_by(_C.c.name)
+            ).all()
         out = []
-        for path in sorted(self.dir.glob("*.json")):
-            if not NAME_RE.fullmatch(path.stem):
-                continue
-            data = self._read(path)
-            if data is not None:
-                out.append(data)
+        for r in rows:
+            doc = {**json.loads(r.definition), "name": r.name, "created_at": _iso(r.created_at)}
+            doc.update(updated_at=_iso(r.v_created), version=r.version, owner=r.owner, model=r.model)
+            out.append(doc)
         return out
 
-    def _count(self) -> int:
-        return sum(1 for p in self.dir.glob("*.json") if NAME_RE.fullmatch(p.stem))
-
-    def put(self, name: str, definition: dict[str, Any]) -> dict[str, Any]:
-        """Create or overwrite; `created_at` survives an overwrite. Returns the stored document."""
-        path = self._path(name)
-        with self._lock:
-            self.dir.mkdir(parents=True, exist_ok=True)
-            existing = self._read(path) if path.exists() else None
-            if existing is None and self._count() >= self.max_classifiers:
-                raise TooManyClassifiers(f"too many saved classifiers (max {self.max_classifiers})")
-            now = _now()
-            doc = {
-                **{k: v for k, v in definition.items() if k not in ("name", "created_at", "updated_at")},
-                "name": name,
-                "created_at": (existing or {}).get("created_at") or now,
-                "updated_at": now,
+    def versions(self, name: str) -> list[dict[str, Any]] | None:
+        """``[{version, created_at, created_by, model}]`` newest first; None for an unknown name."""
+        validate_name(name)
+        with self.db.read() as conn:
+            if conn.execute(select(_C.c.name).where(_C.c.name == name)).first() is None:
+                return None
+            rows = conn.execute(
+                select(_V.c.version, _V.c.created_at, _V.c.created_by, _V.c.model)
+                .where(_V.c.name == name)
+                .order_by(_V.c.version.desc())
+            ).all()
+        return [
+            {
+                "version": r.version,
+                "created_at": _iso(r.created_at),
+                "created_by": r.created_by,
+                "model": r.model,
             }
-            fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{name}.", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    json.dump(doc, fh, ensure_ascii=False, indent=2)
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(tmp, path)
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    os.unlink(tmp)
-                raise
-            return doc
+            for r in rows
+        ]
 
-    def delete(self, name: str) -> bool:
-        path = self._path(name)
-        with self._lock:
-            try:
-                path.unlink()
-            except FileNotFoundError:
+    def owner(self, name: str) -> str | None:
+        validate_name(name)
+        with self.db.read() as conn:
+            return conn.execute(select(_C.c.owner).where(_C.c.name == name)).scalar()
+
+    def owner_of(self, name: str) -> tuple[bool, str | None]:
+        """``(exists, owner)``: owner-less (auth-off) is ``(True, None)``, a new name is ``(False, None)``."""
+        validate_name(name)
+        with self.db.read() as conn:
+            row = conn.execute(select(_C.c.owner).where(_C.c.name == name)).first()
+        return (False, None) if row is None else (True, row[0])
+
+    # ---- writes
+    def put(
+        self,
+        name: str,
+        definition: dict[str, Any],
+        owner: str | None = None,
+        created_by: str | None = None,
+        model: str | None = None,
+        *,
+        check_owner: Callable[[bool, str | None], None] | None = None,
+        actor: str | None = None,
+        ip: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Append version n+1 (the first PUT creates the name, owned by ``owner``). A definition equal to the
+        latest is a no-op that returns the latest. Writes ``classifier.put`` to the audit log.
+
+        ``check_owner(exists, current_owner)`` runs inside the transaction (exists is False for a new name)
+        and raises to refuse, so the ownership check and the append are atomic."""
+        validate_name(name)
+        body = _definition(definition)
+        with self.db.tx() as conn:
+            # Postgres: SELECT ... FOR UPDATE locks nothing while the name does not exist yet, so two first
+            # PUTs would both insert version 1. Serialise per name first (SQLite's BEGIN IMMEDIATE does).
+            self.db.serialize(conn, f"classifier:{name}")
+            head = conn.execute(select(_C).where(_C.c.name == name).with_for_update()).first()
+            if check_owner is not None:
+                check_owner(head is not None, None if head is None else head.owner)
+            now = time.time()
+            if head is None:
+                self.db.serialize(conn, "classifiers.count")
+                n = conn.execute(select(func.count()).select_from(_C)).scalar_one()
+                if n >= self.max_classifiers:
+                    raise TooManyClassifiers(f"too many saved classifiers (max {self.max_classifiers})")
+                version = 1
+                conn.execute(
+                    insert(_C).values(
+                        name=name, owner=owner, latest_version=1, created_at=now, updated_at=now
+                    )
+                )
+            else:
+                latest = conn.execute(
+                    select(_V.c.definition).where(_V.c.name == name, _V.c.version == head.latest_version)
+                ).scalar()
+                if latest is not None and _dumps(json.loads(latest)) == _dumps(body):
+                    return self._get(conn, name, None) or {}  # idempotent PUT
+                version = head.latest_version + 1
+                conn.execute(
+                    update(_C).where(_C.c.name == name).values(latest_version=version, updated_at=now)
+                )
+            conn.execute(
+                insert(_V).values(
+                    name=name,
+                    version=version,
+                    definition=_dumps(body),
+                    model=model,
+                    created_at=now,
+                    created_by=created_by,
+                )
+            )
+            audit(
+                conn,
+                actor or created_by or "anonymous",
+                "classifier.put",
+                name,
+                {"version": version},
+                ip=ip,
+                request_id=request_id,
+            )
+            return self._get(conn, name, None) or {}
+
+    def delete(
+        self, name: str, *, actor: str | None = None, ip: str | None = None, request_id: str | None = None
+    ) -> bool:
+        """Remove the name and every version (jobs keep their snapshot). Audited as ``classifier.delete``."""
+        validate_name(name)
+        with self.db.tx() as conn:
+            conn.execute(delete(_V).where(_V.c.name == name))
+            if conn.execute(delete(_C).where(_C.c.name == name)).rowcount != 1:
                 return False
+            audit(conn, actor or "anonymous", "classifier.delete", name, ip=ip, request_id=request_id)
             return True
+
+
+# ------------------------------------------------------------------ one-time import of the v3.1 JSON files
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("classifiers: skipping unreadable file %s: %s", path.name, exc)
+        return None
+    if not isinstance(data, dict) or data.get("name") != path.stem:
+        log.warning("classifiers: skipping malformed file %s", path.name)
+        return None
+    from pydantic import ValidationError
+
+    from .classify import ClassifierDef
+
+    try:
+        ClassifierDef.model_validate(_definition(data))
+    except ValidationError as exc:
+        log.warning("classifiers: skipping invalid definition %s: %s", path.name, exc.errors()[0].get("msg"))
+        return None
+    return data
+
+
+def import_json_dir(db: Database, directory: Path) -> int:
+    """Once per database (``clef_meta.classifiers_imported``): every readable ``*.json`` becomes version 1
+    (owner NULL, ``created_by`` "import"); the directory is then renamed ``classifiers.imported/``."""
+    if db.meta("classifiers_imported") == "1":
+        return 0
+    paths = (
+        sorted(p for p in directory.glob("*.json") if NAME_RE.fullmatch(p.stem)) if directory.is_dir() else []
+    )
+    imported = 0
+    with db.tx() as conn:
+        for path in paths:
+            data = _read_json(path)
+            if data is None:
+                continue
+            name = path.stem
+            if conn.execute(select(_C.c.name).where(_C.c.name == name)).first() is not None:
+                log.warning(
+                    "classifiers: %s already exists in the database; not importing %s", name, path.name
+                )
+                continue
+            now = time.time()
+            created = _parse_iso(data.get("created_at")) or now
+            updated = _parse_iso(data.get("updated_at")) or created
+            conn.execute(
+                insert(_C).values(
+                    name=name, owner=None, latest_version=1, created_at=created, updated_at=updated
+                )
+            )
+            conn.execute(
+                insert(_V).values(
+                    name=name,
+                    version=1,
+                    definition=_dumps(_definition(data)),
+                    model=None,
+                    created_at=updated,
+                    created_by="import",
+                )
+            )
+            audit(conn, "import", "classifier.put", name, {"version": 1, "source": path.name})
+            imported += 1
+        db.set_meta(conn, "classifiers_imported", "1")
+    if directory.is_dir():
+        target = directory.with_name("classifiers.imported")
+        if target.exists():
+            target = directory.with_name(f"classifiers.imported.{int(time.time())}")
+        try:
+            directory.rename(target)
+            log.info(
+                "classifiers: imported %d of %d JSON file(s); moved them to %s", imported, len(paths), target
+            )
+        except OSError as exc:
+            log.warning(
+                "classifiers: imported %d file(s) but could not rename %s: %s", imported, directory, exc
+            )
+    return imported
+
+
+def export_file(doc: dict[str, Any]) -> dict[str, Any]:
+    """The v3.1 file format (+ ``version``) for ``clef classifiers export``."""
+    return {k: v for k, v in doc.items() if k not in ("owner", "model")}
+
+
+__all__ = [
+    "ClassifierStore",
+    "ClassifierVersions",
+    "InvalidName",
+    "NAME_RE",
+    "TooManyClassifiers",
+    "import_json_dir",
+    "validate_name",
+]

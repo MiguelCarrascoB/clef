@@ -11,6 +11,7 @@ See docs/ARCHITECTURE.md for the API contract. Run: clef serve (one uvicorn work
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib
 import json
 import logging
@@ -30,12 +31,13 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import OperationalError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config as config_mod
 from .appctx import AppContext
-from .classifiers import ClassifierStore, InvalidName, TooManyClassifiers, validate_name
+from .classifiers import ClassifierStore, ClassifierVersions, InvalidName, TooManyClassifiers, validate_name
 from .classify import (
     ClassifierBatchRequest,
     ClassifierDef,
@@ -58,12 +60,14 @@ from .classify import (
     score_to_systemone,
 )
 from .config import VERSION, Config
-from .engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge
+from .db import DatabaseError, is_unavailable, open_database
+from .engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge, Prepared
+from .keystore import KeyCache, QuotaExceeded, Quotas
 from .logs import install_access_filter, request_id_var, setup_logging, uvicorn_log_config
 from .media import MediaError, load_media
-from .paths import classifiers_dir
+from .models import UnknownModel
+from .models.registry import served_model
 from .schemas import (
-    DEFAULT_MODEL,
     BatchRequest,
     BatchResponse,
     ErrorBody,
@@ -73,7 +77,15 @@ from .schemas import (
     check_limits,
     format_errors,
 )
-from .security import KeyAuth, RateLimiter, bind_warning, client_identity, install_cors, is_tracked
+from .security import (
+    Authenticator,
+    KeyAuth,
+    RateLimiter,
+    bind_warning,
+    client_identity,
+    install_cors,
+    is_tracked,
+)
 from .stats import Stats
 
 log = logging.getLogger("clef")
@@ -84,22 +96,26 @@ ERRORS: dict[int | str, dict[str, Any]] = {
     for c, d in {
         400: "Invalid input",
         401: "Missing/invalid API key",
-        404: "Unknown classifier",
+        403: "The key lacks the route's scope, or the classifier belongs to another key",
+        404: "Unknown classifier, or a model this server does not serve",
         409: "Too many saved classifiers",
         413: "Request too large",
-        429: "Rate limit exceeded (see Retry-After)",
+        429: "Rate limit or daily quota exceeded (see Retry-After)",
         503: "Model not ready or GPU out of memory",
         500: "Internal error",
     }.items()
 }
 # Feature modules: each exposes router(ctx: AppContext) -> APIRouter (see appctx.py). One line each.
-FEATURES: list[str] = ["evaluation", "compat", "jobs"]
+FEATURES: list[str] = ["evaluation", "compat", "jobs", "admin"]
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, detail: str, headers: dict[str, str] | None = None):
+    def __init__(
+        self, status: int, detail: str, headers: dict[str, str] | None = None, code: str | None = None
+    ):
         super().__init__(detail)
         self.status, self.detail, self.headers = status, detail, headers or {}
+        self.code = code  # a client-visible error code (the OpenAI routes render it), e.g. insufficient_quota
 
 
 class BodyTooLarge(HTTPException):
@@ -118,10 +134,18 @@ def _error(request: Request, status: int, detail: str, headers: dict[str, str] |
     return JSONResponse({"detail": detail, "request_id": _rid(request)}, status_code=status, headers=headers)
 
 
+def wants_no_cache(request: Request) -> bool:
+    """`Cache-Control: no-cache` (the token anywhere in the header, any case): skip the cache lookup."""
+    header = request.headers.get("cache-control") or ""
+    return any(part.strip().split("=")[0].strip().lower() == "no-cache" for part in header.split(","))
+
+
 def map_exception(exc: Exception) -> ApiError:
     """Engine/media/validation exceptions -> contract HTTP errors (never leaks a traceback)."""
     if isinstance(exc, ApiError):
         return exc
+    if isinstance(exc, UnknownModel):
+        return ApiError(404, str(exc))
     if isinstance(exc, GpuOutOfMemory):
         return ApiError(503, str(exc) or "GPU out of memory, retry shortly")
     if isinstance(exc, EngineNotReady):
@@ -164,7 +188,12 @@ class GuardMiddleware:
             nonlocal status
             if msg["type"] == "http.response.start":
                 status = msg["status"]
-                msg = {**msg, "headers": [*msg.get("headers", []), (b"x-request-id", rid.encode())]}
+                extra = [(b"x-request-id", rid.encode())]
+                quota = state.get("quota")  # (limit, remaining) of a quota'd principal: infer / job submit
+                if quota:
+                    extra.append((b"x-quota-limit", str(quota[0]).encode()))
+                    extra.append((b"x-quota-remaining", str(quota[1]).encode()))
+                msg = {**msg, "headers": [*msg.get("headers", []), *extra]}
             await send(msg)
 
         async def receive_wrap() -> dict[str, Any]:
@@ -255,9 +284,15 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     stats = Stats(cfg.log_buffer)
     eng = engine if engine is not None else Engine(cfg, stats)
     started = time.time()
-    auth = KeyAuth(cfg.api_keys())
     limiter = RateLimiter(cfg.rate_limit)
-    store = ClassifierStore(classifiers_dir(cfg), cfg.max_classifiers)
+    db = open_database(cfg)  # the one Database of this process (ctx.db); closed at the end of the lifespan
+    store = ClassifierStore(db, cfg.max_classifiers)
+    # D1: keys and quotas load now, so auth is right from the first request; their tasks start in the lifespan
+    keycache = KeyCache(db)
+    keycache.reload()
+    quotas = Quotas(db)
+    quotas.load()
+    auth = Authenticator(cfg.api_keys(), keycache)
 
     async def sampler() -> None:
         """Feed the time series every sample_interval_s: engine.sample() (in a thread) + queue depth."""
@@ -280,8 +315,11 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
         install_access_filter()  # after uvicorn's dictConfig; covers launchers other than run()
         log.info("starting clef server %s (model load runs in background)", VERSION)
+        for line in (bind_warning(cfg, auth.enabled) or "").splitlines():  # needs the DB: DB keys count
+            log.warning(line)
         app_.state.draining = False
         eng.start()
+        db.start_heartbeat()  # Postgres: exit (status 3) if the one-server lock is ever lost
         task = asyncio.create_task(sampler())
         for hook in ctx.on_startup:
             await hook()
@@ -297,9 +335,10 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             eng.shutdown()
+            await asyncio.to_thread(db.close)
 
     app = FastAPI(
-        title="clef-flash local",
+        title="clef local",
         version=VERSION,
         lifespan=lifespan,
         description=(
@@ -326,6 +365,12 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     async def _http(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         return _error(request, exc.status_code, str(exc.detail), dict(exc.headers or {}))
 
+    @app.exception_handler(DatabaseError)
+    @app.exception_handler(OperationalError)
+    async def _db_unavailable(request: Request, exc: Exception) -> JSONResponse:
+        log.error("database unavailable [%s]: %s", _rid(request), exc)
+        return _error(request, 503, "database unavailable", {"Retry-After": "5"})
+
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
         log.error("unhandled error [%s]", _rid(request), exc_info=exc)
@@ -336,21 +381,51 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     # ---- auth
     async def require_key(request: Request) -> None:
         if not auth.enabled:
-            request.state.key_name = None
+            request.state.key_name = request.state.principal = None
             return
-        name = auth.authenticate(KeyAuth.extract(request))
-        if name is None:
+        principal = auth.resolve(KeyAuth.extract(request))
+        if principal is None:
             raise ApiError(401, "missing or invalid API key", {"WWW-Authenticate": "Bearer"})
-        request.state.key_name = name
+        request.state.principal = principal
+        request.state.key_name = principal.name
+
+    def scope(*names: str) -> list[Any]:
+        """Dependencies for a route: a valid key (this runs ``require_key``) with every scope in ``names``.
+
+        No names = any valid key. ``admin`` routes need a key even when auth is off. The ``clef_scope``
+        attribute is the marker the default-deny test looks for.
+        """
+
+        async def check_scope(request: Request, _: None = Depends(require_key)) -> None:
+            principal = request.state.principal
+            if principal is None:
+                if "admin" in names:
+                    raise ApiError(
+                        401,
+                        "admin routes need a key: set CLEF_API_KEY or run clef keys create",
+                        {"WWW-Authenticate": "Bearer"},
+                    )
+                return
+            for name in names:
+                if not principal.has(name):
+                    raise ApiError(403, f"key {principal.name!r} lacks scope {name!r}")
+
+        check_scope.clef_scope = names  # type: ignore[attr-defined]
+        return [Depends(check_scope)]
 
     async def rate_limit(request: Request) -> None:
-        if cfg.rate_limit <= 0:
+        principal = getattr(request.state, "principal", None)
+        limit = principal.rate_limit if principal is not None and principal.rate_limit else cfg.rate_limit
+        if limit <= 0:
             return
-        retry = limiter.check(client_identity(request, getattr(request.state, "key_name", None)))
+        retry = limiter.check(client_identity(request, getattr(request.state, "key_name", None)), limit)
         if retry:
-            raise ApiError(429, f"rate limit exceeded ({cfg.rate_limit}/min)", {"Retry-After": str(retry)})
+            raise ApiError(429, f"rate limit exceeded ({limit}/min)", {"Retry-After": str(retry)})
 
     limited = [Depends(rate_limit)]
+    classify_scope = scope("classify")
+    manage_scope = scope("classifiers")
+    ops_scope = scope("ops")
     v1 = APIRouter(prefix="/v1", dependencies=[Depends(require_key)], responses=ERRORS)
 
     # ---- inference
@@ -363,6 +438,16 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     ) -> list[dict[str, Any]]:
         """The one inference path: limits, media load (threadpool), ONE engine.decide() for all records."""
         rec = request.state.rec
+        principal = getattr(request.state, "principal", None)
+        try:  # reserved up front (429 before any work); cache hits are handed back below
+            reservation = quotas.reserve(principal, len(reqs))
+        except QuotaExceeded as exc:
+            request.state.quota = (exc.limit, exc.remaining)
+            raise ApiError(
+                429, str(exc), {"Retry-After": str(exc.retry_after)}, code="insufficient_quota"
+            ) from exc
+        charged = len(reqs)
+        request.state.quota = quotas.remaining(principal)
         rec["n_records"] = len(reqs)
         rec["n_questions"] = sum(len(r.questions) for r in reqs)
         rec["media"] = {
@@ -371,20 +456,56 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         }
         if cfg.log_state:
             rec["state_preview"] = json.dumps(reqs[0].state, default=str, ensure_ascii=False)[:200]
-        results = await decide(reqs, batch=batch, label=label, priority="interactive")
+        cache = not wants_no_cache(request)
+        try:
+            prepared = await prepare(reqs, batch=batch, label=label, cache=cache)
+            if reservation is not None and prepared.hits:  # hits cost no GPU time: not charged
+                quotas.refund(reservation, len(prepared.hits))
+                charged -= len(prepared.hits)
+            results = await decide_prepared(prepared, priority="interactive")
+        except BaseException:
+            if reservation is not None:  # the request failed: charge nothing
+                quotas.refund(reservation, charged)
+            raise
+        finally:
+            request.state.quota = quotas.remaining(principal)
         rec["input_tokens"] = sum(int(r.get("usage", {}).get("input_tokens", 0)) for r in results)
         return results
 
     async def decide(
-        reqs: list[SystemOneRequest], batch: bool = True, label: str = "batch", priority: str = "background"
+        reqs: list[SystemOneRequest],
+        batch: bool = True,
+        label: str = "batch",
+        priority: str = "background",
+        cache: bool = True,
     ) -> list[dict[str, Any]]:
-        """Limits, media load (threadpool), ONE engine.decide(). No request needed (background work).
+        """Limits, media load (threadpool), ONE engine call. No request needed (background work).
 
         ``priority`` picks the engine lane: background by default (jobs), interactive from ``infer``.
+        = decide_prepared(await prepare(...)).
         """
+        prepared = await prepare(reqs, batch=batch, label=label, cache=cache)
+        return await decide_prepared(prepared, priority=priority)
+
+    async def prepare(
+        reqs: list[SystemOneRequest], batch: bool = True, label: str = "batch", cache: bool = True
+    ) -> Prepared:
+        """Limits, the model check (404 before any inference), media load (threadpool) and engine.prepare
+        (capabilities, cache lookup, tokenizing in threads). Nothing is queued until decide_prepared."""
+        ids = []
         for i, r in enumerate(reqs):
             check_limits(r, cfg, f"{label}[{i}]." if batch else "")
+            ids.append(served_model(eng, r.model))
         gpu_ready()
+        validate = getattr(eng, "validate", None)  # capabilities, before any media is decoded (fakes: none)
+        if callable(validate):
+            for i, r in enumerate(reqs):
+                try:
+                    validate({**r.to_record(r.images, r.videos), "model": ids[i]})
+                except ValueError as exc:
+                    if not batch:
+                        raise
+                    raise ValueError(f"{label}[{i}].{exc}") from exc
 
         def build() -> list[dict[str, Any]]:
             records = []
@@ -393,17 +514,28 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                     images, videos = load_media(r.images, r.videos, cfg)
                 except MediaError as exc:
                     raise MediaError(f"{label}[{i}].{exc}" if batch else str(exc)) from exc
-                records.append(r.to_record(images, videos))
+                records.append({**r.to_record(images, videos), "model": ids[i]})
             return records
 
         records = await run_in_threadpool(build)
-        return await eng.decide(records, priority=priority)
+        if callable(getattr(eng, "prepare", None)):
+            return await eng.prepare(records, cache=cache)
+        return Prepared(records, [None] * len(records), {}, [None] * len(records))  # test engines
+
+    async def decide_prepared(prepared: Prepared, priority: str = "background") -> list[dict[str, Any]]:
+        """Queue prepared records in the engine lane `priority` and await their results (input order)."""
+        if callable(getattr(eng, "submit", None)):
+            return await eng.submit(prepared, priority=priority)
+        return await eng.decide(prepared.records, priority=priority)  # test engines
 
     def with_total(res: dict[str, Any], total_ms: float) -> dict[str, Any]:
         return {**res, "timing": {**res.get("timing", {}), "total_ms": round(total_ms, 1)}}
 
     @v1.post(
-        "/systemone", response_model=SystemOneResponse, summary="Decide one request", dependencies=limited
+        "/systemone",
+        response_model=SystemOneResponse,
+        summary="Decide one request",
+        dependencies=[*classify_scope, *limited],
     )
     async def systemone(body: SystemOneRequest, request: Request) -> dict[str, Any]:
         t0 = time.perf_counter()
@@ -417,7 +549,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         "/batch",
         response_model=BatchResponse,
         summary="Decide many requests (one micro-batched pass)",
-        dependencies=limited,
+        dependencies=[*classify_scope, *limited],
     )
     async def batch(body: BatchRequest, request: Request) -> dict[str, Any]:
         t0 = time.perf_counter()
@@ -435,9 +567,10 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         return {"usage": out.get("usage", {}), "timing": out["timing"]}
 
     def classify_one(
-        res: dict[str, Any], labels: Any, multi: bool, thr: float | None, model: str, ms: float
+        res: dict[str, Any], labels: Any, multi: bool, thr: float | None, model: str | None, ms: float
     ) -> dict[str, Any]:
-        return {**classify_result(res["answers"], labels, multi, thr, model), **usage_timing(res, ms)}
+        served = res.get("model") or model  # the engine reports the served id
+        return {**classify_result(res["answers"], labels, multi, thr, served), **usage_timing(res, ms)}
 
     async def run_classify(
         request: Request,
@@ -447,7 +580,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         instructions: str | None,
         multi_label: bool,
         threshold: float | None,
-        model: str,
+        model: str | None,
         images: list[str] | None,
         videos: list[str] | None,
         classifier: str | None = None,
@@ -474,7 +607,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         instructions: str | None,
         multi_label: bool,
         threshold: float | None,
-        model: str,
+        model: str | None,
         classifier: str | None = None,
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
@@ -503,7 +636,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         state: Any,
         levels: list[str],
         instructions: str | None,
-        model: str,
+        model: str | None,
         images: list[str] | None,
         videos: list[str] | None,
         classifier: str | None = None,
@@ -516,7 +649,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         except Exception as exc:
             raise map_exception(exc) from exc
         out = {
-            **score_result(results[0]["answers"], levels, model),
+            **score_result(results[0]["answers"], levels, results[0].get("model") or model),
             **usage_timing(results[0], (time.perf_counter() - t0) * 1000),
             "request_id": _rid(request),
         }
@@ -529,7 +662,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         response_model=ClassifyResponse,
         response_model_exclude_none=True,
         summary="Classify one input (single or multi-label)",
-        dependencies=limited,
+        dependencies=[*classify_scope, *limited],
     )
     async def classify(body: ClassifyRequest, request: Request) -> dict[str, Any]:
         return await run_classify(
@@ -549,7 +682,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         response_model=ClassifyBatchResponse,
         response_model_exclude_none=True,
         summary="Classify many inputs in one micro-batched pass",
-        dependencies=limited,
+        dependencies=[*classify_scope, *limited],
     )
     async def classify_batch(body: ClassifyBatchRequest, request: Request) -> dict[str, Any]:
         return await run_classify_batch(
@@ -567,7 +700,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         response_model=ScoreResponse,
         response_model_exclude_none=True,
         summary="Place one input on an ordinal scale",
-        dependencies=limited,
+        dependencies=[*classify_scope, *limited],
     )
     async def score(body: ScoreRequest, request: Request) -> dict[str, Any]:
         return await run_score(
@@ -587,39 +720,142 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         except InvalidName as exc:
             raise ApiError(400, str(exc)) from exc
 
-    async def load_classifier(name: str) -> dict[str, Any]:
+    async def load_classifier(name: str, version: int | None = None) -> dict[str, Any]:
         checked_name(name)
-        doc = await run_in_threadpool(store.get, name)
+        doc = await run_in_threadpool(store.get, name, version)
         if doc is None:
+            if version is not None and await run_in_threadpool(store.get, name) is not None:
+                raise ApiError(404, f"classifier {name!r} has no version {version}")
             raise ApiError(404, f"classifier {name!r} not found")
         return doc
 
+    def store_error(exc: Exception) -> Exception:
+        if is_unavailable(exc):
+            log.error("database unavailable: %s", exc)
+            return ApiError(503, "database unavailable", {"Retry-After": "5"})
+        return map_exception(exc)
+
+    def is_admin(request: Request) -> bool:
+        """The owner check's override (decision 2): an admin principal; auth off (no principal) is admin."""
+        principal = getattr(request.state, "principal", None)
+        return True if principal is None else bool(principal.has("admin"))
+
+    def owner_check(request: Request, name: str) -> Callable[[bool, str | None], None]:
+        """403 unless the caller owns ``name`` or is admin (auth off counts as admin). A classifier nobody
+        owns (created while auth was off) is admin-only to change once auth is on. The owner is never named:
+        admins can read it from the classifier itself and never get this error. Runs inside put's transaction
+        (atomic with the append) or, for DELETE, on ``store.owner_of``."""
+        caller = getattr(request.state, "key_name", None)
+
+        def check(exists: bool, owner: str | None) -> None:
+            if exists and owner != caller and not is_admin(request):
+                raise ApiError(
+                    403, f"classifier {name!r} is not yours; only its owner or an admin may change it"
+                )
+
+        return check
+
+    async def check_owner(request: Request, name: str) -> None:
+        owner_check(request, name)(*await run_in_threadpool(store.owner_of, name))
+
+    owner_errors: dict[int | str, dict[str, Any]] = {
+        403: {"model": ErrorBody, "description": "Not the classifier's owner"}
+    }
+
     @v1.put(
-        "/classifiers/{name}", response_model=ClassifierInfo, summary="Create or replace a saved classifier"
+        "/classifiers/{name}",
+        response_model=ClassifierInfo,
+        summary="Create a saved classifier or add a version",
+        responses=owner_errors,
+        dependencies=manage_scope,
     )
-    async def put_classifier(name: str, body: ClassifierDef) -> dict[str, Any]:
+    async def put_classifier(name: str, body: ClassifierDef, request: Request) -> dict[str, Any]:
         checked_name(name)
+        caller = getattr(request.state, "key_name", None)
         try:
             if body.kind == "classify":
                 check_label_count(body.labels or [], body.multi_label, cfg.max_labels)
             else:
                 check_levels_count(body.levels or [], cfg.max_labels)
-            return await run_in_threadpool(store.put, name, body.model_dump())
+            return await run_in_threadpool(
+                functools.partial(
+                    store.put,
+                    name,
+                    body.model_dump(),
+                    owner=caller,
+                    created_by=caller,
+                    model=ctx.model_ref(),
+                    check_owner=owner_check(request, name),  # in put's transaction: atomic with the append
+                    actor=caller or "anonymous",
+                    ip=request.client.host if request.client else None,
+                    request_id=_rid(request),
+                )
+            )
         except Exception as exc:
-            raise map_exception(exc) from exc
+            raise store_error(exc) from exc
 
-    @v1.get("/classifiers", response_model=ClassifierList, summary="List saved classifiers")
+    @v1.get(
+        "/classifiers",
+        response_model=ClassifierList,
+        summary="List saved classifiers",
+        dependencies=classify_scope,
+    )
     async def list_classifiers() -> dict[str, Any]:
         return {"classifiers": await run_in_threadpool(store.list)}
 
-    @v1.get("/classifiers/{name}", response_model=ClassifierInfo, summary="Get a saved classifier")
-    async def get_classifier(name: str) -> dict[str, Any]:
-        return await load_classifier(name)
+    @v1.get(
+        "/classifiers/{name}",
+        response_model=ClassifierInfo,
+        summary="Get a saved classifier",
+        dependencies=classify_scope,
+    )
+    async def get_classifier(
+        name: str, version: int | None = Query(None, ge=1, description="default: the latest")
+    ) -> dict[str, Any]:
+        return await load_classifier(name, version)
 
-    @v1.delete("/classifiers/{name}", response_model=ClassifierDeleted, summary="Delete a saved classifier")
-    async def delete_classifier(name: str) -> dict[str, str]:
+    @v1.get(
+        "/classifiers/{name}/versions",
+        response_model=ClassifierVersions,
+        summary="Versions of a saved classifier (newest first)",
+        dependencies=classify_scope,
+    )
+    async def classifier_versions(name: str) -> dict[str, Any]:
         checked_name(name)
-        if not await run_in_threadpool(store.delete, name):
+        versions = await run_in_threadpool(store.versions, name)
+        if versions is None:
+            raise ApiError(404, f"classifier {name!r} not found")
+        return {"name": name, "versions": versions}
+
+    @v1.get(
+        "/classifiers/{name}/versions/{version}",
+        response_model=ClassifierInfo,
+        summary="One version of a saved classifier",
+        dependencies=classify_scope,
+    )
+    async def classifier_version(name: str, version: int) -> dict[str, Any]:
+        return await load_classifier(name, version)
+
+    @v1.delete(
+        "/classifiers/{name}",
+        response_model=ClassifierDeleted,
+        summary="Delete a saved classifier (every version)",
+        responses=owner_errors,
+        dependencies=manage_scope,
+    )
+    async def delete_classifier(name: str, request: Request) -> dict[str, str]:
+        checked_name(name)
+        await check_owner(request, name)
+        deleted = await run_in_threadpool(
+            functools.partial(
+                store.delete,
+                name,
+                actor=getattr(request.state, "key_name", None) or "anonymous",
+                ip=request.client.host if request.client else None,
+                request_id=_rid(request),
+            )
+        )
+        if not deleted:
             raise ApiError(404, f"classifier {name!r} not found")
         return {"deleted": name}
 
@@ -635,10 +871,10 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         response_model=ClassifyResponse | ScoreResponse,
         response_model_exclude_none=True,
         summary="Run a saved classifier on one input",
-        dependencies=limited,
+        dependencies=[*classify_scope, *limited],
     )
     async def run_classifier(name: str, body: ClassifierRunRequest, request: Request) -> dict[str, Any]:
-        doc = await load_classifier(name)
+        doc = await load_classifier(name, body.version)
         common = {"state": body.input, "images": body.images, "videos": body.videos, "classifier": name}
         if doc["kind"] == "score":
             if body.threshold is not None:
@@ -647,7 +883,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                 request,
                 levels=doc["levels"],
                 instructions=doc.get("instructions"),
-                model=DEFAULT_MODEL,
+                model=body.model,
                 **common,
             )
         return await run_classify(
@@ -656,7 +892,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             instructions=doc.get("instructions"),
             multi_label=bool(doc.get("multi_label")),
             threshold=run_threshold(doc, body.threshold),
-            model=DEFAULT_MODEL,
+            model=body.model,
             **common,
         )
 
@@ -665,12 +901,12 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         response_model=ClassifyBatchResponse,
         response_model_exclude_none=True,
         summary="Run a saved classifier on many inputs (one micro-batched pass)",
-        dependencies=limited,
+        dependencies=[*classify_scope, *limited],
     )
     async def run_classifier_batch(
         name: str, body: ClassifierBatchRequest, request: Request
     ) -> dict[str, Any]:
-        doc = await load_classifier(name)
+        doc = await load_classifier(name, body.version)
         if doc["kind"] == "score":
             raise ApiError(400, "batch is only supported for classify classifiers")
         return await run_classify_batch(
@@ -680,11 +916,22 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             instructions=doc.get("instructions"),
             multi_label=bool(doc.get("multi_label")),
             threshold=run_threshold(doc, body.threshold),
-            model=DEFAULT_MODEL,
+            model=body.model,
             classifier=name,
         )
 
     # ---- observability
+    def model_info() -> dict[str, Any]:
+        """The served model (engine.model_info(): id, adapter, revision, ref, capabilities, distribution)."""
+        fn = getattr(eng, "model_info", None)
+        if callable(fn):
+            try:
+                return dict(fn())
+            except Exception:
+                log.exception("engine.model_info() failed")
+        model_id = served_model(eng, None)
+        return {"id": model_id, "adapter": None, "revision": None, "ref": f"{model_id}@local"}
+
     def info() -> dict[str, Any]:
         try:
             return dict(eng.info())
@@ -703,11 +950,13 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         body["telemetry"] = meta.get("telemetry")
         return body
 
-    @v1.get("/stats", summary="Rolling latency / throughput / GPU stats")
+    @v1.get("/stats", summary="Rolling latency / throughput / GPU stats", dependencies=ops_scope)
     async def v1_stats(window_s: int = Query(300, ge=5, le=3600)) -> dict[str, Any]:
         return stats_body(window_s)
 
-    @v1.get("/stats/timeseries", summary="Columnar time series for charts (oldest first)")
+    @v1.get(
+        "/stats/timeseries", summary="Columnar time series for charts (oldest first)", dependencies=ops_scope
+    )
     async def v1_timeseries(
         window_s: int = Query(300, ge=10, le=3600), step_s: int | None = Query(None, ge=1)
     ) -> dict[str, Any]:
@@ -716,13 +965,13 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         except ValueError as exc:
             raise ApiError(400, str(exc)) from exc
 
-    @v1.get("/log", summary="Recent request log (newest last)")
+    @v1.get("/log", summary="Recent request log (newest last)", dependencies=ops_scope)
     async def v1_log(
         limit: int = Query(100, ge=1, le=1000), since: int | None = Query(None, ge=0)
     ) -> dict[str, Any]:
         return {"entries": stats.log(limit, since)}
 
-    @v1.get("/events", summary="Server-sent events: request log + stats every 2 s")
+    @v1.get("/events", summary="Server-sent events: request log + stats every 2 s", dependencies=ops_scope)
     async def v1_events(request: Request, step_s: int = Query(5, ge=1, le=60)) -> StreamingResponse:
         def status() -> dict[str, Any]:
             return {**stats_body(), "point": stats.latest_point(step_s)}
@@ -751,8 +1000,51 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         run_classify=run_classify,
         run_classify_batch=run_classify_batch,
         run_score=run_score,
+        db=db,
+        prepare=prepare,
+        decide_prepared=decide_prepared,
+        scope=scope,
+        quotas=quotas,
+        auth_enabled=lambda: auth.enabled,
+        keys=keycache,
+        env_key_names=auth.env_names,
     )
     app.state.ctx = ctx
+    for clash in sorted(auth.env_names & keycache.names):
+        log.warning(
+            "key name %r is both an env key and a DB principal: the DB keys of %r are refused (401) so they "
+            "cannot inherit the env key's ownership; run `clef keys revoke %s` or rename the env key",
+            clash,
+            clash,
+            clash,
+        )
+    if len(auth.env_names) > 1:
+        log.warning(
+            "%d env keys (%s) are configured: every env key is a full admin (sees and deletes every job, "
+            "edits every classifier, mints keys, reads the audit log). For separate tenants use "
+            "`clef keys create` per tenant and keep a single env key for operators.",
+            len(auth.env_names),
+            ", ".join(sorted(auth.env_names)),
+        )
+
+    async def start_keys() -> None:
+        """Key cache reload + quota flush tasks (a hook must return, so they run as tasks)."""
+        ctx.extra["key_tasks"] = [
+            asyncio.create_task(keycache.run(), name="clef-keys"),
+            asyncio.create_task(quotas.run(), name="clef-quotas"),
+        ]
+
+    async def stop_keys() -> None:
+        tasks = ctx.extra.pop("key_tasks", [])
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # waits for a periodic flush still running in a thread (Quotas.flush is serialised)
+        await asyncio.to_thread(quotas.flush)
+        await asyncio.to_thread(keycache.flush_used)
+
+    ctx.on_startup.append(start_keys)  # first, so jobs' recover() can refund into loaded counters
+    ctx.on_shutdown.append(stop_keys)  # reversed order: runs after the features' shutdown hooks
     for name in FEATURES:
         module = importlib.import_module(f".{name}", __package__)
         app.include_router(module.router(ctx))
@@ -769,7 +1061,9 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             "load_seconds": eng.load_seconds,
             "uptime_s": int(time.time() - started),
             "error": eng.error,
-            "limits": cfg.public_limits(),
+            "limits": {**cfg.public_limits(), "auth_required": auth.enabled},
+            "db": db.info(),
+            "model": model_info(),
         }
         return JSONResponse(body, status_code=200 if ok else 503)
 
@@ -788,7 +1082,6 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     async def schema_example() -> dict[str, Any]:
         return {
             "text_json": {
-                "model": "clef-flash",
                 "state": {"ticket": {"text": "Checkout errors, orders blocked.", "customers_affected": 1200}},
                 "questions": {
                     "department": {
@@ -801,7 +1094,6 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                 },
             },
             "media": {
-                "model": "clef-flash",
                 "state": "Review the attached receipt.",
                 "images": ["data:image/jpeg;base64,<base64 bytes of the image>"],
                 "videos": ["data:video/mp4;base64,<base64 bytes of the video>"],
@@ -814,6 +1106,10 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             },
             "batch": {"batch": ["<1..N systemone request objects, media allowed>"]},
             "auth": "If CLEF_API_KEY is set send X-API-Key: <key> or Authorization: Bearer <key> on /v1/*.",
+            "model": (
+                f"Omit `model` to use the served model ({served_model(eng, None)!r}, see GET /v1/models); "
+                "a model this server does not serve is 404."
+            ),
             "note": "clef returns CALIBRATED PROBABILITIES for every option in one forward pass - no text generation.",  # noqa: E501
         }
 
@@ -884,14 +1180,13 @@ class DrainingServer(uvicorn.Server):
 def run(cfg: Config | None = None) -> None:
     """Serve in the foreground: ONE uvicorn worker (one model per process); drains CLEF_DRAIN_S on stop."""
     cfg = cfg or config_mod.load()
-    warning = bind_warning(cfg)
-    if warning:
-        setup_logging(cfg.log_format)
-        for line in warning.splitlines():
-            log.warning(line)
     # log_config: redact ?key= in the access log and apply CLEF_LOG_FORMAT to uvicorn's own loggers
     log_config = uvicorn_log_config(cfg.log_format)
-    app = create_app(cfg)
+    try:
+        app = create_app(cfg)
+    except DatabaseError as exc:  # C1: bad URL, no driver, a second server, failed upgrade
+        log.error("cannot start: %s", exc)
+        sys.exit(3)
     config = uvicorn.Config(app, host=cfg.host, port=cfg.port, workers=1, log_config=log_config)
     server = DrainingServer(config, app, cfg.drain_s)
     # the tail of uvicorn.run(): the re-raised Ctrl-C after a clean exit is not an error; a failed start is 3

@@ -75,7 +75,7 @@ async function runChunks(indices) {
   upd({ status: 'running', notice: null, rows, done: rows.filter((r) => r.response).length, total: rows.length });
   try {
     for (const chunk of chunks) {
-      const records = chunk.map((i) => ({ model: 'clef-flash', state: B().rows[i].state, questions }));
+      const records = chunk.map((i) => ({ state: B().rows[i].state, questions }));
       let lastErr = null, ok = false;
       for (let attempt = 0; attempt < 3 && !ok; attempt++) {
         try {

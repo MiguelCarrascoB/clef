@@ -1,0 +1,10 @@
+Clef server
+Copyright 2026 Miguel Carrasco Bueno
+
+This product includes software developed by third parties:
+
+tests/unit/_ref_head.py
+  Copied from Cloudflare/clef-flash, `joint_schema_model.py` (EvidenceRoutingLayer, JointSchemaHead),
+  revision 17f0b0ad64efb65d273590632833508766b2aae6.
+  Copyright Cloudflare, Inc. Licensed under the Apache License, Version 2.0.
+  Modified: type hint `list[EncodedRecord]` -> `list[Any]`.

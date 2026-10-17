@@ -102,7 +102,9 @@ class ClassifyRequest(_Base):
     )
     images: list[str] | None = Field(None, description="data: URLs (or http(s) when enabled)")
     videos: list[str] | None = Field(None, description="data: URLs (or http(s) when enabled)")
-    model: str = Field(DEFAULT_MODEL, description="Model name")
+    model: str | None = Field(
+        DEFAULT_MODEL, description="Model id; omit for the served one (GET /v1/models). Others: 404"
+    )
 
     @field_validator("labels")
     @classmethod
@@ -129,7 +131,7 @@ class ClassifyBatchRequest(_Base):
     instructions: str | None = None
     multi_label: bool = False
     threshold: float | None = Field(None, ge=0.0, le=1.0)
-    model: str = DEFAULT_MODEL
+    model: str | None = DEFAULT_MODEL
 
     @field_validator("labels")
     @classmethod
@@ -158,7 +160,7 @@ class ScoreRequest(_Base):
     instructions: str | None = None
     images: list[str] | None = None
     videos: list[str] | None = None
-    model: str = DEFAULT_MODEL
+    model: str | None = DEFAULT_MODEL
 
     @field_validator("levels")
     @classmethod
@@ -210,6 +212,8 @@ class ClassifierRunRequest(_Base):
     images: list[str] | None = None
     videos: list[str] | None = None
     threshold: float | None = Field(None, ge=0.0, le=1.0, description="multi-label classifiers only")
+    version: int | None = Field(None, ge=1, description="classifier version (default: the latest)")  # C1
+    model: str | None = Field(DEFAULT_MODEL, description="omit for the served model; another id is 404")
 
     @field_validator("images", "videos")
     @classmethod
@@ -222,6 +226,8 @@ class ClassifierBatchRequest(_Base):
 
     inputs: list[Any]
     threshold: float | None = Field(None, ge=0.0, le=1.0)
+    version: int | None = Field(None, ge=1, description="classifier version (default: the latest)")  # C1
+    model: str | None = Field(DEFAULT_MODEL, description="omit for the served model; another id is 404")
 
     @field_validator("inputs")
     @classmethod
@@ -341,7 +347,7 @@ def score_questions(levels: list[str], instructions: str | None) -> dict[str, di
 def _to_systemone(
     state: Any,
     questions: dict[str, dict[str, Any]],
-    model: str,
+    model: str | None,
     images: list[str] | None = None,
     videos: list[str] | None = None,
 ) -> SystemOneRequest:
@@ -359,7 +365,7 @@ def classify_to_systemone(
     labels: Labels,
     instructions: str | None = None,
     multi_label: bool = False,
-    model: str = DEFAULT_MODEL,
+    model: str | None = DEFAULT_MODEL,
     images: list[str] | None = None,
     videos: list[str] | None = None,
 ) -> SystemOneRequest:
@@ -370,7 +376,7 @@ def score_to_systemone(
     state: Any,
     levels: list[str],
     instructions: str | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = DEFAULT_MODEL,
     images: list[str] | None = None,
     videos: list[str] | None = None,
 ) -> SystemOneRequest:
@@ -386,7 +392,7 @@ def classify_result(
     labels: Labels,
     multi_label: bool,
     threshold: float | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = DEFAULT_MODEL,
 ) -> dict[str, Any]:
     """SystemOne answers -> classify result body (no usage/timing/request_id)."""
     if not multi_label:
@@ -407,7 +413,9 @@ def classify_result(
     return {"model": model, "multi_label": True, "labels": picked, "scores": scores, "threshold": thr}
 
 
-def score_result(answers: dict[str, Any], levels: list[str], model: str = DEFAULT_MODEL) -> dict[str, Any]:
+def score_result(
+    answers: dict[str, Any], levels: list[str], model: str | None = DEFAULT_MODEL
+) -> dict[str, Any]:
     """SystemOne answers -> score result body (no usage/timing/request_id)."""
     ans = answers[SCORE_QID]
     probs = {int(k): float(v) for k, v in ans["probabilities"].items()}

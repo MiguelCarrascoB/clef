@@ -1,4 +1,4 @@
-// clef-client: dependency-free client for the clef-flash server. Works in Node 18+ and browsers.
+// clef-client: dependency-free client for the clef server. Works in Node 18+ and browsers.
 
 export const DEFAULT_URL = 'http://127.0.0.1:8910';
 const MAX_RETRY_AFTER_MS = 60000;
@@ -225,7 +225,7 @@ export class ClefClient {
   }
 
   // --- v2 API ---
-  decide(state, questions, { images, videos, model = 'clef-flash' } = {}) {
+  decide(state, questions, { images, videos, model } = {}) {
     return this._request('POST', '/v1/systemone', clean({ model, state, questions, images, videos }));
   }
   batch(records) {
@@ -234,12 +234,17 @@ export class ClefClient {
   health() {
     return this._request('GET', '/health');
   }
+  // The model the server serves (OpenAI list format: [{ id, owned_by, clef: { adapter, ref, ... } }]).
+  async models() {
+    const body = await this._request('GET', '/v1/models');
+    return body.data || [];
+  }
   stats() {
     return this._request('GET', '/v1/stats');
   }
 
   // --- classification ---
-  async classify(input, labels, { instructions, multiLabel = false, threshold, images, videos, model = 'clef-flash' } = {}) {
+  async classify(input, labels, { instructions, multiLabel = false, threshold, images, videos, model } = {}) {
     const body = clean({
       input,
       labels,
@@ -253,7 +258,7 @@ export class ClefClient {
     return parseClassification(await this._request('POST', '/v1/classify', body));
   }
 
-  async classifyMany(inputs, labels, { instructions, multiLabel = false, threshold, model = 'clef-flash', chunkSize } = {}) {
+  async classifyMany(inputs, labels, { instructions, multiLabel = false, threshold, model, chunkSize } = {}) {
     const out = [];
     for (const part of chunks(inputs, chunkSize)) {
       const body = clean({
@@ -269,7 +274,7 @@ export class ClefClient {
     return out;
   }
 
-  async score(input, levels, { instructions, images, videos, model = 'clef-flash' } = {}) {
+  async score(input, levels, { instructions, images, videos, model } = {}) {
     const body = clean({ input, levels, instructions, images, videos, model });
     return parseScore(await this._request('POST', '/v1/score', body));
   }
@@ -287,7 +292,7 @@ export class ClefClient {
   }
 
   /** classifyMany without holding a connection open: `labels` or a saved `classifier` name. */
-  classifyJob(inputs, labels, { classifier, instructions, multiLabel = false, threshold, model = 'clef-flash', webhook, metadata, idempotencyKey } = {}) {
+  classifyJob(inputs, labels, { classifier, instructions, multiLabel = false, threshold, model, webhook, metadata, idempotencyKey } = {}) {
     const payload = clean({
       labels,
       classifier,

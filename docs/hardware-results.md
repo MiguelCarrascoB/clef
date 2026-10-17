@@ -151,3 +151,21 @@ per run; the default (64) was measured twice and a multiple of 8 three times.
 A multiple of 8 was about 12% faster at concurrency 8 and 2% faster at concurrency 1, consistently across the three runs.
 Only one mode and one record length were measured; the bf16 and mixed-length workloads are untested, so the default is unchanged.
 
+
+## D2 perf flags (pending: run `bench/perf_check.sh` on the 7900 XTX)
+
+Nothing below is measured yet. Fill the table from `bench/out/perf/summary.md` (same session for every row; same-day
+drift is ~5%). Parity gate: 0 top-1 flips and max |dp| <= 2e-3 against the flags-off engine, singles and batched.
+Method and flag descriptions: [Performance](performance.md#opt-in-speedups-not-yet-measured-on-a-gpu).
+
+| Variant | Parity | c=1 p50 / p95 ms | c=1 req/s | c=8 req/s | c=16 req/s |
+| --- | --- | --- | --- | --- | --- |
+| flags off (base) | reference | pending | pending | pending | pending |
+| `CLEF_MASK_FREE=1` | pending | pending | pending | pending | pending |
+| `CLEF_FAST_HEAD=1` | pending | pending | pending | pending | pending |
+| both | pending | pending | pending | pending | pending |
+| `CLEF_TUNABLEOP=1` (second run) | pending | pending | pending | pending | pending |
+| both + `CLEF_TUNABLEOP=1` | pending | pending | pending | pending | pending |
+
+Step 0 (`profile_forward.py --batch 8`): kernel/wall at batch 1 and 8, GEMM share: pending. Kernel/wall >= 0.9 at
+batch 8 means batched serving is GEMM-bound and only GEMM tuning can help it.

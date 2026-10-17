@@ -1,4 +1,4 @@
-"""Multi-key auth, per-key sliding-window rate limiting and CORS setup."""
+"""Auth (env keys + hashed DB keys), per-principal sliding-window rate limiting and CORS setup."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from starlette.middleware.cors import CORSMiddleware
 
 from .config import Config
+from .keystore import KeyCache, Principal, env_principal, hash_key, key_status, parse_key
 
 TRACKED_EXACT = frozenset(
     {"/v1/systemone", "/v1/batch", "/v1/classify", "/v1/classify/batch", "/v1/score", "/v1/evaluate"}
@@ -65,6 +66,59 @@ class KeyAuth:
         return given or None
 
 
+class Authenticator:
+    """Who is calling: env keys (``name:key``, full admin) and the hashed keys of the DB principals.
+
+    Auth is on when an env key exists OR a DB principal row ever existed (``any_principal()`` is sticky and
+    counts disabled principals), so revoking the last DB key never switches auth off. No I/O (memory).
+    """
+
+    def __init__(self, env_keys: dict[str, str], cache: KeyCache | None = None):
+        self._env = KeyAuth(env_keys)
+        self.env_names = frozenset(env_keys)
+        self._env_principals = {name: env_principal(name) for name in env_keys}
+        self.cache = cache
+
+    @property
+    def enabled(self) -> bool:
+        return self._env.enabled or (self.cache is not None and self.cache.any_principal())
+
+    def resolve(self, token: str | None) -> Principal | None:
+        """The principal for a key, or None (401): revoked, expired, disabled, unknown all look alike."""
+        if not token:
+            return None
+        key_id = parse_key(token) if self.cache is not None else None
+        if key_id is not None:
+            hit = self.cache.get(key_id)  # type: ignore[union-attr]
+            if hit is not None:
+                key, principal = hit
+                if principal.name in self.env_names:
+                    return None  # a DB name equal to an env key would inherit its admin ownership: refused
+                if not hmac.compare_digest(hash_key(token), key.secret_sha256):
+                    return None
+                if (
+                    key_status({"revoked_at": key.revoked_at, "expires_at": key.expires_at}, time.time())
+                    in (
+                        "revoked",
+                        "expired",
+                    )
+                    or principal.disabled_at is not None
+                ):
+                    return None
+                self.cache.touch(key_id)  # type: ignore[union-attr]
+                return Principal(
+                    principal.name,
+                    "db",
+                    principal.scopes,
+                    principal.daily_quota,
+                    principal.rate_limit,
+                    key_id,
+                    key.expires_at,
+                )
+        name = self._env.authenticate(token)  # constant-time walk over every env key
+        return self._env_principals[name] if name is not None else None
+
+
 class RateLimiter:
     """Sliding-window limiter: `limit` hits per `window` seconds per identity. Thread-safe."""
 
@@ -74,9 +128,12 @@ class RateLimiter:
         self._lock = threading.Lock()
         self._next_prune = clock() + window
 
-    def check(self, identity: str) -> int:
-        """Record a hit: 0 when allowed, else Retry-After seconds (>= 1). Rejections are not recorded."""
-        if self.limit <= 0:
+    def check(self, identity: str, limit: int | None = None) -> int:
+        """Record a hit: 0 when allowed, else Retry-After seconds (>= 1). Rejections are not recorded.
+
+        ``limit`` overrides the default for this identity (a principal's own ``rate_limit``)."""
+        limit = self.limit if limit is None else limit
+        if limit <= 0:
             return 0
         now = self.clock()
         with self._lock:
@@ -88,7 +145,7 @@ class RateLimiter:
             cutoff = now - self.window
             while dq and dq[0] <= cutoff:
                 dq.popleft()
-            if len(dq) >= self.limit:
+            if len(dq) >= limit:
                 return max(1, math.ceil(dq[0] + self.window - now))
             dq.append(now)
             return 0
@@ -117,16 +174,18 @@ def install_cors(app: FastAPI, cfg: Config) -> None:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(cfg.cors_origins),
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
-        expose_headers=["X-Request-ID", "Retry-After"],
+        expose_headers=["X-Request-ID", "Retry-After", "X-Quota-Limit", "X-Quota-Remaining"],
         allow_credentials=False,
     )
 
 
-def bind_warning(cfg: Config) -> str | None:
-    """Multi-line warning when listening beyond loopback without any API key."""
-    if cfg.is_loopback or cfg.auth_required:
+def bind_warning(cfg: Config, auth_enabled: bool | None = None) -> str | None:
+    """Multi-line warning when listening beyond loopback without any API key (env or DB)."""
+    if auth_enabled is None:
+        auth_enabled = cfg.auth_required
+    if cfg.is_loopback or auth_enabled:
         return None
     bar = "!" * 72
     return "\n".join(
@@ -134,7 +193,7 @@ def bind_warning(cfg: Config) -> str | None:
             bar,
             f"WARNING: clef is listening on {cfg.host}:{cfg.port} (not loopback) with NO API key.",
             "Anyone who can reach this port can run inference on your GPU and manage classifiers.",
-            "Set CLEF_API_KEY (or CLEF_API_KEYS=name:key,...) or bind to 127.0.0.1.",
+            "Set CLEF_API_KEY (or CLEF_API_KEYS=name:key,...), run `clef keys create`, or bind to 127.0.0.1.",
             bar,
         ]
     )

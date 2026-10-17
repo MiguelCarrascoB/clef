@@ -14,6 +14,23 @@ import { Classify, ModeSwitch } from './classify.js';
 
 let abortCtl = null;
 
+// The id of the model the server serves (GET /v1/models), fetched once per page load.
+let servedModel = null;
+let servedModelReq = null;
+export function useServedModel() {
+  const [id, setId] = useState(servedModel);
+  useEffect(() => {
+    if (servedModel) return undefined;
+    let live = true;
+    servedModelReq = servedModelReq || api.request('/v1/models')
+      .then(({ data }) => { servedModel = (data && data.data && data.data[0] && data.data[0].id) || null; return servedModel; })
+      .catch(() => { servedModelReq = null; return null; });
+    servedModelReq.then((m) => { if (live && m) setId(m); });
+    return () => { live = false; };
+  }, []);
+  return id;
+}
+
 function stripMedia(req) {
   const c = truncateMedia(req);
   delete c.images; delete c.videos;
@@ -62,7 +79,7 @@ export function openInPlayground({ state, questions, presetName = '', result = n
     cards: contractToCards(questions || {}),
     media: media, presetName,
   });
-  set({ run: { running: false, result, error: null, request: request || (result ? { model: 'clef-flash', state, questions } : null), clientMs, slow: false } });
+  set({ run: { running: false, result, error: null, request: request || (result ? { state, questions } : null), clientMs, slow: false } });
   goTab('playground');
 }
 
@@ -146,6 +163,7 @@ export function Playground() {
 
 function SystemOnePlayground() {
   const { pg, run, limits } = useStore();
+  const model = useServedModel();
   const root = useRef(null);
   useEffect(() => {
     const h = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runPlayground(); } };
@@ -158,7 +176,8 @@ function SystemOnePlayground() {
   return html`<div class="split" ref=${root}>
     <div class="pane left">
       <div class="pane-head">
-        <div class="row gap"><h2>Request <span class="muted small">${pg.presetName ? `· ${pg.presetName}` : ''}</span></h2><${ModeSwitch} /></div>
+        <div class="row gap"><h2>Request <span class="muted small">${pg.presetName ? `· ${pg.presetName}` : ''}</span></h2><${ModeSwitch} />
+          ${model ? html`<span class="muted small" title="The model this server serves (GET /v1/models)">model: ${model}</span>` : null}</div>
         <div class="row gap">
           ${run.running ? html`<button class="btn sm" type="button" onClick=${() => abortCtl && abortCtl.abort()}>Cancel</button>` : null}
           <button class="btn primary" type="button" disabled=${run.running || blocked} onClick=${runPlayground}
