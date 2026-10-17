@@ -50,6 +50,19 @@ class AppContext:
     on_startup: list[Hook] = field(default_factory=list)
     on_shutdown: list[Hook] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)  # features may publish objects to each other here
+    # C1: the shared database (``db.Database``); stores take it, nothing else opens connections.
+    db: Any = None
+
+    # C1: the served model, through the engine when it has the hooks (C2); test fakes fall back.
+    def model_ref(self) -> str | None:
+        """``"id@revision"`` of the served model (stored on jobs and classifier versions), or None."""
+        fn = getattr(self.engine, "model_ref", None)
+        return fn() if callable(fn) else None
+
+    def check_model(self, requested: str | None) -> str:
+        """The served model id for a request's ``model``; raises a LookupError (-> 404) for another model."""
+        fn = getattr(self.engine, "check_model", None)
+        return fn(requested) if callable(fn) else (requested or "clef-flash")
 
 
 __all__ = ["AppContext", "Hook", "SystemOneRequest"]

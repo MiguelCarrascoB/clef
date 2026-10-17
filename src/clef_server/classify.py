@@ -210,6 +210,7 @@ class ClassifierRunRequest(_Base):
     images: list[str] | None = None
     videos: list[str] | None = None
     threshold: float | None = Field(None, ge=0.0, le=1.0, description="multi-label classifiers only")
+    version: int | None = Field(None, ge=1, description="classifier version (default: the latest)")  # C1
 
     @field_validator("images", "videos")
     @classmethod
@@ -222,6 +223,7 @@ class ClassifierBatchRequest(_Base):
 
     inputs: list[Any]
     threshold: float | None = Field(None, ge=0.0, le=1.0)
+    version: int | None = Field(None, ge=1, description="classifier version (default: the latest)")  # C1
 
     @field_validator("inputs")
     @classmethod
