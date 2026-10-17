@@ -152,12 +152,21 @@ def test_uvicorn_log_config_json_end_to_end(capsys):
 
 @pytest.mark.parametrize("fmt", ["text", "json"])
 def test_run_passes_log_config(monkeypatch, fmt):
-    seen = {}
+    seen = []
+
+    def run(self) -> None:
+        seen.append(self.config)
+        self.started = True
+
     monkeypatch.setattr(main, "create_app", lambda cfg: "app")
-    monkeypatch.setattr(main.uvicorn, "run", lambda app, **kw: seen.update(kw))
-    main.run(Config(log_format=fmt))
-    assert seen["workers"] == 1
-    lc = seen["log_config"]
+    monkeypatch.setattr(main.DrainingServer, "run", run)
+    try:
+        main.run(Config(log_format=fmt))
+    finally:
+        for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):  # uvicorn.Config ran dictConfig
+            logging.getLogger(name).handlers.clear()
+    assert seen[0].workers == 1
+    lc = seen[0].log_config
     assert "redact_secrets" in lc["handlers"]["access"]["filters"]
     assert (lc["formatters"]["access"].get("()") is JsonFormatter) == (fmt == "json")
 

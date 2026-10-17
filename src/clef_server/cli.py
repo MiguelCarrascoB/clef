@@ -41,6 +41,7 @@ FLAG_ENV = {
     "max_device_memory_gb": "CLEF_MAX_DEVICE_MEMORY_GB",
     "model_path": "CLEF_MODEL_PATH",
     "log_format": "CLEF_LOG_FORMAT",
+    "drain_s": "CLEF_DRAIN_S",
 }
 
 MIN_FREE_GB = 21.0  # the release is ~19 GB; leave headroom for the partial download
@@ -534,6 +535,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="log_format",
         choices=LOG_FORMATS,
         help="CLEF_LOG_FORMAT: json = one object per line",
+    )
+    sp.add_argument(
+        "--drain-s",
+        dest="drain_s",
+        type=float,
+        metavar="S",
+        help="CLEF_DRAIN_S: keep serving S seconds after SIGTERM with /readyz 503 (default 0)",
     )
     sp.add_argument("--detach", action="store_true", help="start in the background and wait until healthy")
     sp.add_argument(

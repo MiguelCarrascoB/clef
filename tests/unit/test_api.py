@@ -1011,10 +1011,28 @@ def test_cors_off_and_on():
         assert "X-Request-ID" in r.headers["access-control-expose-headers"]
 
 
-def test_run_warns_when_exposed_without_key(monkeypatch, caplog):
+@pytest.fixture
+def no_serve(monkeypatch):
+    """DrainingServer.run patched to a started no-op; uvicorn's log handlers are dropped afterwards."""
+    import logging
+
     import clef_server.main as main_mod
 
-    monkeypatch.setattr(main_mod.uvicorn, "run", lambda *a, **k: None)
+    seen: list[Any] = []
+
+    def run(self) -> None:
+        seen.append(self)
+        self.started = True
+
+    monkeypatch.setattr(main_mod.DrainingServer, "run", run)
+    yield seen
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):  # uvicorn.Config ran dictConfig
+        logging.getLogger(name).handlers.clear()
+
+
+def test_run_warns_when_exposed_without_key(monkeypatch, caplog, no_serve):
+    import clef_server.main as main_mod
+
     monkeypatch.setattr(main_mod, "create_app", lambda cfg: None)
     with caplog.at_level("WARNING", logger="clef"):
         main_mod.run(Config(host="0.0.0.0"))
@@ -1024,6 +1042,135 @@ def test_run_warns_when_exposed_without_key(monkeypatch, caplog):
         main_mod.run(Config(host="0.0.0.0", api_key="k"))
         main_mod.run(Config(host="127.0.0.1"))
     assert not caplog.records
+
+
+# ------------------------------------------------------------------ graceful drain (CLEF_DRAIN_S)
+
+
+class FakeTimer:
+    def __init__(self, interval: float, fn: Any, args: tuple) -> None:
+        self.interval, self.fn, self.args = interval, fn, args
+        self.started = self.cancelled = False
+        self.daemon = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+    def fire(self) -> None:
+        if not self.cancelled:
+            self.fn(*self.args)
+
+
+def drain_server(drain_s: float):
+    import types
+
+    import uvicorn
+
+    from clef_server.main import DrainingServer
+
+    app = types.SimpleNamespace(state=types.SimpleNamespace(draining=False))
+    timers: list[FakeTimer] = []
+
+    def timer(interval: float, fn: Any, args: tuple) -> FakeTimer:
+        timers.append(FakeTimer(interval, fn, args))
+        return timers[-1]
+
+    server = DrainingServer(uvicorn.Config(app, log_config=None), app, drain_s, timer=timer)
+    return server, app, timers
+
+
+def test_drain_zero_exits_on_the_first_signal_like_uvicorn():
+    import signal
+
+    server, app, timers = drain_server(0)
+    server.handle_exit(signal.SIGTERM, None)
+    assert server.should_exit and not server.force_exit and not timers
+    assert app.state.draining
+    server.handle_exit(signal.SIGINT, None)  # uvicorn: a second Ctrl-C forces the exit
+    assert server.force_exit
+
+
+def test_drain_keeps_serving_with_readyz_draining_then_exits():
+    import signal
+
+    server, app, timers = drain_server(5)
+    server.handle_exit(signal.SIGTERM, None)
+    assert app.state.draining and not server.should_exit  # still serving: /readyz answers 503 "draining"
+    assert len(timers) == 1 and timers[0].started and timers[0].daemon and timers[0].interval == 5
+    timers[0].fire()  # the grace period is over: uvicorn's own shutdown starts
+    assert server.should_exit and not server.force_exit
+    server.handle_exit(signal.SIGINT, None)  # a Ctrl-C during the shutdown still forces it
+    assert server.force_exit and len(timers) == 1
+
+
+def test_second_signal_during_the_drain_exits_at_once():
+    import signal
+
+    server, app, timers = drain_server(5)
+    server.handle_exit(signal.SIGINT, None)
+    assert not server.should_exit
+    server.handle_exit(signal.SIGINT, None)
+    assert server.should_exit and not server.force_exit and timers[0].cancelled
+    timers[0].fire()  # a timer that fires anyway changes nothing
+    assert not server.force_exit
+    server.handle_exit(signal.SIGINT, None)
+    assert server.force_exit and len(timers) == 1
+
+
+def test_readyz_is_503_draining_while_the_drain_runs():
+    import signal
+
+    import uvicorn
+
+    from clef_server.main import DrainingServer
+
+    client, _, _ = make()
+    with client:
+        assert client.get("/readyz").status_code == 200
+        server = DrainingServer(uvicorn.Config(client.app, log_config=None), client.app, 5)
+        server.handle_exit(signal.SIGTERM, None)
+        try:
+            r = client.get("/readyz")
+            assert r.status_code == 503 and r.json()["status"] == "draining"
+            assert client.get("/livez").status_code == 200  # still serving
+        finally:
+            server._drain_timer.cancel()
+
+
+def test_run_serves_one_worker_with_the_drain_from_config(no_serve):
+    from clef_server import main as main_mod
+
+    main_mod.run(Config(drain_s=2.5))
+    (server,) = no_serve
+    assert server.drain_s == 2.5 and server.config.workers == 1
+    assert server.config.app is server._app
+
+
+def test_run_exits_3_when_the_server_did_not_start(monkeypatch):
+    from clef_server import main as main_mod
+
+    monkeypatch.setattr(main_mod.DrainingServer, "run", lambda self: None)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            main_mod.run(Config())
+        assert exc.value.code == 3
+    finally:
+        import logging
+
+        for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+            logging.getLogger(name).handlers.clear()
+
+
+def test_drain_s_must_not_be_negative(monkeypatch):
+    monkeypatch.delenv("CLEF_DRAIN_S", raising=False)
+    assert Config().drain_s == 0
+    monkeypatch.setenv("CLEF_DRAIN_S", "5")
+    assert Config().drain_s == 5
+    with pytest.raises(ValueError, match="CLEF_DRAIN_S"):
+        Config(drain_s=-1)
 
 
 # ------------------------------------------------------------------ stats / time series / events

@@ -15,10 +15,13 @@ import importlib
 import json
 import logging
 import re
+import signal
+import sys
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, nullcontext, suppress
 from pathlib import Path
 from typing import Any
 
@@ -285,7 +288,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         try:
             yield
         finally:
-            app_.state.draining = True  # /readyz 503 first: the LB stops routing before the engine stops
+            app_.state.draining = True  # other launchers; under run() DrainingServer set it already
             for hook in reversed(ctx.on_shutdown):
                 try:
                     await hook()
@@ -821,8 +824,65 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     return app
 
 
+class DrainingServer(uvicorn.Server):
+    """uvicorn Server with a drain: after the FIRST exit signal it keeps serving for ``drain_s`` seconds.
+
+    uvicorn closes its sockets and connections before the lifespan shutdown runs, so the lifespan's own
+    ``draining = True`` is never seen by a client. Here the first SIGTERM / Ctrl-C sets ``app.state.draining``
+    (``/readyz`` answers 503 "draining" while requests are still served) and starts a timer; when it ends,
+    uvicorn's own ``handle_exit`` starts the shutdown. A second signal during the drain exits at once, and
+    later ones keep uvicorn's semantics (a Ctrl-C during the shutdown forces it). ``drain_s = 0``: no drain.
+    """
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        app: Any,
+        drain_s: float = 0.0,
+        timer: Callable[..., Any] = threading.Timer,
+    ) -> None:
+        super().__init__(config)
+        self._app = app
+        self.drain_s = drain_s
+        self._timer = timer
+        self._drain_timer: Any = None
+
+    def handle_exit(self, sig: int, frame: Any) -> None:
+        if self._drain_timer is not None:  # second signal during the drain: stop waiting
+            self._drain_timer.cancel()
+            self._drain_timer = None
+            super().handle_exit(sig, frame)
+            return
+        if self.should_exit:  # already shutting down: uvicorn decides (force exit on Ctrl-C)
+            super().handle_exit(sig, frame)
+            return
+        if getattr(self._app, "state", None) is not None:
+            self._app.state.draining = True
+        if self.drain_s <= 0:
+            super().handle_exit(sig, frame)
+            return
+        try:
+            name = signal.Signals(sig).name
+        except ValueError:
+            name = str(sig)
+        log.info(
+            "%s: draining for %.1fs (/readyz 503), then shutting down; signal again to stop now",
+            name,
+            self.drain_s,
+        )
+        self._drain_timer = self._timer(self.drain_s, self._drain_done, (sig,))
+        self._drain_timer.daemon = True
+        self._drain_timer.start()
+
+    def _drain_done(self, sig: int) -> None:
+        if self._drain_timer is None:  # a second signal got there first
+            return
+        self._drain_timer = None
+        super().handle_exit(sig, None)
+
+
 def run(cfg: Config | None = None) -> None:
-    """Serve in the foreground: ONE uvicorn worker (one model per process)."""
+    """Serve in the foreground: ONE uvicorn worker (one model per process); drains CLEF_DRAIN_S on stop."""
     cfg = cfg or config_mod.load()
     warning = bind_warning(cfg)
     if warning:
@@ -831,7 +891,14 @@ def run(cfg: Config | None = None) -> None:
             log.warning(line)
     # log_config: redact ?key= in the access log and apply CLEF_LOG_FORMAT to uvicorn's own loggers
     log_config = uvicorn_log_config(cfg.log_format)
-    uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port, workers=1, log_config=log_config)
+    app = create_app(cfg)
+    config = uvicorn.Config(app, host=cfg.host, port=cfg.port, workers=1, log_config=log_config)
+    server = DrainingServer(config, app, cfg.drain_s)
+    # the tail of uvicorn.run(): the re-raised Ctrl-C after a clean exit is not an error; a failed start is 3
+    with suppress(KeyboardInterrupt):
+        server.run()
+    if not server.started:
+        sys.exit(3)  # uvicorn's STARTUP_FAILURE
 
 
 if __name__ == "__main__":

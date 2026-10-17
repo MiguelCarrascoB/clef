@@ -137,6 +137,9 @@ class Config:
     cors_origins: tuple[str, ...] = field(
         default_factory=lambda: _csv(os.environ.get("CLEF_CORS_ORIGINS", ""))
     )
+    # Seconds to keep serving after the first SIGTERM / Ctrl-C with /readyz 503 "draining", so a load balancer
+    # stops routing first (main.run only; 0 = stop at once). A second signal skips the rest.
+    drain_s: float = field(default_factory=lambda: _float("CLEF_DRAIN_S", 0.0))
 
     # state (logs, pidfile, saved classifiers)
     state_dir: str = field(default_factory=lambda: str(default_state_dir()))
@@ -224,6 +227,8 @@ class Config:
             raise ValueError("CLEF_RATE_LIMIT must be >= 0 (0 disables it)")
         if self.interactive_burst < 1:
             raise ValueError("CLEF_INTERACTIVE_BURST must be >= 1")
+        if self.drain_s < 0:
+            raise ValueError("CLEF_DRAIN_S must be >= 0 (0 = no drain)")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
 
     def api_keys(self) -> dict[str, str]:

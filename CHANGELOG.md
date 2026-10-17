@@ -4,7 +4,9 @@
 
 ### Added
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
-  503 with `status` `loading|warming|error|draining`. Shutdown flips it to draining before the engine stops. The
+  503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)
+  the first SIGTERM / Ctrl-C keeps the server up for N seconds answering `draining` (a second signal stops at once),
+  so a load balancer stops routing first; e.g. `5` behind a load balancer, below Docker's 10 s stop timeout. The
   Docker images and compose file now health-check `/readyz` (start period 600 s), so a container whose model failed
   to load is reported unhealthy; `/livez` stays the process-up probe.
 - `CLEF_LOG_FORMAT=json` (`clef serve --log-format json`): app, uvicorn and access log lines as one JSON object per

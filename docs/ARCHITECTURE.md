@@ -59,6 +59,7 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_API_KEY` | unset | one key, named `default` |
 | `CLEF_API_KEYS` | unset | `name:key,name2:key2` or a path to a file with one `name:key` per line (`#` comments) |
 | `CLEF_RATE_LIMIT` | `0` | requests per minute per key (per client IP when auth is off); 0 = off |
+| `CLEF_DRAIN_S` | `0` | seconds `main.run` keeps serving after the first SIGTERM / Ctrl-C with `/readyz` 503 `draining` (see [`GET /readyz`](#get-readyz)); `>= 0`, 0 = stop at once. `--drain-s` |
 | `CLEF_CORS_ORIGINS` | empty | comma-separated allowed origins (`*` allowed); empty = CORS off |
 | `CLEF_STATE_DIR` | per OS | Linux `$XDG_STATE_HOME/clef` (`~/.local/state/clef`), macOS `~/Library/Application Support/clef`, Windows `%LOCALAPPDATA%\clef`. Legacy alias `CLEF_LOG_DIR` |
 | `CLEF_MAX_LABELS` | `64` | labels per classify request / saved classifier |
@@ -78,7 +79,7 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_LOG_FORMAT` | `text` | `text` or `json`: server log lines (app, uvicorn, access log); json = one object per line, see [Logging](#logging-logspy) |
 | v2 knobs | unchanged | `CLEF_MAX_TOKENS`, `CLEF_MAX_BODY_MB`, `CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES`, `CLEF_VIDEO_FPS`, `CLEF_MAX_BATCH`, `CLEF_MAX_QUESTIONS`, `CLEF_ALLOW_URL_FETCH`, `CLEF_URL_FETCH_MAX_MB`, `CLEF_MAX_MICROBATCH`, `CLEF_BATCH_WINDOW_MS`, `CLEF_BUCKETS`, `CLEF_PAD_MULTIPLE` (64, measured on ROCm only), `CLEF_PAD_TO_BUCKET`, `CLEF_WARMUP`, `CLEF_LOG_STATE`, `CLEF_LOG_BUFFER` |
 
-`Config` validates enums (device, dtype, quant, quant backend, offload, log format), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range, `CLEF_RATE_LIMIT >= 0` and `CLEF_INTERACTIVE_BURST >= 1` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
+`Config` validates enums (device, dtype, quant, quant backend, offload, log format), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range, `CLEF_RATE_LIMIT >= 0`, `CLEF_INTERACTIVE_BURST >= 1` and `CLEF_DRAIN_S >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
 `auth_required`, `is_loopback`, `public_limits()`.
 
 ## Backend interface (`backend.py`)
@@ -497,9 +498,16 @@ Guide: [jobs.md](jobs.md).
 Readiness for load balancers and orchestrators (open, like `/livez`). 200 `{"ready": true}` only when the engine
 status is `ready` and the app is not draining; otherwise 503 `{"ready": false, "status":
 "loading|warming|error|draining", "error": <engine error or null>}`. Unlike `/health`, `warming` is not ready.
-Draining: the lifespan sets `app.state.draining = True` as the first step of shutdown, before the `on_shutdown` hooks
-and `engine.shutdown()`, so `/readyz` flips to 503 while the engine is still serving. Draining does not reject
-requests: inference keeps working until the engine stops. Liveness stays on `/livez` (process up); the Docker
+Draining: uvicorn closes its listening sockets and drains connections BEFORE the lifespan shutdown runs, so a flag
+set there is never seen by a client. `main.run` therefore serves through `DrainingServer` (a `uvicorn.Server`
+subclass): the FIRST SIGTERM / Ctrl-C sets `app.state.draining = True` and keeps serving for `CLEF_DRAIN_S`
+seconds (`/readyz` answers 503 `draining`, every other route works as usual), then calls uvicorn's own
+`handle_exit` and the normal shutdown starts. A second signal during the drain skips the rest of it; after that
+uvicorn's semantics apply (another Ctrl-C forces the exit). `CLEF_DRAIN_S=0` (default) stops at once, as before.
+The lifespan still sets `draining = True` first thing at shutdown, for launchers other than `main.run` (plain
+`uvicorn`). A drain only helps a load balancer that probes `/readyz` faster than it lasts: probe interval x
+failure threshold must be below `CLEF_DRAIN_S`, and `CLEF_DRAIN_S` below the supervisor's stop timeout (Docker
+sends SIGKILL after 10 s by default; `clef stop` waits 30 s). Liveness stays on `/livez` (process up); the Docker
 HEALTHCHECK uses `/readyz` with a long start period so a container whose model failed to load turns unhealthy.
 
 ### `GET /v1/stats?window_s=300`

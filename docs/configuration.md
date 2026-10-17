@@ -28,6 +28,7 @@ See [Smaller GPUs](memory.md) for which combination fits which card.
 | `CLEF_API_KEY` / `CLEF_API_KEYS` | unset | one key, or `name:key,name2:key2` / a path to a file with one `name:key` per line |
 | `CLEF_RATE_LIMIT` | `0` | requests per minute per key (per client IP when auth is off); 0 = off |
 | `CLEF_CORS_ORIGINS` | empty | comma-separated allowed origins (`*` allowed); empty = CORS off |
+| `CLEF_DRAIN_S` | `0` | seconds to keep serving after the first SIGTERM / Ctrl-C while `/readyz` answers 503 `draining`, so a load balancer stops routing first; a second signal stops at once. `0` = stop at once. Behind a load balancer use e.g. `5` (below Docker's 10 s stop timeout). `--drain-s` |
 | `CLEF_STATE_DIR` | per OS | logs, pidfile, saved classifiers and the jobs database (`jobs.db`) |
 
 ## Limits

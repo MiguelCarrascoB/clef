@@ -28,10 +28,13 @@ VOLUME ["/models", "/data"]
 EXPOSE 8910
 
 # CLEF_HOST=0.0.0.0 makes the server reachable from outside the container: set CLEF_API_KEYS (see docker-compose.yml).
-# Healthy = model loaded: the check hits /readyz (503 while loading, warming, after a failed load, or draining at
-# shutdown), not /livez, so a container whose model failed to load turns unhealthy instead of looking fine.
+# Healthy = model loaded: the check hits /readyz (503 while loading, warming, after a failed load, or during the
+# CLEF_DRAIN_S drain after SIGTERM), not /livez, so a container whose model failed to load turns unhealthy
+# instead of looking fine.
 # /livez stays the "process up" probe (use it for orchestrator liveness / restart decisions). Loading the weights
 # takes minutes, so failures in the first 10 min (--start-period) do not count; the first success ends it early.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
   CMD python3 -c "import os,urllib.request as u; u.urlopen('http://127.0.0.1:%s/readyz' % os.environ.get('CLEF_PORT','8910'), timeout=3)"
+# Behind a load balancer that probes /readyz, set CLEF_DRAIN_S (e.g. 5, below `docker stop`'s 10 s) so it sees the
+# 503 and stops routing before the server stops; this 30 s HEALTHCHECK is too slow to notice a drain itself.
 CMD ["clef", "serve"]

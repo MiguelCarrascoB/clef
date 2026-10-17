@@ -33,6 +33,11 @@ def test_serve_log_format_flag_maps_to_env():
         parse("serve", "--log-format", "xml")
 
 
+def test_serve_drain_flag_maps_to_env():
+    assert cli.serve_env(parse("serve", "--drain-s", "5"), base={})["CLEF_DRAIN_S"] == "5.0"
+    assert "CLEF_DRAIN_S" not in cli.serve_env(parse("serve"), base={})
+
+
 def test_serve_memory_flags_map_to_env():
     a = parse("serve", "--offload", "cpu", "--max-device-memory-gb", "14.5", "--quant", "int8")
     env = cli.serve_env(a, base={})
