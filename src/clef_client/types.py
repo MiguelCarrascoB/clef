@@ -122,6 +122,10 @@ class Job:
     webhook: dict[str, Any] | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    priority: str = "normal"
+    waiting_reason: str | None = None  # off_hours | active_limit | turn
+    next_window_at: str | None = None
+    expired: bool = False
 
     @property
     def finished(self) -> bool:
@@ -199,6 +203,10 @@ def parse_job(body: dict[str, Any]) -> Job:
         webhook=body.get("webhook"),
         raw=body,
         warnings=list(body.get("warnings") or []),
+        priority=body.get("priority") or "normal",
+        waiting_reason=body.get("waiting_reason"),
+        next_window_at=body.get("next_window_at"),
+        expired=bool(body.get("expired")),
     )
 
 

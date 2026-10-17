@@ -8,7 +8,7 @@ page or stream the results when it is done.
 ```mermaid
 stateDiagram-v2
     [*] --> queued: POST /v1/jobs (202)
-    queued --> running: runner picks it up (FIFO)
+    queued --> running: the scheduler admits it (class, fair share, window)
     running --> succeeded: all items processed
     running --> failed: systemic error, every item failed, or the circuit breaker tripped
     running --> cancelled: POST .../cancel (between chunks)
@@ -22,9 +22,9 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-Interactive requests (`/v1/classify`, `/v1/systemone`, ...) stay responsive while a job runs: the runner
-processes one job at a time and keeps **one chunk** (`CLEF_MAX_MICROBATCH` records, 8 by default) in flight
-at the engine, and the engine queue has a **priority lane**: job chunks go in the background lane, requests in
+Interactive requests (`/v1/classify`, `/v1/systemone`, ...) stay responsive while jobs run: up to
+`CLEF_JOB_ACTIVE` jobs advance in turns, but only **one chunk** (`CLEF_MAX_MICROBATCH` records, 8 by default)
+across all of them is in flight at the engine, and the engine queue has a **priority lane**: job chunks go in the background lane, requests in
 the interactive one, and the next micro-batch is interactive when any request is waiting (up to
 `CLEF_INTERACTIVE_BURST` interactive micro-batches in a row, then one background group). A request
 arriving mid-job therefore waits only for the job micro-batch already being computed (it is never preempted):
@@ -58,6 +58,8 @@ All under `/v1`, same API key rules as the rest. Errors are `{detail, request_id
 ```
 
 `webhook` and `metadata` are optional (`metadata` is any JSON up to 16 KB, echoed back on every read).
+Scheduling fields, all optional, are described in [Scheduling](#scheduling): `priority`, `urgent`, `schedule`,
+`expire_after_s`.
 
 **Idempotency.** Send an `Idempotency-Key` header (1-128 printable ASCII characters) and a resubmission with the
 same key by the same API key returns the job created the first time (`202`, plus `Idempotent-Replay: true`)
@@ -111,6 +113,8 @@ the model is still loading a job waits and retries; it does not fail. Every fail
   "result": null,
   "warnings": ["3 of 12000 item(s) failed; their result rows carry an 'error' field"],
   "metadata": {"batch": "2026-10-03"},
+  "priority": "normal", "urgent": false, "schedule": null, "waiting_reason": "turn", "next_window_at": null,
+  "expired": false, "model": "clef-flash@abc1234", "tokens": 381204,
   "webhook": {"url": "https://hooks.example.com/clef", "events": ["job.succeeded"], "has_secret": true,
               "failed_deliveries": 0,
               "deliveries": {"job.succeeded": {"id": "...", "status": "pending", "attempts": 0}}}
@@ -277,6 +281,46 @@ CLEF_WEBHOOK_ALLOW='hooks.example.com,*.corp.example.net,192.168.1.0/24'
 * Secrets are stored in the database (`clef.db` in the state directory, or your `CLEF_DATABASE_URL`) in clear
   text, because HMAC needs them; protect it like the API keys file. The secret is write-only through the API.
 
+## Scheduling
+
+Several jobs can be `running` at once (up to `CLEF_JOB_ACTIVE`, default 4); they take turns at the engine, one
+chunk at a time, so a long job from one key no longer blocks everyone else's. Every job in turns shows
+`running` in `GET /v1/jobs`; `waiting_reason` says why one is not advancing right now: `turn` (waiting for its
+chunk), `active_limit` (no free slot), `off_hours` (outside its window; `next_window_at` says when it opens).
+
+**Priority.** `"priority": "low" | "normal" (default) | "high"`. Classes are strict: while a `high` job has work,
+`normal` and `low` wait. A job that has not had a turn for `CLEF_JOB_AGING_S` (default 3600 s) moves up one class
+(never to `urgent`), so nothing starves. `GET /v1/jobs?priority=high` filters.
+
+**Fair share.** Inside a class, turns are shared per key name (the job owner), weighted by records: two keys with
+one huge job each advance at the same speed, and a key with ten jobs does not get ten times the turns. A key
+that comes back after being idle starts level with the others; it does not collect the turns it missed.
+
+**Off-hours window.** `"schedule": {"window": "20:00-06:00", "tz": "Europe/Madrid"}` restricts a job to a window
+(`start > end` crosses midnight, `start == end` is 24 h; `tz` defaults to `CLEF_JOB_TZ`). Without `schedule`, a
+job uses `CLEF_JOB_WINDOW` when it is set. Outside the window a queued job stays `queued`; a job that is running
+when the window closes finishes its current chunk, then stays `running` (`waiting_reason: "off_hours"`) without
+taking turns or holding a slot, and continues when the window opens again. On a daylight-saving change, an edge
+inside the skipped hour starts at the next valid minute and an edge in the repeated hour uses the first
+occurrence. A bad window or time zone is `400`.
+
+**Urgent.** `"urgent": true` needs the `urgent` scope (`403` otherwise). The job takes the top class, ignores its
+window and does not wait for a free slot.
+
+**Expiry.** `"expire_after_s": 7200` cancels the job (`status: "cancelled"`, `error: "expired"`, `expired: true`)
+that long after it first could run: from submit, or, for a windowed job submitted outside its window, from the
+moment the window first opens. It stops between chunks; the rows already computed are kept.
+
+**Daily quota.** For a key with a daily quota, the whole job (its record count) is reserved at submit, against
+the UTC day of the submit, even if it runs on later days: `429 daily quota exceeded` when it does not fit,
+nothing is queued. When a job ends `cancelled` or `failed` (expiry included), the records it did not process are
+handed back to that day. Records answered from the result cache are not charged. A replay of an
+`Idempotency-Key` is free.
+
+Everything above is kept in the database, so queued jobs, priorities, windows and reservations survive a
+restart; the fair-share counters restart from zero. A job that was paused off-hours when the server stopped
+resumes as `interrupted` and waits for its window like a queued one.
+
 ## Limits, ownership, retention
 
 | Setting | Default | Meaning |
@@ -290,6 +334,10 @@ CLEF_WEBHOOK_ALLOW='hooks.example.com,*.corp.example.net,192.168.1.0/24'
 | `CLEF_WEBHOOK_ATTEMPTS` | 10 | Delivery attempts for final events. |
 | `CLEF_WEBHOOK_BACKOFF_S` | 2 | First retry delay; doubles each attempt. |
 | `CLEF_WEBHOOK_BACKOFF_CAP_S` | 120 | Longest delay between two attempts. |
+| `CLEF_JOB_ACTIVE` | 4 | Jobs that take turns at once (`>= 1`). `1` runs them strictly one after another. |
+| `CLEF_JOB_AGING_S` | 3600 | A waiting job rises one priority class per this many seconds without a turn; `0` = no aging. |
+| `CLEF_JOB_TZ` | `UTC` | Time zone of job windows that give no `tz`, and of `CLEF_JOB_WINDOW`. |
+| `CLEF_JOB_WINDOW` | empty | Default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open. |
 | `CLEF_JOB_MAX_RESUMES` | 3 | A job that crashed the server (found `running` at startup) more often than this fails (`interrupted N times, giving up`); clean restarts do not count; `0` = no limit. |
 
 The request body limit (`CLEF_MAX_BODY_MB`, default 64) applies to `POST /v1/jobs`: roughly 100 000 short
@@ -297,10 +345,11 @@ texts fit, 50 000 long ones may not. Media in `systemone` jobs counts too. Per-r
 tokens) are the same as for the synchronous endpoints.
 
 **Ownership.** With auth off, every caller sees every job. With `CLEF_API_KEY` / `CLEF_API_KEYS` on, a job is
-owned by the key name that submitted it (`default` for `CLEF_API_KEY`); other keys get `404` for it (not `403`)
-and do not see it in `GET /v1/jobs`. There is no admin view: read the database (see [Storage](#storage)) if you
-need one. Jobs submitted while auth was off (no owner) become admin-only once you turn auth on: other keys get `404` for them. Webhook URLs and
-metadata are visible to the owner.
+owned by the key name that submitted it (`default` for `CLEF_API_KEY`); another key without the `admin` scope
+gets `404` for it (not `403`) and does not see it in `GET /v1/jobs`, while a key without the `jobs` scope gets
+`403` on every `/v1/jobs` route. Keys with the `admin` scope (and the env keys, which have every scope) see
+all jobs, including those submitted while auth was off (no owner), which nobody else sees once auth is on.
+Webhook URLs and metadata are visible to the owner and to admins.
 
 **Persistence and restart.** Jobs, their submitted payloads (your inputs) and result rows live in the database
 (SQLite `<state dir>/clef.db` by default, or Postgres; in clear text, see [Storage](#storage)) and survive restarts.

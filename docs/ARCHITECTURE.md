@@ -39,6 +39,7 @@ tests. Change it first, then the code.
 | `clef_server/models/` | `base.py` (`DecisionModel`, `LocalTensorAdapter`, `Capabilities`, `ModelSpec`, `UnknownModel`), `registry.py` (`clef.models` entry points, `CLEF_MODEL`), `clef_release.py` (clef-flash, clef 27B) |
 | `clef_server/keystore.py` (planned, v3.2) | principals, hashed keys, key cache, quotas (`Quotas`), on `db.py`; shared by the server and `clef keys` |
 | `clef_server/admin.py` (planned, v3.2) | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
+| `clef_server/schedule.py` | pure off-hours window maths for the job scheduler (`Window`, `parse_window`; DST rules); the `Scheduler` itself is in `jobs.py` |
 | `clef_server/cache.py` | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
 | `clef_server/router.py`, `clef_server/llm.py` (planned, v3.2) | feature module: routers, label-set versions, the Review queue (`/v1/routers*`, `/v1/review*`); the OpenAI-compatible LLM client |
 | `clef_server/batches.py` (planned, v3.2) | feature module: OpenAI `/v1/files*` and `/v1/batches*` on the `batch` job kind |

@@ -118,11 +118,14 @@ See [Smaller GPUs](memory.md) for the numbers.
   / CIDR for a private address) must be listed. Link-local, multicast and reserved addresses are always refused.
 - **A webhook never arrives**: check `webhook.deliveries` in `GET /v1/jobs/{id}` (`last_status`, `last_error`). The
   allow-list is re-checked, and the host re-resolved, on every attempt. Retries stop after `CLEF_WEBHOOK_ATTEMPTS`.
-- **`404` for a job you submitted**: another API key. Jobs are visible only to the key that created them.
+- **`404` for a job you submitted**: another API key. Jobs are visible only to the key that created them (and to
+  keys with the `admin` scope); a key without the `jobs` scope gets `403`.
 - **`409` on `POST /v1/jobs`**: `CLEF_MAX_JOBS` queued or running jobs; retry after `Retry-After`. On cancel / delete
   it means the job is already finished / still active.
-- **A job stays `queued`**: jobs run one at a time, in order; check `GET /v1/jobs?status=running`. While the model is
-  loading a job waits instead of failing.
+- **A job stays `queued`**: look at `waiting_reason` in `GET /v1/jobs/{id}`: `off_hours` (its window opens at
+  `next_window_at`; `urgent` skips it), `active_limit` (`CLEF_JOB_ACTIVE` jobs are already running) or empty (it is
+  about to be admitted). A job that stays `running` without progress and says `off_hours` or `turn` is waiting for
+  its window or for other jobs' chunks. While the model is loading a job waits instead of failing.
 - **`400 missing_schema` from `/v1/chat/completions`**: clef decides, it does not generate text. Send a
   `response_format` JSON schema (or one forced tool); see [compatibility](openai-compat.md).
 - **`huggingface_hub` cannot find the model**: pass the full route, `model="http://127.0.0.1:8910/hf/models/clef-flash"`,

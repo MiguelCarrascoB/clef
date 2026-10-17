@@ -270,11 +270,24 @@ def classifier_call_body(input: Any, images: Any, videos: Any, threshold: float 
 
 # -- async jobs --
 def job_body(
-    kind: str, payload: dict[str, Any], webhook: str | dict[str, Any] | None, metadata: dict[str, Any] | None
+    kind: str,
+    payload: dict[str, Any],
+    webhook: str | dict[str, Any] | None,
+    metadata: dict[str, Any] | None,
+    priority: str | None = None,
+    urgent: bool = False,
+    schedule: dict[str, Any] | None = None,
+    expire_after_s: float | None = None,
 ) -> dict[str, Any]:
-    """``webhook`` is a URL or ``{"url", "secret", "events"}``."""
+    """``webhook`` is a URL or ``{"url", "secret", "events"}``; the rest is the scheduler's (docs/jobs.md)."""
     hook = {"url": webhook} if isinstance(webhook, str) else webhook
-    return _clean({"kind": kind, "payload": payload, "webhook": hook, "metadata": metadata})
+    return _clean(
+        {
+            "kind": kind, "payload": payload, "webhook": hook, "metadata": metadata,
+            "priority": priority, "urgent": True if urgent else None, "schedule": schedule,
+            "expire_after_s": expire_after_s,
+        }
+    )  # fmt: skip
 
 
 def classify_job_payload(
