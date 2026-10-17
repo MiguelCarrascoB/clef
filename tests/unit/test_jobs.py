@@ -36,6 +36,13 @@ def open_store(cfg: Config) -> JobStore:
     return JobStore(db)
 
 
+def hold_runner(monkeypatch: pytest.MonkeyPatch, store: JobStore) -> list[bool]:
+    """Keep the runner's atomic claim_next off jobs a test sets up by hand; `.clear()` releases it."""
+    hold, real = [True], store.claim_next
+    monkeypatch.setattr(store, "claim_next", lambda: None if hold else real())
+    return hold
+
+
 def sql(store: JobStore, stmt: str, **params: Any) -> list[Any]:
     """Raw SQL for test set-up (the store's own connection discipline)."""
     with store.db.tx() as conn:
@@ -792,9 +799,10 @@ def test_csv_neutralises_strings_only_never_numbers():
     assert flatten(row)["label"] == "=cmd()"  # plain flatten (column discovery) leaves text alone
 
 
-def test_csv_export_of_a_job_with_negative_numbers_is_not_quoted():
+def test_csv_export_of_a_job_with_negative_numbers_is_not_quoted(monkeypatch):
     client, _, app = make()
     store = app.state.ctx.extra["jobs"].store
+    hold_runner(monkeypatch, store)
     with client:
         jid = store.create("custom", None, {}, None, None, 10)["id"]
         store.claim(jid)
@@ -820,9 +828,10 @@ async def test_csv_export_is_capped_at_the_snapshot_so_columns_match_rows():
     store.close()
 
 
-def test_running_job_exports_stop_at_the_rows_present_when_requested():
+def test_running_job_exports_stop_at_the_rows_present_when_requested(monkeypatch):
     client, _, app = make()
     store = app.state.ctx.extra["jobs"].store
+    hold_runner(monkeypatch, store)
     with client:
         jid = store.create("custom", None, {}, None, None, 10)["id"]
         store.claim(jid)
@@ -1031,10 +1040,11 @@ def test_park_is_a_clean_stop_not_a_resume_and_honours_a_pending_cancel():
     store.close()
 
 
-def test_clean_stop_parks_a_job_left_running_outside_the_kind():
+def test_clean_stop_parks_a_job_left_running_outside_the_kind(monkeypatch):
     client, _, app = make()
     store = app.state.ctx.extra["jobs"].store
     state = app.state.ctx.cfg.state_dir
+    hold_runner(monkeypatch, store)
     with client:
         jid = _running(store, hook=None)  # e.g. stopped between claim_next and the kind's first await
     reopened = open_store(Config(state_dir=state))
@@ -1108,8 +1118,7 @@ def test_cancel_is_not_lost_when_park_wins_the_race(monkeypatch):
     store = runner.store
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(runner.dispatcher, "enqueue", lambda job_id, event: sent.append((job_id, event)))
-    hold, real_claim_next = [True], store.claim_next  # the runner's atomic claim must not win the set-up
-    monkeypatch.setattr(store, "claim_next", lambda: None if hold else real_claim_next())
+    hold = hold_runner(monkeypatch, store)
     with client:
         payload = {"inputs": ["a", "b"], "labels": LABELS}
         jid = store.create("classify", None, payload, None, HOOK, 10)["id"]
