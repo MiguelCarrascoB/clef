@@ -134,6 +134,8 @@ pygments==2.21.0
     # via rich
 python-dotenv==1.2.4
     # via uvicorn
+python-multipart==0.0.32
+    # via clef-local (pyproject.toml)
 pyyaml==6.0.3
     # via
     #   huggingface-hub
@@ -200,8 +202,10 @@ typing-inspection==0.4.4
     # via
     #   fastapi
     #   pydantic
-tzdata==2026.5 ; sys_platform == 'win32'
-    # via psycopg
+tzdata==2026.5
+    # via
+    #   clef-local (pyproject.toml)
+    #   psycopg
 uvicorn==0.54.0
     # via clef-local (pyproject.toml)
 uvloop==0.23.0 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'
