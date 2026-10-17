@@ -168,6 +168,37 @@ class ClefClient:
     def delete_classifier(self, name: str) -> dict[str, Any]:
         return self._request("DELETE", f"/v1/classifiers/{quote(name, safe='')}")
 
+    # -- routers and the review queue (docs/router.md) --
+    def put_router(self, name: str, **settings: Any) -> dict[str, Any]:
+        """Create or change a router (seeds, instructions, domain_hint, mode, max_labels, gate)."""
+        return self._request("PUT", f"/v1/routers/{quote(name, safe='')}", json=settings)
+
+    def get_router(self, name: str) -> dict[str, Any]:
+        return self._request("GET", f"/v1/routers/{quote(name, safe='')}")
+
+    def list_routers(self) -> list[dict[str, Any]]:
+        return (self._request("GET", "/v1/routers")).get("routers", [])
+
+    def delete_router(self, name: str) -> dict[str, Any]:
+        return self._request("DELETE", f"/v1/routers/{quote(name, safe='')}")
+
+    def route(self, router: str, input: Any) -> dict[str, Any]:
+        """Route one input; the result has ``reason`` and ``review_id`` besides the classify fields."""
+        return self._request("POST", f"/v1/routers/{quote(router, safe='')}/route", json={"input": input})
+
+    def propose(self, router: str) -> dict[str, Any]:
+        return self._request("POST", f"/v1/routers/{quote(router, safe='')}/propose")
+
+    def list_review(self, **filters: Any) -> dict[str, Any]:
+        """``kind``, ``state``, ``router``, ``classifier``, ``limit``, ``offset``."""
+        return self._request("GET", "/v1/review", params={k: v for k, v in filters.items() if v is not None})
+
+    def resolve_review(self, review_id: str, action: str, **body: Any) -> dict[str, Any]:
+        """action: label (label=), discard, approve (labels=[{name, description}] optional), reject."""
+        return self._request(
+            "POST", f"/v1/review/{quote(review_id, safe='')}/resolve", json={"action": action, **body}
+        )
+
     # -- async jobs (large batches; see docs/jobs.md) --
     def submit_job(
         self,
