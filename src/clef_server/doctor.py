@@ -24,10 +24,13 @@ from typing import Any
 
 from . import backend as backend_mod
 from .config import VERSION, Config
+from .models import UnknownModel
+from .models import registry as model_registry
 from .paths import MODEL_MARKER, WEIGHTS_GB, ModelNotFound, resolve_model_path
 
 OK, WARN, FAIL, SKIP = "OK", "WARN", "FAIL", "SKIP"
 DISK_MARGIN_GB = 2.0
+# Files of a clef release (the clef-release adapter's `files`); other adapters list their own.
 MODEL_FILES = [
     "config.json",
     "joint_head.safetensors",
@@ -40,7 +43,6 @@ MODEL_FILES = [
 REQUIRED_IMPORTS = ("fastapi", "uvicorn", "pydantic", "PIL", "httpx")
 ML_IMPORTS = ("torch", "transformers", "safetensors", "huggingface_hub")
 SMOKE_RECORD = {
-    "model": "clef-flash",
     "state": {"invoice": {"vendor": "Acme", "total": 1250.0, "currency": "USD", "status": "overdue"}},
     "questions": {
         "status": {
@@ -310,7 +312,7 @@ def check_backend(r: Report, cfg: Config, server_up: bool = False) -> backend_mo
             b,
             dtype,
             cfg.quant,
-            WEIGHTS_GB,
+            _spec_weights_gb(cfg),
             cap_gb=cfg.max_device_memory_gb,
             offload=cfg.offload,
         )
@@ -322,20 +324,59 @@ def check_backend(r: Report, cfg: Config, server_up: bool = False) -> backend_mo
     except backend_mod.PreflightError as exc:
         r.add(FAIL, "memory preflight", str(exc))
     if cfg.quant == "none" and cfg.offload == "none":
-        advice = backend_mod.recommend_memory_setting(b, WEIGHTS_GB)
+        advice = backend_mod.recommend_memory_setting(b, _spec_weights_gb(cfg))
         if advice:
             r.add(WARN, "memory setting", advice)
     return b
 
 
+def _selected_spec(cfg: Config) -> Any:
+    """The served model's ModelSpec, or None when CLEF_MODEL is unknown (check_model reports it)."""
+    try:
+        return model_registry.resolve_spec(cfg)
+    except UnknownModel:
+        return None
+
+
+def _spec_weights_gb(cfg: Config) -> float:
+    spec = _selected_spec(cfg)
+    return spec.weights_gb if spec is not None else WEIGHTS_GB
+
+
+def check_model(r: Report, cfg: Config) -> Any:
+    """The selected model (CLEF_MODEL + aliases): FAIL for an unknown id; WARN when it cannot fit 24 GB as
+    configured (the 27B fits a 24 GB GPU only with CLEF_QUANT=nf4)."""
+    try:
+        spec = model_registry.resolve_spec(cfg)
+    except UnknownModel as exc:
+        r.add(FAIL, "model", str(exc))
+        return None
+    origin = model_registry.adapter_origin(spec.adapter) or "?"
+    r.add(OK, "model", f"{spec.ref} (adapter {spec.adapter}, {origin})")
+    needs = spec.options.get("fits_24gb")
+    if needs and cfg.quant != needs:
+        r.add(
+            WARN,
+            "model fit",
+            f"{spec.id} is ~{spec.weights_gb:.0f} GB in bf16: fits a 24 GB GPU only with CLEF_QUANT={needs} "
+            f"(now CLEF_QUANT={cfg.quant})",
+        )
+    return spec
+
+
 def check_weights_and_disk(r: Report, cfg: Config) -> None:
+    spec = check_model(r, cfg)
+    if spec is None:
+        check_disk(r, cfg)
+        return
     try:
         path = resolve_model_path(cfg)
     except ModelNotFound as exc:
         r.add(FAIL, "model weights", str(exc))
         check_disk(r, cfg)
         return
-    missing = [f for f in MODEL_FILES if not (path / f).exists()]
+    files = getattr(model_registry.adapters().get(spec.adapter), "files", None) or MODEL_FILES
+    missing = [f for f in files if not (path / f).exists()]
     shards = sorted(path.glob("model-*.safetensors"))
     tiny = [s.name for s in shards if s.stat().st_size < 1_000_000]  # git-lfs pointer files
     if missing:
@@ -352,7 +393,7 @@ def check_disk(r: Report, cfg: Config) -> None:
     while not target.exists() and target != target.parent:
         target = target.parent
     free = shutil.disk_usage(target).free / 1024**3
-    need = WEIGHTS_GB + DISK_MARGIN_GB
+    need = _spec_weights_gb(cfg) + DISK_MARGIN_GB
     r.add(
         OK if free >= need else FAIL,
         "disk space",
@@ -445,6 +486,7 @@ def run_checks(no_gpu: bool = False, smoke: bool = False, echo: bool = True) -> 
         return r
     server_up = check_port(r, cfg)
     if no_gpu:
+        check_model(r, cfg)  # torch-free: an unknown CLEF_MODEL fails CI too
         r.add(SKIP, "gpu / weights / disk", "skipped (--no-gpu)")
         if smoke:
             r.add(SKIP, "smoke", "skipped (--no-gpu)")

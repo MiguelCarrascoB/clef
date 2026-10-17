@@ -96,7 +96,14 @@ class ClefReleaseAdapter(LocalTensorAdapter):
     def catalog(cls) -> list[ModelSpec]:
         return [
             ModelSpec("clef-flash", cls.name, MODEL_REPO, MODEL_REVISION, WEIGHTS_GB, {"params_b": 9}),
-            ModelSpec("clef", cls.name, CLEF_REPO, CLEF_REVISION, CLEF_WEIGHTS_GB, {"params_b": 27}),
+            ModelSpec(
+                "clef",
+                cls.name,
+                CLEF_REPO,
+                CLEF_REVISION,
+                CLEF_WEIGHTS_GB,
+                {"params_b": 27, "fits_24gb": "nf4"},
+            ),
         ]
 
     @classmethod
