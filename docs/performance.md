@@ -67,6 +67,50 @@ on vs off. Output is in `bench/out/perf/` (`summary.md` has the PASS/FAIL and sp
 into [hardware results](hardware-results.md) and flip a default only after parity passes and the gain is outside
 the ~5% same-day drift.
 
+## Job throughput: length sort and tokenize ahead (pending measurement)
+
+Batch jobs feed the engine in micro-batches of `CLEF_MAX_MICROBATCH` (default 8) in input order, so one forward
+can mix a 60-token and a 900-token record and pays the padding of the longest. Two opt-in flags change how a
+job is fed. Both are **off by default** and nothing here is a claim until `bench/sort_check.sh` has run on the GPU.
+The result rows, their order and the cache behaviour are the same either way.
+
+| Flag | What it does |
+| --- | --- |
+| `CLEF_JOB_SORT_WINDOW=N` (`0` = off; 256-1024 recommended) | The job takes N items at a time, encodes them all on CPU threads, sorts the ones that need a forward by token length and sends them to the engine in micro-batches of `CLEF_MAX_MICROBATCH`, so each forward carries similar lengths. Results go back to input order and the window is persisted in one write. |
+| `CLEF_TOKENIZE_AHEAD=1` | While a window is on the GPU, the next one is encoded on CPU threads (one micro-batch when the sort is off). Still ONE GPU worker and ONE job micro-batch in flight; interactive requests keep going first. |
+
+What to expect, and what changes:
+
+- Progress and `job.progress` webhooks move once per window instead of once per micro-batch, and a clean stop,
+  crash or cancel inside a window recomputes (or drops) at most that window. Rows are never persisted out of order,
+  so results stay gap-free and resume works as before.
+- Sorting only changes padding, so probabilities can differ in the last bits (a different batch composition);
+  labels should not change. `sort_check.sh` reports label agreement with the flags-off run.
+- With `CLEF_TOKENIZE_AHEAD=1` the next window's cache lookup happens before the current window's results are
+  stored, so a record repeated in the next window is computed again (same result, different cache statistics).
+- A record the engine rejects, a GPU OOM or a failed encode falls back to the usual per-record isolation.
+
+### The GPU run (pending)
+
+```bash
+ssh gpu; cd ~/src/clef && git checkout upg/f2-sort     # push the branch from the devbox first
+PY=~/venvs/clef/bin/python bash bench/sort_check.sh    # ~20 min; QUICK=1 for a ~5 min smoke, SWEEP=1 adds 256/1024
+```
+
+It starts a fresh server per variant (base, sort with window 512, tokenize ahead, both) with the result cache
+off, submits one classify job of 2000 long-tailed-length inputs three times after a warm-up job, probes
+interactive latency every 2 s, and prints items/s, gain over base, label agreement and a verdict
+(`bench/out/sort/summary.md`). Flip a default only if the median gain is over 10% and above the base spread, labels
+agree and interactive p95 did not get worse. Try `MICROBATCH=16` as well: the gain depends on how many records a
+forward holds.
+
+| Variant | Items/s (median) | Gain vs base | Label agreement | Interactive p95 | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| base (flags off) | pending | - | - | pending | - |
+| `CLEF_JOB_SORT_WINDOW=512` | pending | pending | pending | pending | pending |
+| `CLEF_TOKENIZE_AHEAD=1` | pending | pending | pending | pending | pending |
+| both | pending | pending | pending | pending | pending |
+
 ## Smaller-memory modes
 
 Same GPU, same session, 200 mixed records (`bench/memory_bench.py`). Offload is lossless: the probabilities are

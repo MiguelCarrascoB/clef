@@ -41,6 +41,8 @@ See [Smaller GPUs](memory.md) for which combination fits which card.
 | `CLEF_MAX_BODY_MB` | `64` | request body limit |
 | `CLEF_MASK_FREE` | `0` | `1`: text-only batches call the backbone with `attention_mask=None` and the head uses CPU lengths (no device sync). Opt-in until `bench/perf_check.sh` passes on your GPU; see [Performance](performance.md) |
 | `CLEF_FAST_HEAD` | `0` | `1`: use the batch-vectorised, sync-free joint head (`fast_joint_head`) instead of the release's per-record loops. Same maths, opt-in; see [Performance](performance.md) |
+| `CLEF_JOB_SORT_WINDOW` | `0` | `N > 0`: a job sorts N items at a time by token length (256-1024 recommended) before sending them to the engine; results are persisted per window in input order. Opt-in until `bench/sort_check.sh` shows a gain over 10% on your GPU; see [Performance](performance.md) |
+| `CLEF_TOKENIZE_AHEAD` | `0` | `1`: the next window of a job is tokenized on CPU threads while the current one is on the GPU. Same opt-in rule as the sort |
 | `CLEF_MAX_TOKENS` | `16384` | input tokens per record |
 | `CLEF_MAX_EVAL_ROWS` | `500` | rows per `POST /v1/evaluate` request |
 | `CLEF_CACHE_SIZE` | `10000` | result-cache entries (in-memory LRU, lost on restart); `0` = off. Also bounded by `CLEF_CACHE_MB`. Interactive calls, jobs and evaluate share it; media records are never cached; send `Cache-Control: no-cache` to skip the lookup. Cache hits do not count toward quotas. Stats: `cache` block of `GET /v1/stats` |

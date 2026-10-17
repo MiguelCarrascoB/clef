@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- **Job throughput flags (F2, off by default)**: `CLEF_JOB_SORT_WINDOW=N` sorts each window of N job items by
+  token length before they reach the engine, and `CLEF_TOKENIZE_AHEAD=1` encodes the next window on CPU threads
+  while the current one is on the GPU. Results stay in input order, rows stay gap-free and a resume recomputes at
+  most one window. Applies to the classify, score, systemone and evaluate job kinds. Not enabled by default until
+  `bench/sort_check.sh` shows a gain over 10% on the GPU (measurement pending, see Performance).
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
   503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)
   the first SIGTERM / Ctrl-C keeps the server up for N seconds answering `draining` (a second signal stops at once),
