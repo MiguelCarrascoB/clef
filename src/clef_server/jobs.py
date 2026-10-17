@@ -40,7 +40,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
-from . import dbschema
+from . import dbschema, jobsort
 from .appctx import AppContext
 from .classify import (
     Labels,
@@ -1055,6 +1055,23 @@ class JobHandle:
         finally:
             sched.done(self.id, len(part))
 
+    async def engine_prepared(self, prepared: Any) -> list[Any]:
+        """ONE engine call for records already encoded (F2's window sorter), inside this job's turn."""
+        ctx, sched = self._runner.ctx, self._runner.sched
+        try:
+            await sched.turn(self.id)
+        except JobExpired:
+            self.expired = True
+            raise
+        try:
+            return await ctx.decide_prepared(prepared, priority="background")
+        finally:
+            sched.done(self.id, len(prepared.records))
+
+    def note_hits(self, n: int) -> None:
+        """Cache hits served outside ``engine`` (a sorted window's): not charged, like ``engine``'s own."""
+        self._hits += n
+
     async def add_items(self, items: list[dict[str, Any]], tokens: int = 0) -> None:
         """Persist rows in order; progress advances by ``len(items)``; a row with "error" counts as failed.
 
@@ -1658,7 +1675,8 @@ async def run_chunked(
 ) -> None:
     """Feed items ``job.resume_from .. n`` through the engine, ONE chunk in flight, persisting after each."""
     job.set_total(n)
-    size = max(1, int(ctx.cfg.max_microbatch))
+    sorter = jobsort.windowed(ctx, n, build, decide_resilient)  # F2: None unless a flag is on
+    size = sorter.step if sorter else max(1, int(ctx.cfg.max_microbatch))
     i = job.resume_from
     while i < n:
         if job.cancelled:
@@ -1671,7 +1689,9 @@ async def run_chunked(
             except (ValueError, ValidationError) as exc:
                 built.append((k, ItemError(_msg(exc))))
         good = [r for _, r in built if not isinstance(r, ItemError)]
-        results = iter(await job.decide(good) if good else [])
+        results = iter([])
+        if good:
+            results = iter(await (sorter.decide(job, i, good) if sorter else job.decide(good)))
         rows = []
         for k, r in built:
             out = r if isinstance(r, ItemError) else next(results)

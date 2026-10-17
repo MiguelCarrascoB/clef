@@ -254,6 +254,12 @@ class Config:
     router_max_new_per_day: int = field(default_factory=lambda: _int("CLEF_ROUTER_MAX_NEW_PER_DAY", 10))
     review_ttl_days: float = field(default_factory=lambda: _float("CLEF_REVIEW_TTL_DAYS", 30.0))  # 0 = keep
 
+    # F2: job throughput, default OFF until bench/sort_check.sh shows a gain over 10% (docs/performance.md).
+    # job_sort_window: jobs sort N items at a time by token length (0 = off; 256-1024 recommended);
+    # tokenize_ahead: the next window is encoded on CPU threads while the current one is on the GPU.
+    job_sort_window: int = field(default_factory=lambda: _int("CLEF_JOB_SORT_WINDOW", 0))
+    tokenize_ahead: bool = field(default_factory=lambda: _bool("CLEF_TOKENIZE_AHEAD", False))
+
     def __post_init__(self) -> None:
         for name, value, allowed in (
             ("CLEF_DEVICE", self.device.split(":")[0], DEVICES),
@@ -303,6 +309,8 @@ class Config:
             parse_window(self.job_window or None, self.job_tz)
         except ValueError as exc:
             raise ValueError(f"CLEF_JOB_WINDOW / CLEF_JOB_TZ: {exc}") from exc
+        if self.job_sort_window < 0:
+            raise ValueError("CLEF_JOB_SORT_WINDOW must be >= 0 (0 = off; 256-1024 recommended)")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
         # C2: CLEF_MODEL syntax and the @rev / CLEF_MODEL_REVISION alias (an unknown id is a load error)
         if self.model:
