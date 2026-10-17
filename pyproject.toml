@@ -58,6 +58,8 @@ server = [
   # C1
   "sqlalchemy>=2.0,<2.1",
   "alembic>=1.13",
+  # E1
+  "tzdata",
 ]
 # Backends: torch + the optional fast paths for that backend.
 # accelerate (device_map) and torchvision (video processor) are imported by the model code on load.

@@ -224,6 +224,12 @@ class Config:
     # fast_head: sync-free, batch-vectorised joint head. Both only apply to the clef-release adapter.
     mask_free: bool = field(default_factory=lambda: _bool("CLEF_MASK_FREE", False))
     fast_head: bool = field(default_factory=lambda: _bool("CLEF_FAST_HEAD", False))
+    # E1: job scheduler (docs/jobs.md). job_window "HH:MM-HH:MM" (in job_tz) is the default for jobs that give
+    # no `schedule`; empty = always open.
+    job_tz: str = field(default_factory=lambda: os.environ.get("CLEF_JOB_TZ", "UTC").strip() or "UTC")
+    job_window: str = field(default_factory=lambda: os.environ.get("CLEF_JOB_WINDOW", "").strip())
+    job_active: int = field(default_factory=lambda: _int("CLEF_JOB_ACTIVE", 4))  # jobs taking turns at once
+    job_aging_s: float = field(default_factory=lambda: _float("CLEF_JOB_AGING_S", 3600.0))  # 0 = no aging
 
     def __post_init__(self) -> None:
         for name, value, allowed in (
@@ -251,6 +257,17 @@ class Config:
             raise ValueError("CLEF_CACHE_SIZE must be >= 0 (0 = off)")
         if self.cache_mb < 0:
             raise ValueError("CLEF_CACHE_MB must be >= 0 (0 = off)")
+        # E1: the scheduler's settings (a bad zone or window is a startup error, not a failed job)
+        if self.job_active < 1:
+            raise ValueError("CLEF_JOB_ACTIVE must be >= 1")
+        if self.job_aging_s < 0:
+            raise ValueError("CLEF_JOB_AGING_S must be >= 0 (0 = no aging)")
+        from .schedule import parse_window
+
+        try:
+            parse_window(self.job_window or None, self.job_tz)
+        except ValueError as exc:
+            raise ValueError(f"CLEF_JOB_WINDOW / CLEF_JOB_TZ: {exc}") from exc
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
         # C2: CLEF_MODEL syntax and the @rev / CLEF_MODEL_REVISION alias (an unknown id is a load error)
         if self.model:
