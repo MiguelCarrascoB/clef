@@ -39,6 +39,14 @@ def _pg_admin():  # psycopg is only needed when the Postgres runs are enabled
 
 
 @pytest.fixture(autouse=True)
+def _private_state_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that builds ``Config()`` without ``state_dir`` must never open (or migrate) the developer's real
+    state dir: its clef.db, its v3.1 jobs.db or its classifier files."""
+    monkeypatch.setenv("CLEF_STATE_DIR", str(tmp_path_factory.mktemp("state")))
+    monkeypatch.delenv("CLEF_LOG_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def db_backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     backend = getattr(request, "param", "sqlite")
     if backend == "sqlite":

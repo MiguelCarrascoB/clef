@@ -384,6 +384,113 @@ def audit(
     )
 
 
+# ------------------------------------------------------------------ CLI helpers (clef db / backup / doctor)
+
+
+def peek_version(url: str) -> str | None:
+    """The schema version without creating or changing anything: None when a SQLite file does not exist,
+    "" when the database was never migrated, "legacy" for a v3.1 jobs schema without alembic_version."""
+    url = normalise_url(url)
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite":
+        path = Path(parsed.database or "")
+        if not path.is_file():
+            return None
+        con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5)
+        try:
+            names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "alembic_version" not in names:
+                return "legacy" if "jobs" in names else ""
+            return "+".join(sorted(r[0] for r in con.execute("SELECT version_num FROM alembic_version")))
+        finally:
+            con.close()
+    db = Database(url, pool_size=1)
+    try:
+        with db.read() as conn:
+            if "alembic_version" not in inspect(conn).get_table_names():
+                return "legacy" if "jobs" in inspect(conn).get_table_names() else ""
+        return db.schema_version()
+    except OperationalError as exc:
+        raise DatabaseError(f"cannot connect to {db.display_url}: {exc.orig}") from exc
+    finally:
+        db.close()
+
+
+def version_state(current: str | None) -> str:
+    """ "current" | "behind" (the server upgrades it) | "ahead" (newer than this code) | "missing"."""
+    if current is None:
+        return "missing"
+    if current == code_version():
+        return "current"
+    if current in ("", "legacy"):
+        return "behind"
+    known = known_revisions()
+    return "behind" if all(rev in known for rev in current.split("+")) else "ahead"
+
+
+def row_counts(db: Database) -> dict[str, int]:
+    with db.read() as conn:
+        return {
+            tbl.name: conn.execute(select(func.count()).select_from(tbl)).scalar_one()
+            for tbl in t.metadata.sorted_tables
+        }
+
+
+def copy_database(source: Database, target: Database, batch: int = 1000) -> dict[str, int]:
+    """Every table in FK order, ``batch`` rows at a time, in ONE target transaction (all or nothing).
+
+    The target is upgraded first and must be empty. Postgres identity sequences are reset to MAX(id).
+    """
+    if source.schema_version() != code_version():
+        raise DatabaseError(
+            f"the source is at schema {source.schema_version() or 'none'}, clef expects {code_version()}:"
+            " run `clef db upgrade` against it first (or start the server on it once)"
+        )
+    target.upgrade()
+    busy = {name: n for name, n in row_counts(target).items() if n}
+    if busy:
+        raise DatabaseError(f"the target is not empty ({', '.join(f'{k}: {v}' for k, v in busy.items())})")
+    copied: dict[str, int] = {}
+    with target.tx() as dst:
+        for tbl in t.metadata.sorted_tables:
+            n = 0
+            with source.read() as src:
+                result = src.execution_options(yield_per=batch).execute(select(tbl))
+                for part in result.partitions(batch):
+                    dst.execute(insert(tbl), [dict(r._mapping) for r in part])
+                    n += len(part)
+            copied[tbl.name] = n
+        if target.dialect == "postgresql":
+            for tbl in t.metadata.sorted_tables:
+                for col in tbl.columns:
+                    if col.identity is not None:
+                        dst.execute(
+                            select(
+                                func.setval(
+                                    func.pg_get_serial_sequence(tbl.name, col.name),
+                                    func.coalesce(func.max(col), 1),
+                                    func.max(col).isnot(None),
+                                )
+                            ).select_from(tbl)
+                        )
+    return copied
+
+
+def backup_sqlite(path: Path, out: Path) -> None:
+    """The sqlite3 online backup API: a consistent copy while the server keeps writing. ``out`` is 0600."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    os.close(os.open(out, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    src = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=30)
+    try:
+        dst = sqlite3.connect(str(out))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
 def cli_actor() -> str:
     """Audit actor for CLI writes: ``cli:<os user>``."""
     try:
