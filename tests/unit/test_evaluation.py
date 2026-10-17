@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from typing import Any
 
 import pytest
 
@@ -188,6 +189,8 @@ def test_evaluate_saved_classifier_and_multi_label(api) -> None:
 
 
 class FakeJob:
+    ctx: Any = None  # set by _kind(app): the app whose engine `decide` uses (a real JobHandle has the runner)
+
     def __init__(self, cancel_after: int | None = None, stored: list[dict] | None = None) -> None:
         self.total = 0
         self.items: list[dict] = list(stored or [])
@@ -207,8 +210,17 @@ class FakeJob:
     def cancelled(self) -> bool:
         return self.cancel_after is not None and len(self.items) >= self.cancel_after
 
+    async def decide(self, reqs: list[Any]) -> list[Any]:
+        from clef_server.jobs import decide_resilient
+
+        return await decide_resilient(self.ctx, self, reqs)  # type: ignore[arg-type]
+
+    async def engine(self, part: list[Any]) -> list[Any]:
+        return await self.ctx.decide(part, batch=len(part) > 1, label="items")
+
 
 def _kind(app):
+    FakeJob.ctx = app.state.ctx
     return app.state.ctx.extra["job_kinds"]["evaluate"]
 
 
