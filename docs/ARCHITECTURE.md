@@ -880,7 +880,9 @@ As built (C1; additions to the interface above, nothing in it changed):
 - `claim_next()` returns the running row plus `claimed_from` (`"queued"` | `"interrupted"`, the status before
   the claim); `run_base_done` is set to `done` by the claim and zeroed by `reset_items`. The runner seeds
   `cancel_ids` from the claimed row and never discards an id after a claim. `JobStore.close()` closes its
-  `Database` (tests); the server never calls it.
+  `Database` (tests); the server never calls it. When `claim_next` itself raises (possibly after its commit),
+  `_runner_failed(None)` calls `park_running()`: safe with one job at a time, but E1 (`CLEF_JOB_ACTIVE > 1`)
+  must replace it, since it would park jobs other tasks are still running.
 - `ClassifierStore.put` / `delete` take keyword-only `actor`, `ip`, `request_id` for the audit row (`actor`
   defaults to `created_by`, then `"anonymous"`). The JSON import writes `classifier.put` rows with actor `import`.
 - `AppContext.model_ref()` / `check_model()` are methods (they read the engine's hooks at call time).

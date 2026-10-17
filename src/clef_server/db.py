@@ -140,11 +140,11 @@ class Database:
             if not self.path.exists():
                 with contextlib.suppress(FileExistsError):  # private by default: payloads hold user data
                     os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-            self.engine: Engine = create_engine(
+            self.engine: Engine = create_engine(  # pool_size is a Postgres knob: SQLite writes are serialised
                 self.url,
                 poolclass=QueuePool,
-                pool_size=pool_size,
-                max_overflow=pool_size,
+                pool_size=5,
+                max_overflow=10,
                 connect_args={"timeout": 30, "check_same_thread": False},
             )
             self._sqlite_events()

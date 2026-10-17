@@ -300,7 +300,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             eng.shutdown()
-            db.close()
+            await asyncio.to_thread(db.close)
 
     app = FastAPI(
         title="clef-flash local",
@@ -984,7 +984,11 @@ def run(cfg: Config | None = None) -> None:
             log.warning(line)
     # log_config: redact ?key= in the access log and apply CLEF_LOG_FORMAT to uvicorn's own loggers
     log_config = uvicorn_log_config(cfg.log_format)
-    app = create_app(cfg)
+    try:
+        app = create_app(cfg)
+    except DatabaseError as exc:  # C1: bad URL, no driver, a second server, failed upgrade
+        log.error("cannot start: %s", exc)
+        sys.exit(3)
     config = uvicorn.Config(app, host=cfg.host, port=cfg.port, workers=1, log_config=log_config)
     server = DrainingServer(config, app, cfg.drain_s)
     # the tail of uvicorn.run(): the re-raised Ctrl-C after a clean exit is not an error; a failed start is 3
