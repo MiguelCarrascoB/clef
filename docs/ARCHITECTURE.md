@@ -1666,6 +1666,15 @@ Policy:
   admitted at once, even above `CLEF_JOB_ACTIVE`), or the class would mean nothing while four normal jobs run.
   Candidates are ordered like turn waiters (class after aging, owner pass, jobs the owner already runs,
   interrupted, `seq`).
+- Fair slots: when no slot is free and a job of another owner waits for one (queued in its window, or running
+  and paused `active_limit`), an owner holding more than its share (`ceil(CLEF_JOB_ACTIVE / owners wanting
+  slots)`, at least 1; urgent jobs hold no counted slot) gives up its **youngest** job (highest `seq`; among
+  over-share owners, the one holding most). The victim finishes its chunk in flight, then stays `running` with
+  `waiting_reason: "active_limit"` (D9: like a job paused off-hours, it keeps its task, its progress and its
+  quota reservation; nothing is parked or re-claimed) and gets the next free slot. A job of a higher effective
+  class than the waiter never yields, an urgent job never yields, and a waiter whose owner already holds its
+  share takes nothing. A single owner with nobody waiting still uses every slot. A free slot goes first to the
+  waiting job whose owner holds the fewest. So `CLEF_JOB_ACTIVE` bounds the jobs taking turns, not the job tasks.
 - Windows: `schedule = {"window": "HH:MM-HH:MM", "tz": "<IANA>"}` per job (default `CLEF_JOB_WINDOW` in
   `CLEF_JOB_TZ`). `start > end` crosses midnight; `start == end` = 24 h. Aware datetimes via `zoneinfo`; on DST
   days an edge inside the skipped hour starts at the next valid minute, the repeated hour uses `fold=0`. A job gets

@@ -22,6 +22,7 @@ import csv
 import io
 import json
 import logging
+import math
 import re
 import secrets
 import time
@@ -871,6 +872,7 @@ class Scheduler:
         self.passes: dict[str, float] = {}
         self.vtime = 0.0  # the pass of the owner served last: where a returning owner starts
         self.inflight: str | None = None
+        self.queued_owners: set[str] = set()  # owners of in-window queued jobs (set by the runner's tick)
 
     # ---- ordering
     def eff_class(self, e: Entry, now: float) -> int:
@@ -893,6 +895,52 @@ class Scheduler:
 
     def has_slot(self) -> bool:
         return self.slots_used() < self.active
+
+    # ---- fair slots: an owner over its share yields a slot to another owner that waits for one
+    def held(self) -> Counter[str]:
+        """Slots held per owner (urgent jobs hold none: they ignore the slot limit)."""
+        return Counter(e.owner for e in self.entries.values() if e.pause is None and e.cls < PRIORITY_URGENT)
+
+    def share(self, held: Counter[str], also: str | None = None) -> int:
+        """Slots each owner that wants one may keep while others wait: ceil(active / owners wanting slots)."""
+        wanting = set(held) | self.queued_owners | ({also} if also is not None else set())
+        wanting |= {e.owner for e in self.entries.values() if e.pause == "active_limit"}
+        return max(1, math.ceil(self.active / max(1, len(wanting))))
+
+    def slot_victim(self, waiter: Entry, now: float) -> Entry | None:
+        """The running job that gives its slot to ``waiter`` when none is free, or None.
+
+        Only an owner holding more than its share yields, never to an owner already at its share, never a job
+        of a higher (effective) class than the waiter, never an urgent job. The victim is the over-share owner
+        with the most slots, then its youngest job (highest ``seq``): deterministic, so no ping-pong.
+        """
+        if waiter.cls >= PRIORITY_URGENT:
+            return None  # urgent does not wait for a slot at all
+        held = self.held()
+        share = self.share(held, waiter.owner)
+        if held[waiter.owner] >= share:
+            return None
+        cls = self.eff_class(waiter, now)
+        cands = [
+            e
+            for e in self.entries.values()
+            if e.pause is None and e.cls < PRIORITY_URGENT and e.owner != waiter.owner
+            and held[e.owner] > share and self.eff_class(e, now) <= cls
+        ]  # fmt: skip
+        return max(cands, key=lambda e: (held[e.owner], e.seq), default=None)
+
+    def _rebalance(self, now: float) -> None:
+        """Registered jobs waiting for a slot (``active_limit``) take one from an owner over its share."""
+        while not self.has_slot():
+            waiting = (x for x in self.entries.values() if x.pause == "active_limit")
+            for w in sorted(waiting, key=lambda x: self.key(x, now)):
+                victim = self.slot_victim(w, now)
+                if victim is not None:
+                    victim.pause = "active_limit"  # finishes its chunk in flight, then waits (still running)
+                    w.pause, w.ref = None, now
+                    break
+            else:
+                return
 
     def runnable_owners(self) -> set[str]:
         """Owners with at least one entry that may take turns (not paused)."""
@@ -940,12 +988,16 @@ class Scheduler:
                 e.pause = "off_hours"
             elif e.pause == "off_hours":
                 e.pause = "active_limit"
-        for e in sorted(
-            (x for x in self.entries.values() if x.pause == "active_limit"), key=lambda x: self.key(x, now)
+        held = self.held()
+        for e in sorted(  # a free slot goes first to the owner holding the fewest
+            (x for x in self.entries.values() if x.pause == "active_limit"),
+            key=lambda x: (held[x.owner], self.key(x, now)),
         ):
             if self.has_slot():
                 e.pause = None
                 e.ref = now
+                held[e.owner] += 1
+        self._rebalance(now)
         self._lift_returning(before)
 
     def _lift_returning(self, before: set[str]) -> None:
@@ -1307,12 +1359,18 @@ class JobRunner:
                 ready.append(e)
             else:
                 edges.append(e.window.next_start(now) or now)
+        self.sched.queued_owners = {e.owner for e in ready if e.cls < PRIORITY_URGENT}
         while ready:
             e = min(ready, key=lambda x: self.sched.key(x, now))
+            yields = False
             if not self.sched.has_slot() and e.cls < PRIORITY_URGENT:
-                break  # ordered by class first: nothing behind it may jump the queue either
+                # Fair slots: an owner over its share gives up its youngest job at its next chunk boundary.
+                if self.sched.slot_victim(e, now) is None:
+                    break  # ordered by class first: nothing behind it may jump the queue either
+                yields = True
             ready.remove(e)
-            await self._admit(e)
+            await self._admit(e, yields)
+            self.sched.queued_owners = {x.owner for x in ready if x.cls < PRIORITY_URGENT}
         nxt = self.sched.next_edge(now)
         if nxt is not None:
             edges.append(nxt)
@@ -1326,7 +1384,9 @@ class JobRunner:
                 self.dispatcher.enqueue(job_id, event)
             await self.settle(job_id)
 
-    async def _admit(self, e: Entry) -> None:
+    async def _admit(self, e: Entry, yields: bool = False) -> None:
+        """Claim and start ``e``. ``yields``: no slot was free, so a job of an owner over its share is paused
+        (``active_limit``) once the claim succeeded, in the same step as the register (no await between)."""
         try:
             row = await asyncio.to_thread(self.store.claim, e.id)  # the job is 'running' from here
         except BaseException:
@@ -1340,6 +1400,10 @@ class JobRunner:
             return  # cancelled or taken meanwhile
         self._rows[e.id] = row
         e.interrupted = row["claimed_from"] == "interrupted"
+        if yields and not self.sched.has_slot():  # a slot may have come free during the claim
+            victim = self.sched.slot_victim(e, self.clock())
+            if victim is not None:
+                victim.pause = "active_limit"
         self.sched.register(e)
         task = asyncio.create_task(self._run(row), name=f"clef-job-{e.id}")
         self.tasks[e.id] = task

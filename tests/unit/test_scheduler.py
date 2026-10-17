@@ -106,7 +106,7 @@ def test_a_returning_owner_does_not_collect_the_turns_it_missed():
 
 
 async def _share_run(s: Scheduler, t: list[float], jobs: list[str], until: float) -> list[str]:
-    """Drive ``jobs`` (one worker each, 1 s and 32 records per turn) until the fake clock reaches ``until``."""
+    """Drive ``jobs`` (one worker each, 1 s and 32 records per turn) until the fake clock reads ``until``."""
     log: list[str] = []
 
     async def worker(job_id: str) -> None:
@@ -161,7 +161,7 @@ def test_an_owner_paused_off_hours_does_not_collect_the_missed_turns_when_its_wi
 
 
 def test_a_new_job_of_an_owner_whose_jobs_are_all_paused_starts_level_with_the_others():
-    """register(): an owner with only paused entries is not runnable; its new job does not reuse a stale pass."""
+    """register(): an owner with only paused jobs is not runnable; its new job does not reuse a stale pass."""
     s, _ = sched(active=8, now=NOON)
     s.register(ent("a1", "alice", seq=1, window=parse_window("20:00-06:00", "UTC")))
     s.refresh(NOON)  # closed at noon: a1 is paused off-hours
@@ -287,6 +287,40 @@ def test_urgent_ignores_the_window_and_the_slot_limit():
     assert _entry({**row, "priority": 1}, s).window is not None
     s.register(ent("n"))
     assert not s.has_slot()  # full; the runner still admits urgent jobs (see test_urgent_job_runs_outside...)
+
+
+def test_fair_slots_an_owner_over_its_share_yields_its_youngest_job_to_another_owner():
+    """Review E/F #2 (policy): alice holds both slots; bob's job (registered, waiting for a slot) gets one at
+    alice's next chunk boundary, and alice's YOUNGEST job is the one that waits (status stays running)."""
+    s, _ = sched(active=2, now=NOON)
+    s.register(ent("a1", "alice", seq=1))
+    s.register(ent("a2", "alice", seq=2))
+    s.refresh(NOON)
+    assert s.waiting("a1") is None and s.waiting("a2") is None  # alone: alice may use every slot
+    b = ent("b1", "bob", seq=3)
+    b.pause = "active_limit"  # e.g. back from its window while the slots were taken
+    s.register(b)
+    s.refresh(NOON)
+    assert s.waiting("b1") is None and s.waiting("a2") == "active_limit" and s.waiting("a1") is None
+    s.refresh(NOON)  # stable: no ping-pong
+    assert s.waiting("a2") == "active_limit" and s.waiting("b1") is None
+    s.unregister("b1")
+    s.refresh(NOON)  # bob is gone: alice gets her slot back
+    assert s.waiting("a2") is None
+
+
+def test_fair_slots_victim_choice_respects_class_and_urgent():
+    s, _ = sched(active=2, now=NOON)
+    s.register(ent("a1", "alice", cls=2, seq=1))
+    s.register(ent("a2", "alice", cls=2, seq=2))
+    waiter = ent("b1", "bob", cls=1, seq=3)
+    assert s.slot_victim(waiter, NOON) is None  # a higher class beats fairness
+    assert s.slot_victim(ent("b2", "bob", cls=2, seq=4), NOON).id == "a2"  # same class: the youngest
+    u, _ = sched(active=1, now=NOON)
+    u.register(ent("x1", "alice", cls=PRIORITY_URGENT, seq=1))  # urgent holds no counted slot ...
+    u.register(ent("x2", "alice", seq=2))
+    assert u.slot_victim(ent("y1", "bob", seq=3), NOON) is None  # ... and alice holds just her share
+    assert u.slot_victim(ent("y2", "bob", cls=PRIORITY_URGENT, seq=4), NOON) is None  # urgent never waits
 
 
 def test_window_edges_around_dst():
@@ -652,3 +686,35 @@ def test_completed_if_all_failed_and_tokens_for_custom_kinds():
         bad = wait(client, submit(client, "strict", {"inputs": [1, 2, 3]}).json()["id"])
     assert ok["status"] == "succeeded" and ok["tokens"] == 7 and ok["progress"]["failed"] == 3
     assert bad["status"] == "failed"
+
+
+def test_fair_slots_another_key_gets_a_slot_while_one_key_fills_them_all():
+    """Review E/F #2 (integration): alice's two long jobs fill CLEF_JOB_ACTIVE=2; bob's small job gets a slot
+    within a few chunks (alice's youngest job waits as running / active_limit, keeping its progress)."""
+    client, _, app = make(SlowEngine(delay=0.02), api_key="root", max_microbatch=4, job_active=2)
+    ha, hb = hdr(add_key(app, "alice", "jobs")), hdr(add_key(app, "bob", "jobs"))
+    with client:
+        big = {"inputs": [f"a{i}" for i in range(4000)], "labels": LABELS}
+        a = [submit(client, payload=big, headers=ha).json()["id"] for _ in range(2)]
+        t0 = time.monotonic()
+        while not all(progress(client, x, headers=ha) > 0 for x in a):  # alice alone: both run
+            assert time.monotonic() - t0 < 10
+            time.sleep(0.02)
+        small = {"inputs": [f"b{i}" for i in range(8)], "labels": LABELS}
+        b = submit(client, payload=small, headers=hb).json()["id"]
+        seen_yield = False
+        while (jb := client.get(f"/v1/jobs/{b}", headers=hb).json())["status"] != "succeeded":
+            assert time.monotonic() - t0 < 10, jb
+            young = client.get(f"/v1/jobs/{a[1]}", headers=ha).json()
+            seen_yield |= young["status"] == "running" and young["waiting_reason"] == "active_limit"
+            time.sleep(0.02)
+        assert seen_yield
+        jobs = [client.get(f"/v1/jobs/{x}", headers=ha).json() for x in a]
+        assert all(j["status"] == "running" for j in jobs)
+        before = progress(client, a[1], headers=ha)
+        t1 = time.monotonic()
+        while progress(client, a[1], headers=ha) <= before:  # bob is done: the yielded job continues
+            assert time.monotonic() - t1 < 10
+            time.sleep(0.02)
+        for x in a:
+            client.post(f"/v1/jobs/{x}/cancel", headers=ha)

@@ -287,7 +287,8 @@ CLEF_WEBHOOK_ALLOW='hooks.example.com,*.corp.example.net,192.168.1.0/24'
 Several jobs can be `running` at once (up to `CLEF_JOB_ACTIVE`, default 4); they take turns at the engine, one
 chunk at a time, so a long job from one key no longer blocks everyone else's. Every job in turns shows
 `running` in `GET /v1/jobs`; `waiting_reason` says why one is not advancing right now: `turn` (waiting for its
-chunk), `active_limit` (no free slot), `off_hours` (outside its window; `next_window_at` says when it opens).
+chunk), `active_limit` (no free slot, or it gave its slot to another key's job: see Fair slots), `off_hours`
+(outside its window; `next_window_at` says when it opens).
 
 **Priority.** `"priority": "low" | "normal" (default) | "high"`. Classes are strict: while a `high` job has work,
 `normal` and `low` wait. A job that has not had a turn for `CLEF_JOB_AGING_S` (default 3600 s) moves up one class
@@ -297,6 +298,12 @@ chunk), `active_limit` (no free slot), `off_hours` (outside its window; `next_wi
 one huge job each advance at the same speed, and a key with ten jobs does not get ten times the turns. A key
 that comes back after being idle, or whose jobs were paused (off-hours, or waiting for a slot), starts level with
 the others; it does not collect the turns it missed.
+
+**Fair slots.** When every slot is taken and another key's job waits for one, a key holding more than its share
+(`CLEF_JOB_ACTIVE` divided by the keys that want a slot, rounded up) gives up its newest job after that job's current
+chunk. The job stays `running` with `waiting_reason: "active_limit"`, keeps its progress and continues when a slot is
+free again. A key alone in the queue still uses every slot; a `high` job never yields to a `normal` one, and urgent
+jobs are not counted.
 
 **Off-hours window.** `"schedule": {"window": "20:00-06:00", "tz": "Europe/Madrid"}` restricts a job to a window
 (`start > end` crosses midnight, `start == end` is 24 h; `tz` defaults to `CLEF_JOB_TZ`). Without `schedule`, a
