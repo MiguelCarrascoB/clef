@@ -215,6 +215,12 @@ class Config:
     # (or the catalog entry whose repo is CLEF_MODEL_REPO). Resolved by models.registry.resolve_spec.
     model: str | None = field(default_factory=lambda: _env("CLEF_MODEL"))
 
+    # D2: opt-in speedups, default OFF until bench/perf_check.sh has measured them (docs/performance.md).
+    # mask_free: text batches call the backbone with attention_mask=None (right-padded + causal = exact);
+    # fast_head: sync-free, batch-vectorised joint head. Both only apply to the clef-release adapter.
+    mask_free: bool = field(default_factory=lambda: _bool("CLEF_MASK_FREE", False))
+    fast_head: bool = field(default_factory=lambda: _bool("CLEF_FAST_HEAD", False))
+
     def __post_init__(self) -> None:
         for name, value, allowed in (
             ("CLEF_DEVICE", self.device.split(":")[0], DEVICES),
