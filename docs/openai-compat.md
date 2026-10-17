@@ -282,7 +282,8 @@ copies**: they are streamed from the job's result rows, so they cost no disk and
 
 `status` is `in_progress`, `cancelling`, `completed`, `failed`, `expired` or `cancelled`, with OpenAI's timestamps and
 `request_counts` (`completed` = succeeded, `failed` = non-2xx lines). `usage.input_tokens` is the sum over the lines.
-`expires_at` is 24 hours after the batch became eligible to run (when its window opened), and `null` before.
+`expires_at` is 24 hours after the batch is eligible to run: its creation time, or the next time its window opens when
+`clef.schedule` (or `CLEF_JOB_WINDOW`) holds it back. A batch not finished by then ends `expired`.
 
 - A file that is **structurally** wrong (a line that is not JSON, a duplicate or missing `custom_id`, a wrong `url`
   or `method`, too many lines, an empty file) makes `POST /v1/batches` return a batch with status `failed` and
@@ -299,8 +300,9 @@ copies**: they are streamed from the job's result rows, so they cost no disk and
 - A batch that stops for a systemic reason (the engine went away, the circuit breaker) is `failed` with
   `errors.data = [{"code": "server_error", ...}]`; the rows it did produce are still served.
 
-The `clef` extension (`priority` `low|normal|high`, `urgent`, `schedule`) is the [job scheduler](jobs.md)'s:
-`urgent` needs the `urgent` scope. The daily quota of the key is reserved when the batch is created (`429`
+The `clef` extension, `extra_body={"clef": {"priority": "low", "urgent": false, "schedule": {"window": "20:00-06:00",
+"tz": "Europe/Madrid"}}}` (`priority` `low|normal|high`), is the [job scheduler](jobs.md#scheduling)'s: the batch is
+queued, ordered and windowed like any job. `urgent` needs the `urgent` scope (`403` otherwise). The daily quota of the key is reserved when the batch is created (`429`
 `insufficient_quota` when it does not fit; a failed or cancelled batch gets the unprocessed part back).
 
 | Variable | Default | Meaning |

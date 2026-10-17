@@ -416,8 +416,8 @@ review, router and batch tables live there too. One clef server per database: Po
 * **Errors.** A database that cannot be reached answers `503 database unavailable`. Drop everything by deleting
   `clef.db` (SQLite) or the database (Postgres) with the server stopped.
 
-**Throughput.** Jobs run one at a time, FIFO, at the engine's batch speed, shared with interactive traffic.
-There is no priority between jobs. Inside the engine, job work (`ctx.decide`, including the `evaluate` kind) is
+**Throughput.** Up to `CLEF_JOB_ACTIVE` jobs take turns, one chunk at a time, at the engine's batch speed, shared with
+interactive traffic; priority, fair share and windows between jobs are in [Scheduling](#scheduling). Inside the engine, job work (`ctx.decide`, including the `evaluate` kind) is
 in the background lane and requests (`ctx.infer`) in the interactive lane:
 
 - A micro-batch holds one class. Interactive goes first whenever any is queued, even if it arrived during a
@@ -426,6 +426,12 @@ in the background lane and requests (`ctx.infer`) in the interactive lane:
   job records would wait for all 8; running it alone costs the job one extra host overhead instead.
 - Jobs are not starved by steady traffic: after `CLEF_INTERACTIVE_BURST` (default 8) interactive micro-batches in
   a row while job work waited, one job micro-batch runs. Lower it to favour jobs, raise it to favour requests.
+- Two opt-in flags raise a job's own throughput without changing any of this (one GPU worker, one job chunk in
+  flight, interactive first): `CLEF_JOB_SORT_WINDOW=N` takes N items at a time and sends them to the engine sorted by
+  token length (less padding), and `CLEF_TOKENIZE_AHEAD=1` encodes the next window on CPU threads while the current
+  one is on the GPU. Results stay in input order, rows are persisted a whole window at a time and a resume
+  recomputes at most one window. They apply to the `classify`, `score`, `systemone`, `evaluate` and `batch` kinds,
+  are off by default, and wait for a GPU measurement ([Performance](performance.md)).
 - `GET /v1/stats` reports `queue_depth_by_class` (`interactive`, `background`) next to the total `queue_depth`.
 
 Measured on the RX 7900 XTX (bf16, short tickets) before the lane existed: a 500-item `classify` job ran at
@@ -452,6 +458,10 @@ async def run(ctx, parsed, job) -> dict | None:
 ```
 
 Rows containing an `"error"` key count as failed, and the circuit breaker above applies to every kind (it raises
-`JobAborted` from `add_items`). Call the model with `ctx.decide(requests, batch=True)`, keep one
-call in flight, and check `job.cancelled` between calls. Add `"resumable": True` only if `run` honours
+`JobAborted` from `add_items`). Call the model with `job.decide(requests)` (it waits for the job's turn in the scheduler; `ctx.decide` directly
+bypasses the turns), keep one call in flight, and check `job.cancelled` between calls (it also turns true when the job
+expires). Other optional kind keys: `"records": fn(parsed) -> int` (records reserved from the daily quota at submit;
+default the length of `inputs` / `requests`) and `"completed_if_all_failed": True` (a run where every item failed still
+ends `succeeded`; otherwise it ends `failed`). `job.add_items(rows, tokens=N)` adds `N` to the job's `tokens`; without
+`tokens` it sums the rows' `input_tokens`. Add `"resumable": True` only if `run` honours
 `job.resume_from` (the number of rows already stored) and does not re-emit them.

@@ -12,6 +12,7 @@ tests. Change it first, then the code.
 | `clef_server/__init__.py` | `__version__`; calls `backend.prepare_environment()` once (torch-free, before any torch import) |
 | `clef_server/config.py` | `Config` dataclass from `CLEF_*` env vars, `VERSION`, `MODEL_REPO`/`MODEL_REVISION`, `parse_api_keys` |
 | `clef_server/paths.py` | state dir, log/pid files, classifiers dir, `resolve_model_path(cfg)` (never downloads) |
+| `clef_server/dotenv.py` | optional `.env` loading: `./.env` then `~/.config/clef/env` fill `os.environ` before `Config` is built (set variables win; `CLEF_ENV_FILE` overrides, empty disables); called by `config.load()`, `cli.main` and `doctor` |
 | `clef_server/backend.py` | **the only place with device-specific code**: detection, dtype, sync, OOM, memory, telemetry, preflight, quantization config (bitsandbytes / torchao), device memory cap, pinned host copies (`HostCopier`) |
 | `clef_server/offload.py` | CPU offload: `plan_layers` (which decoder layers stay on the host) and `LayerStreamer` (async copy-in per forward); pure logic plus a `copier` supplied by `backend.py` |
 | `clef_server/engine.py` | background model load (`load_model`: standard, quantized or offloaded), single GPU worker thread, micro-batching, length bucketing, warmup |
@@ -26,7 +27,7 @@ tests. Change it first, then the code.
 | `clef_server/main.py` | FastAPI app factory `create_app(cfg, engine)`, core routes, middleware, error mapping, `FEATURES` (feature modules mounted on the context), `run(cfg)` |
 | `clef_server/compat.py`, `compat_openai.py`, `compat_hf.py`, `compat_schema.py`, `compat_errors.py` | OpenAI (`/v1/models`, `/v1/chat/completions`) and Hugging Face zero-shot (`/hf/models/{id}`) routes; JSON-schema -> questions translation; client-shaped errors |
 | `clef_server/evaluation.py` | metric math (`compute_metrics`), `POST /v1/evaluate` and `/v1/evaluate/metrics`, the `evaluate` job kind |
-| `clef_server/jobs.py`, `clef_server/webhooks.py` | async jobs (SQLite store, FIFO runner, `/v1/jobs*` routes, built-in kinds) and signed, SSRF-guarded webhook delivery |
+| `clef_server/jobs.py`, `clef_server/webhooks.py` | async jobs (database store, the priority / fair-share / off-hours scheduler, `/v1/jobs*` routes, built-in kinds) and signed, SSRF-guarded webhook delivery |
 | `clef_server/jobsort.py` | F2, opt-in: length sort inside a job window and tokenize-ahead for jobs (see Job throughput) |
 | `clef_server/cli.py` | the `clef` command (serve/stop/status/logs/doctor/download/bench/open/version); `download` is a pinned, resumable `snapshot_download` with a disk-space check |
 | `clef_server/doctor.py` | environment checks per backend, including a recommended memory setting; `main(argv) -> int` |
@@ -38,8 +39,8 @@ tests. Change it first, then the code.
 | `clef_server/dbschema.py` | the SQLAlchemy `MetaData` and every `Table` in this document (one place; migrations mirror it) |
 | `clef_server/migrations/` | Alembic `env.py`, `script.py.mako`, `versions/NNNN_*.py` |
 | `clef_server/models/` | `base.py` (`DecisionModel`, `LocalTensorAdapter`, `Capabilities`, `ModelSpec`, `UnknownModel`), `registry.py` (`clef.models` entry points, `CLEF_MODEL`), `clef_release.py` (clef-flash, clef 27B) |
-| `clef_server/keystore.py` (planned, v3.2) | principals, hashed keys, key cache, quotas (`Quotas`), on `db.py`; shared by the server and `clef keys` |
-| `clef_server/admin.py` (planned, v3.2) | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
+| `clef_server/keystore.py` | principals, hashed keys, key cache, quotas (`Quotas`), on `db.py`; shared by the server and `clef keys` |
+| `clef_server/admin.py` | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
 | `clef_server/schedule.py` | pure off-hours window maths for the job scheduler (`Window`, `parse_window`; DST rules); the `Scheduler` itself is in `jobs.py` |
 | `clef_server/cache.py` | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
 | `clef_server/router.py`, `clef_server/review.py`, `clef_server/llm.py` | feature module: routers, label-set versions, the Review routes (`/v1/routers*`, `/v1/review*`); `review.py` is the store of the `review` and `llm_calls` tables; the OpenAI-compatible LLM client |
@@ -336,7 +337,7 @@ appears in `openapi.json`.
 | `POST /v1/jobs`, `GET /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/results`, `POST /v1/jobs/{id}/cancel`, `DELETE /v1/jobs/{id}` | async jobs | [Jobs](#async-jobs-and-webhooks-jobspy-webhookspy) |
 | `GET /v1/stats`, `/v1/stats/timeseries`, `/v1/log`, `/v1/events` | observability (console) | below |
 | `GET /v1/classifiers/{name}/versions[/{v}]` | classifier history | Storage |
-| `GET /v1/whoami`, `/v1/admin/keys*`, `GET /v1/admin/audit` (planned, v3.2) | principals, keys, quotas, audit | Keys and principals |
+| `GET /v1/whoami`, `/v1/admin/keys*`, `GET /v1/admin/audit` | principals, keys, quotas, audit | Keys and principals |
 | `/v1/routers*`, `/v1/review*` | self-evolving router, human review queue | Review queue and router |
 | `/v1/files*`, `/v1/batches*` | OpenAI Files + Batch API | OpenAI Files and Batches |
 
@@ -616,7 +617,7 @@ state transition), 413 too large, 429 rate limited (+ `Retry-After`), 503 not re
 message; traceback only in the server log). The OpenAI and Hugging Face routes use their clients' error shapes (see
 Compat).
 
-Planned (v3.2): **403** a valid key without the route's scope (`{"detail": "key 'ci-bot' lacks scope 'jobs'"}`;
+Also: **403** a valid key without the route's scope (`{"detail": "key 'ci-bot' lacks scope 'jobs'"}`;
 OpenAI shape `permission_denied`); **404** also for a `model` the server does not serve (`model_not_found` on the
 OpenAI routes); **429** also for an exhausted daily quota (`daily quota exceeded (N records/day)`, `Retry-After` =
 seconds to the next UTC midnight; OpenAI code `insufficient_quota`). `ERRORS` in `main.py` and
@@ -663,13 +664,14 @@ It consumes `/health`, `/v1/stats`, `/v1/stats/timeseries`, `/v1/events?step_s=`
 `X-API-Key` header, not `EventSource`, so the key never goes in the URL), `/v1/log`, `/v1/systemone`,
 `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/classifiers*`, `/v1/evaluate/metrics`.
 
-## Planned work (v3.2)
+## Build contract (v3.2)
 
-The sections below are the contract for the v3.2 build waves (C to F). Each heading carries `(planned, v3.2)`; the
-coordinator removes the marker when the work lands, and the "Supersedes" line says which text above it replaces
-then. Do not link to these headings by anchor (the slug changes when the marker goes).
+The sections below were the contract for the v3.2 build waves (C to F) and are now built: storage, models, keys,
+cache, review and router, the job scheduler, files and batches, job throughput. Not built: wave G (vLLM and graph
+capture) and what the sections explicitly mark as later. Where a section says "Supersedes", read it as already
+applied to the text above.
 
-Rules shared by every planned section:
+Rules shared by every section below:
 - One clef server per database (D3). No leases, no outbox, no cross-process cancel. `recover()` keeps turning
   every `running` job into `interrupted` at startup.
 - SQL below is the logical DDL. It is valid on SQLite and Postgres except for identity columns, written
@@ -1806,8 +1808,8 @@ Batch: `{"id", "object": "batch", "endpoint", "errors", "input_file_id", "comple
 "failed_at", "expired_at", "cancelling_at", "cancelled_at", "request_counts": {"total", "completed", "failed"},
 "metadata", "model", "usage": {"input_tokens", "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 0,
 "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens"}}`. `request_counts.completed = done - failed`;
-`usage.input_tokens = jobs.tokens`; `model` = `spec.id`; `expires_at = eligible_at + 24h` (null before the window
-opens). The SDK's `extra_body={"clef": {...}}` lands as the top-level `clef` field.
+`usage.input_tokens = jobs.tokens`; `model` = `spec.id`; `expires_at = eligible_at + 24h`
+(always set: the scheduler sets `eligible_at` at submit, to the next time the window opens). The SDK's `extra_body={"clef": {...}}` lands as the top-level `clef` field.
 
 Mapping to jobs (one batch = one job of kind `batch`, visible in `GET /v1/jobs?kind=batch`; submitted through
 `JobRunner.submit(..., expire_after_s=86400)`; the `batch` kind spec itself sets `"completed_if_all_failed": True`):
@@ -1850,9 +1852,10 @@ As built (F1; clarifications and deviations from the text above, nothing else ch
 - `prepare_chat(body, cfg, model)` takes the served model id the caller already resolved (`served_model`; its
   `UnknownModel` is the route's 404, a `model_not_found` line in a batch). `render_chat(chat, result, request_id,
   total_ms=None)` returns the non-streaming body; `chat_outcome` returns the parts the streaming route also needs.
-- `jobs.py` was touched in three places the contract did not list: `JobStore.add_items` sums `input_tokens` into
-  `jobs.tokens`; the circuit breaker ignores rows that carry a 4xx `status_code` (a bad batch line is the client's
-  mistake, still counted in `jobs.failed`); `_execute` honours `completed_if_all_failed`. E1 owns the real versions.
+- `jobs.py` was touched in three places the contract did not list: `JobStore.add_items` sums the rows' `input_tokens`
+  into `jobs.tokens` (an explicit `tokens=` count wins); the circuit breaker ignores rows that carry a 4xx
+  `status_code` (a bad batch line is the client's mistake, still counted in `jobs.failed`); `_execute` honours
+  `completed_if_all_failed`. Each exists once, in `jobs.py`.
 - Defaults: `CLEF_MAX_FILE_MB` 200 (OpenAI's limit), `CLEF_MAX_BATCH_LINES` 50000, `CLEF_FILE_TTL_HOURS` 720.
 - A structurally failed batch still needs the `batches.job_id` foreign key, so it gets a terminal `failed` job row
   (kind `batch`, `payload {}`, nothing reserved, never runnable) written in the same transaction as the batch.
@@ -1865,13 +1868,15 @@ As built (F1; clarifications and deviations from the text above, nothing else ch
   file the caller uploaded (404 otherwise). The `batch` job re-checks that the file's owner is the job's owner when
   it runs, so `POST /v1/jobs {"kind": "batch"}` cannot read another key's file. The job's quota reservation is the
   file row's `lines`, never the payload's.
-- Until the job scheduler (E1) lands, `clef.priority` other than `normal`, `clef.urgent` and `clef.schedule` are
-  refused with 400 (`urgent` without the scope is 403 first), and the batch job gets `expire_after_s = 86400` and
-  `eligible_at = created` from `BatchStore.mark_window`. The seam is `batches.submit_batch_job`; E1 replaces its
-  body with `JobRunner.submit` and deletes `_legacy_submit` and `mark_window`.
+- The seam to the scheduler is `batches.submit_batch_job`, a call to `JobRunner.submit` with the caller's
+  principal, `clef.priority`, `clef.urgent`, `clef.schedule` and `expire_after_s = 86400`. It maps `ValueError` to 400
+  (a bad option), `PermissionError` to 403 (`urgent` without the scope), a model not served to 404, `JobsFull` to 409
+  and `QuotaExceeded` to 429. The scheduler reserves the quota once, at submit, from the input file's stored line
+  count, and sets `eligible_at` (the submit time, or the next time the window opens), so the batch's `expires_at`
+  is known from the start: `eligible_at + 24h`.
 - The audit actions are `batch.cancel` and `file.delete`, as listed in Storage.
 
-## Build ownership (planned, v3.2)
+## Build ownership (v3.2)
 
 Files a workstream may create (C) or modify (M). Tests: new files per workstream (see the shared rules), plus the
 existing tests a contract change forces. Every workstream may append to `CHANGELOG.md` and its own docs page;
@@ -1914,9 +1919,9 @@ Same-wave shared files and how they split:
 | F | `main.py`, `compat_openai.py`, `pyproject.toml` | F1 only |
 | F | `config.py` | append-only (`# F1`, `# F2`) |
 | all | Alembic heads | no new revision expected after C1; if two appear in one wave, the coordinator adds `alembic merge` (startup runs `upgrade heads`) |
-| all | `docs/ARCHITECTURE.md` | each workstream edits only its own planned section; the coordinator removes markers and applies the "Supersedes" lines |
+| all | `docs/ARCHITECTURE.md` | each workstream edited only its own section; the coordinator removes markers and applies the "Supersedes" lines |
 
-## Contract decisions (planned, v3.2)
+## Contract decisions (v3.2)
 
 Confirmed by the user (2026-10-17):
 1. **Unknown model (C2):** 404 `model_not_found` on every route except the HF path id, which stays ignored. This

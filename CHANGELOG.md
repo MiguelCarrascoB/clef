@@ -23,8 +23,12 @@
   `priority`, `urgent`, `schedule`, `waiting_reason`, `next_window_at`, `expired`, `model`, `tokens`;
   `GET /v1/jobs?priority=`. The daily record quota is reserved at submit (UTC day of the submit, refunded for
   what a cancelled / failed / expired job did not process); result-cache hits are not charged. Python API:
-  `JobRunner.submit/cancel/get`, `JobHandle.decide`, and the kind key `completed_if_all_failed`. New dependency
-  `tzdata` (server extra).
+  `JobRunner.submit/cancel/get`, `JobHandle.decide`, and the kind keys `completed_if_all_failed` (a run where every
+  item failed still ends `succeeded`) and `records` (quota size). New dependency `tzdata` (server extra).
+- **`.env` files**: clef loads `KEY=VALUE` lines from `./.env` and then `~/.config/clef/env` before reading its
+  settings, so `GEMINI_API_KEY=...` can live in a file next to where you run `clef serve`. A variable already set in the
+  environment always wins; `CLEF_ENV_FILE=<path>` loads only that file and `CLEF_ENV_FILE=` loads none. Values are
+  never logged; `clef doctor` names the files it loaded. See docs/configuration.md.
 - **Job throughput flags (F2, off by default)**: `CLEF_JOB_SORT_WINDOW=N` sorts each window of N job items by
   token length before they reach the engine, and `CLEF_TOKENIZE_AHEAD=1` encodes the next window on CPU threads
   while the current one is on the GPU. Results stay in input order, rows stay gap-free and a resume recomputes at
@@ -36,10 +40,10 @@
   use the OpenAI shape. A batch is one job of kind `batch` (`GET /v1/jobs?kind=batch`), so it shares the queue,
   quota, resume and retention; output and error files are streamed from the job's rows, not stored. Private to the
   key that created them, scope `jobs`. New: `CLEF_MAX_FILE_MB` (200, body limit of `POST /v1/files` only),
-  `CLEF_MAX_BATCH_LINES` (50000), `CLEF_FILE_TTL_HOURS` (720); new `server` dependency `python-multipart`. See
-  docs/openai-compat.md.
-- Jobs: a kind may set `"completed_if_all_failed"` (a run where every item failed still ends `succeeded`), result
-  rows with a 4xx `status_code` do not trip the circuit breaker, and `jobs.tokens` sums the rows' `input_tokens`.
+  `CLEF_MAX_BATCH_LINES` (50000), `CLEF_FILE_TTL_HOURS` (720); new `server` dependency `python-multipart`. The
+  `clef` extension (`extra_body={"clef": {"priority", "urgent", "schedule"}}`) goes to the job scheduler, and
+  `expires_at` is 24 h after the batch could first run. Jobs gain `jobs.tokens` (the sum of the rows' `input_tokens`)
+  and result rows with a 4xx `status_code` no longer trip the circuit breaker. See docs/openai-compat.md.
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
   503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)
   the first SIGTERM / Ctrl-C keeps the server up for N seconds answering `draining` (a second signal stops at once),
