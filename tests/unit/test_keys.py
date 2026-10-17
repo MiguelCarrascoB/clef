@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -747,15 +748,75 @@ def test_admin_routes_are_rate_limited():
     assert codes == [200, 200, 429]
 
 
-def test_env_name_clash_is_warned(caplog):
-    from clef_server.main import create_app
+def clash_app(scopes: str = "classify,jobs,classifiers"):
+    """A DB principal 'ci' that already exists when an env key 'ci' is added later (same database)."""
+    sd = tempfile.mkdtemp(prefix="clef-clash-")
+    _, _, app = make(state_dir=sd)
+    secret = add_key(app, "ci", scopes)
+    app.state.ctx.db.close()
+    client, _, app2 = make(state_dir=sd, api_keys_raw="ci:envsecret,root:rootsecret")
+    return client, app2, secret
 
-    client, _, app = make(api_key="root")
-    add_key(app, "other", "admin")
-    cfg = Config(state_dir=app.state.cfg.state_dir, api_keys_raw="other:zzz")
+
+def test_env_name_clash_is_warned(caplog):
     with caplog.at_level("WARNING", logger="clef"):
-        create_app(cfg, FakeEngine())
-    assert any("both an env key and a DB principal" in r.getMessage() for r in caplog.records)
+        clash_app()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(
+        "both an env key and a DB principal" in m and "refused" in m and "clef keys revoke" in m for m in msgs
+    )
+    assert not any("env key wins" in m for m in msgs)
+
+
+@pytest.mark.postgres
+def test_db_key_named_like_an_env_key_is_refused_and_revocable():
+    client, _, secret = clash_app()
+    env, root = hdr("envsecret"), hdr("rootsecret")
+    with client:
+        jid = submit(client, headers=env).json()["id"]
+        assert (
+            client.put("/v1/classifiers/secretclf", json={"labels": ["a", "b"]}, headers=env).status_code
+            == 200
+        )
+        # the DB key must not inherit the env principal's ownership or its rate-limit bucket
+        assert client.get("/v1/whoami", headers=hdr(secret)).status_code == 401
+        assert client.get(f"/v1/jobs/{jid}", headers=hdr(secret)).status_code == 401
+        assert client.delete("/v1/classifiers/secretclf", headers=hdr(secret)).status_code == 401
+        assert client.post("/v1/classify", json=CLASSIFY, headers=hdr(secret)).status_code == 401
+        assert client.get("/v1/whoami", headers=env).json()["source"] == "env"
+        # an admin can still act on the clashing DB row
+        assert client.post("/v1/admin/keys/ci/rotate", headers=root).status_code == 201
+        assert client.patch("/v1/admin/keys/ci", json={"note": "x"}, headers=root).status_code == 200
+        assert client.post("/v1/admin/keys/ci/revoke", json={}, headers=root).status_code == 200
+        # a pure env key has no DB row: still read-only
+        assert client.post("/v1/admin/keys/root/revoke", json={}, headers=root).status_code == 403
+
+
+@pytest.mark.postgres
+def test_several_env_keys_are_all_admin_and_the_server_says_so(caplog):
+    """D10: CLEF_API_KEYS=alice:..,bob:.. keeps working as before the D1 upgrade, but every env key is a full
+    admin. That is deliberate and loud: a startup warning, and the keys see each other's work."""
+    with caplog.at_level("WARNING", logger="clef"):
+        client, _, _ = make(api_keys_raw="alice:ka,bob:kb")
+    assert any("2 env keys" in r.getMessage() and "clef keys create" in r.getMessage() for r in caplog.records)
+    a, b = hdr("ka"), hdr("kb")
+    with client:
+        jid = submit(client, headers=a).json()["id"]
+        wait(client, jid, headers=a)
+        assert client.get(f"/v1/jobs/{jid}", headers=b).status_code == 200
+        assert client.get(f"/v1/jobs/{jid}/results", headers=b).status_code == 200
+        assert client.get("/v1/jobs", headers=b).json()["total"] == 1
+        assert client.put("/v1/classifiers/mine", json={"labels": ["a", "b"]}, headers=a).status_code == 200
+        assert client.put("/v1/classifiers/mine", json={"labels": ["c", "d"]}, headers=b).status_code == 200
+        assert client.delete("/v1/classifiers/mine", headers=b).status_code == 200
+        assert client.get("/v1/admin/audit", headers=b).status_code == 200
+        assert client.delete(f"/v1/jobs/{jid}", headers=b).status_code == 200
+
+
+def test_a_single_env_key_gets_no_multi_key_warning(caplog):
+    with caplog.at_level("WARNING", logger="clef"):
+        make(api_keys_raw="alice:ka")
+    assert not any("env keys" in r.getMessage() for r in caplog.records)
 
 
 # ------------------------------------------------------------------ default-deny
@@ -866,6 +927,14 @@ def test_cli_env_keys_are_listed_and_protected(monkeypatch, capsys):
         assert "env key" in capsys.readouterr().err
     assert run_cli("create", "root", "--scope", "jobs") == 1
     assert "env key" in capsys.readouterr().err
+
+
+def test_cli_can_revoke_a_db_principal_that_clashes_with_an_env_key(monkeypatch, capsys):
+    assert run_cli("create", "ci", "--scope", "jobs") == 0
+    capsys.readouterr()
+    monkeypatch.setenv("CLEF_API_KEYS", "ci:abc")  # the env grew a key with the same name
+    assert run_cli("revoke", "ci") == 0
+    assert "disabled" in capsys.readouterr().out
 
 
 def test_cli_expiry_parsing():

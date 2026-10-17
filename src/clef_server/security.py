@@ -92,6 +92,8 @@ class Authenticator:
             hit = self.cache.get(key_id)  # type: ignore[union-attr]
             if hit is not None:
                 key, principal = hit
+                if principal.name in self.env_names:
+                    return None  # a DB name equal to an env key would inherit its admin ownership: refused
                 if not hmac.compare_digest(hash_key(token), key.secret_sha256):
                     return None
                 if (

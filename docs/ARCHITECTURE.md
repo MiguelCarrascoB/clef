@@ -1266,8 +1266,13 @@ principal even when auth is off: 401 `admin routes need a key: set CLEF_API_KEY 
 
 Errors: 400 bad name (`KEY_NAME_RE`) or unknown scope; 404 unknown principal or key id; 409 name exists, is a
 tombstone (disabled names are never reused, D19), or equals an env key name; 409 a 6th active key; 403 changing an
-env principal, or a DB admin removing its own `admin` scope / revoking its own last key without `?force=true`.
-Startup logs a WARNING for an env name that is also a DB principal (the env key wins).
+env principal that has no DB row of the same name, or a DB admin removing its own `admin` scope / revoking its own last key without `?force=true`.
+A DB principal whose name equals an env key name is **refused**: `Authenticator.resolve` answers 401 for its keys
+(otherwise it would inherit the env principal's job / classifier ownership and rate-limit bucket), and startup logs
+a WARNING naming the clash (fix: `clef keys revoke NAME` or rename the env key). The admin API and the CLI still act
+on that DB row (revoke, rotate, update), so it can be cleaned up; a pure env key stays read-only. The server is the
+authority: the CLI reads the env of the shell it runs in, which can differ from the server's, and the server
+decides at request time.
 
 CLI (`clef keys`, direct DB, works with the server stopped; the first DB principal turns auth on and the command
 prints `auth is now required for every /v1 route`; secrets are printed once):

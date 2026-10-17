@@ -7,7 +7,9 @@ machines on your local network, and what to add if you expose it further.
 
 - **Env keys** (`CLEF_API_KEY`, `CLEF_API_KEYS`): full admin, no quota, the global rate limit. They are the
   break-glass key and the bootstrap: the first admin key is made with one of them, or with `clef keys create`.
-  They are read at startup.
+  They are read at startup. A managed key may not share a name with an env key: the server refuses such a key
+  (`401`) and logs a warning at startup; run `clef keys revoke NAME` or rename the env key. (The server is the
+  authority, since the env of `clef keys` can differ from the server's.)
 - **Managed keys** (`clef keys ...` or the console **Keys** tab): a *principal* (a name) with scopes, an optional daily
   quota and rate limit, and one to five keys (`clef_live_<id>_<secret>`). Only the SHA-256 of a key is stored; the
   secret is shown once, when it is created or rotated. Changes made in the console or through `/v1/admin/keys` apply at

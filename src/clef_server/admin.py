@@ -175,8 +175,10 @@ def router(ctx: AppContext) -> APIRouter:
         await run_in_threadpool(cache.reload)
         return out
 
-    def not_env(name: str) -> None:
-        if name in env_names:
+    async def not_env(name: str) -> None:
+        """Env keys are read-only here, unless a DB principal of the same (refused) name exists:
+        that row stays manageable so an admin can revoke it."""
+        if name in env_names and await run_in_threadpool(store.get, name) is None:
             raise ApiError(403, f"{name!r} is an env key (CLEF_API_KEY / CLEF_API_KEYS): change it there")
 
     def own(request: Request, name: str) -> Principal | None:
@@ -257,7 +259,7 @@ def router(ctx: AppContext) -> APIRouter:
     async def update_key(
         name: str, body: KeyUpdate, request: Request, force: bool = Query(False)
     ) -> dict[str, Any]:
-        not_env(name)
+        await not_env(name)
         changes = {k: getattr(body, k) for k in body.model_fields_set}
         if "scopes" in changes and changes["scopes"] is None:
             raise ApiError(400, "scopes: cannot be null")
@@ -281,7 +283,7 @@ def router(ctx: AppContext) -> APIRouter:
     async def rotate_key(
         name: str, request: Request, response: Response, body: Annotated[RotateRequest | None, Body()] = None
     ) -> dict[str, Any]:
-        not_env(name)
+        await not_env(name)
         no_secret_cache(response)
         body = body or RotateRequest()
         expires = time.time() + body.expires_in_days * DAY_S if body.expires_in_days else None
@@ -302,7 +304,7 @@ def router(ctx: AppContext) -> APIRouter:
         body: Annotated[RevokeRequest | None, Body()] = None,
         force: bool = Query(False),
     ) -> dict[str, Any]:
-        not_env(name)
+        await not_env(name)
         key_id = body.key_id if body else None
         if own(request, name) and not force:
             current = await run_in_threadpool(store.get, name)

@@ -992,7 +992,21 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     )
     app.state.ctx = ctx
     for clash in sorted(auth.env_names & keycache.names):
-        log.warning("key name %r is both an env key and a DB principal: the env key wins", clash)
+        log.warning(
+            "key name %r is both an env key and a DB principal: the DB keys of %r are refused (401) so they "
+            "cannot inherit the env key's ownership; run `clef keys revoke %s` or rename the env key",
+            clash,
+            clash,
+            clash,
+        )
+    if len(auth.env_names) > 1:
+        log.warning(
+            "%d env keys (%s) are configured: every env key is a full admin (sees and deletes every job, "
+            "edits every classifier, mints keys, reads the audit log). For separate tenants use "
+            "`clef keys create` per tenant and keep a single env key for operators.",
+            len(auth.env_names),
+            ", ".join(sorted(auth.env_names)),
+        )
 
     async def start_keys() -> None:
         """Key cache reload + quota flush tasks (a hook must return, so they run as tasks)."""

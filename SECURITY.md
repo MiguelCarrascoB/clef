@@ -19,7 +19,7 @@ most, trusted callers on a local network.
 - **API keys.** Two kinds protect every `/v1/*` route and the Hugging Face compatibility routes (`/hf/models/*`).
   *Env keys* (`CLEF_API_KEY` or `CLEF_API_KEYS`, named, from a list or a file) are full admin with no quota: treat
   them as break-glass credentials, and note that every env-key holder sees every job and may change every saved
-  classifier, so env keys are **not** isolated from each other. *Managed keys* (`clef keys create`, the console or
+  classifier, so env keys are **not** isolated from each other. A managed key whose name equals an env key's is refused (`401`, startup warning), so it cannot inherit that env key's ownership; the server is the authority on this, since the env seen by `clef keys` can differ. *Managed keys* (`clef keys create`, the console or
   `/v1/admin/keys`) belong to a principal with scopes (`classify`, `jobs`, `classifiers`, `ops`, `admin`, `urgent`; a
   missing scope is `403`), an optional daily record quota and rate limit, expiry and revocation. A managed key is
   `clef_live_<id>_<secret>`; **only its SHA-256 is stored**, so it cannot be recovered, and the secret is shown once

@@ -773,7 +773,9 @@ def _keys_command(args: argparse.Namespace, store: Any, quotas: Any, cfg: Any, a
     cmd = args.keys_command
     env_names = frozenset(cfg.api_keys())
     as_json = getattr(args, "json", False)
-    if cmd in ("revoke", "update", "rotate") and args.name in env_names:
+    # An env key is read-only, unless a DB principal of the same name exists (the server refuses its keys, so
+    # `revoke` must work on it). The server is the authority: its env may differ from this shell's.
+    if cmd in ("revoke", "update", "rotate") and args.name in env_names and store.get(args.name) is None:
         raise ValueError(f"{args.name!r} is an env key (CLEF_API_KEY / CLEF_API_KEYS): change it there")
     if cmd in ("create", "rotate"):
         expires = _parse_expiry(args.expires) if args.expires else None
