@@ -19,7 +19,7 @@ from test_jobs import LABELS, SlowEngine, submit, wait
 
 from clef_server import keystore as ks
 from clef_server.config import Config
-from clef_server.db import Database
+from clef_server.db import Database, database_url
 from clef_server.engine import GpuOutOfMemory, Prepared
 from clef_server.keystore import Actor, KeyCache, KeyStore, KeystoreError, Principal, Quotas
 
@@ -40,7 +40,7 @@ def hdr(secret: str) -> dict[str, str]:
 
 @pytest.fixture
 def db(tmp_path):
-    database = Database(f"sqlite:///{tmp_path}/k.db")
+    database = Database(database_url(Config(state_dir=str(tmp_path / "state"), api_key=None)))
     database.upgrade()
     yield database
     database.close()
@@ -75,6 +75,7 @@ def test_scopes_parse_and_admin_implies_all():
 # ------------------------------------------------------------------ store
 
 
+@pytest.mark.postgres
 def test_create_stores_only_the_hash_and_audits(db):
     store = KeyStore(db)
     row, secret = store.create_principal("ci", "classify,jobs", actor=Actor("cli:me"), daily_quota=50)
@@ -93,6 +94,7 @@ def test_create_stores_only_the_hash_and_audits(db):
     assert entries[0]["target"] == "ci" and secret not in json.dumps(entries[0])
 
 
+@pytest.mark.postgres
 def test_names_are_validated_unique_and_never_reused(db):
     store = KeyStore(db)
     a = Actor("t")
@@ -113,6 +115,7 @@ def test_names_are_validated_unique_and_never_reused(db):
     assert e.value.status == 409 and "env key" in str(e.value)
 
 
+@pytest.mark.postgres
 def test_rotation_grace_and_the_five_key_limit(db):
     store = KeyStore(db)
     a = Actor("t")
@@ -136,6 +139,7 @@ def test_rotation_grace_and_the_five_key_limit(db):
     store.rotate("ci", actor=a, grace_s=0)  # a slot is free again; grace 0 expires the others now
 
 
+@pytest.mark.postgres
 def test_update_clear_and_disable(db):
     store = KeyStore(db)
     a = Actor("t")
@@ -158,6 +162,7 @@ def test_update_clear_and_disable(db):
     assert [p["name"] for p in store.list_principals(include_disabled=True)] == ["ci"]
 
 
+@pytest.mark.postgres
 def test_audit_paging_and_prefix_filter(db):
     store = KeyStore(db)
     a = Actor("t")
@@ -175,6 +180,7 @@ def test_audit_paging_and_prefix_filter(db):
 # ------------------------------------------------------------------ cache and last_used
 
 
+@pytest.mark.postgres
 def test_cache_reload_and_generation_polling(db):
     store, cache = KeyStore(db), KeyCache(db, refresh_s=0.05)
     cache.reload()
@@ -192,6 +198,7 @@ def test_cache_reload_and_generation_polling(db):
     assert cache.get(ks.parse_key(secret)) is not None and cache.any_principal()
 
 
+@pytest.mark.postgres
 def test_last_used_flush_does_not_bump_the_generation(db):
     store, cache = KeyStore(db), KeyCache(db)
     _, secret = store.create_principal("ci", "jobs", actor=Actor("t"))
@@ -203,6 +210,7 @@ def test_last_used_flush_does_not_bump_the_generation(db):
     assert store.get("ci")["keys"][0]["last_used_at"] is not None
 
 
+@pytest.mark.postgres
 def test_a_failing_reload_keeps_the_last_good_state(db):
     store, cache = KeyStore(db), KeyCache(db)
     _, secret = store.create_principal("ci", "jobs", actor=Actor("t"))
@@ -226,6 +234,7 @@ def principal(quota: int | None = 10, source: str = "db") -> Principal:
     return Principal("ci", source, frozenset({"classify"}), quota, None, "k", None)
 
 
+@pytest.mark.postgres
 def test_quota_reserve_refund_and_exceeded(db):
     q = Quotas(db)
     p = principal(10)
@@ -243,6 +252,7 @@ def test_quota_reserve_refund_and_exceeded(db):
     assert q.remaining(principal(None)) is None
 
 
+@pytest.mark.postgres
 def test_quota_day_rollover_and_retry_after(db):
     now = [datetime(2026, 10, 17, 23, 59, 0, tzinfo=timezone.utc).timestamp()]
     q = Quotas(db, clock=lambda: now[0])
@@ -257,6 +267,7 @@ def test_quota_day_rollover_and_retry_after(db):
     assert q.used("ci", "2026-10-17") == 0 and q.used("ci", "2026-10-18") == 5
 
 
+@pytest.mark.postgres
 def test_quota_flush_upserts_and_history_merges_unflushed(db):
     q = Quotas(db)
     p = principal(100)
@@ -278,6 +289,7 @@ def test_quota_flush_upserts_and_history_merges_unflushed(db):
     assert [d["records"] for d in hist] == [0, 0, 10] and hist[0]["day"] < hist[-1]["day"]
 
 
+@pytest.mark.postgres
 def test_quota_refund_below_flushed_base_is_clamped(db):
     q = Quotas(db)
     r = q.reserve(principal(10), 2)
@@ -578,6 +590,7 @@ def test_job_quota_reserve_refund_replay_and_cancel():
         assert kept.quota_reserved == kept.done
 
 
+@pytest.mark.postgres
 def test_settle_quota_refunds_once_and_only_for_failed_or_cancelled_jobs(db):
     from clef_server.jobs import JobStore
 
