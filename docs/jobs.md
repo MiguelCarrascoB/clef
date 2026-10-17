@@ -79,6 +79,7 @@ Built-in kinds:
 | `score` | `inputs`, either `levels` or `classifier` (a saved score classifier), optional `instructions`, `model` | `{index, score, level, level_index, confidence, distribution, input_tokens}` |
 | `systemone` | `requests`: a list of `/v1/systemone` bodies (media allowed, same per-request limits) | `{index, model, answers, input_tokens}` |
 | `evaluate` | the same body as `POST /v1/evaluate` (up to `CLEF_MAX_JOB_EVAL_ROWS` rows), see [evaluation](evaluation.md#as-a-job) | `{index, input, gold, predicted, confidence, correct, scores}`; the job `result` is the metrics object |
+| `batch` | internal: created by `POST /v1/batches` ([OpenAI Batch API](openai-compat.md#files-and-batches-the-openai-batch-api)); `input_file_id`, `endpoint`. A run where every line failed still ends `succeeded` | `{index, custom_id, status_code, request_id, body \| error, input_tokens}` |
 
 Other kinds can be registered by feature modules (`evaluate` is one); `POST` with an unknown
 kind answers `400` and lists the available ones. A saved `classifier` is **copied into the job at submit**: the

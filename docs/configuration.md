@@ -60,6 +60,9 @@ See [Jobs & webhooks](jobs.md).
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CLEF_MAX_JOB_ITEMS` | `100000` | items per `classify` / `score` / `systemone` job |
+| `CLEF_MAX_FILE_MB` | `200` | body limit of `POST /v1/files` (OpenAI batch uploads); other routes use `CLEF_MAX_BODY_MB` |
+| `CLEF_MAX_BATCH_LINES` | `50000` | requests per OpenAI batch (also capped by `CLEF_MAX_JOB_ITEMS`) |
+| `CLEF_FILE_TTL_HOURS` | `720` | how long an uploaded batch file is kept (`0` = forever) |
 | `CLEF_MAX_JOBS` | `100` | queued + running jobs; more is `409` with `Retry-After` |
 | `CLEF_JOB_TTL_HOURS` | `168` | finished jobs and their rows are purged this long after they finish; `0` keeps them forever |
 | `CLEF_JOB_ENGINE_WAIT_S` | `600` | how long a job waits for an unavailable engine before failing |

@@ -106,7 +106,7 @@ ERRORS: dict[int | str, dict[str, Any]] = {
     }.items()
 }
 # Feature modules: each exposes router(ctx: AppContext) -> APIRouter (see appctx.py). One line each.
-FEATURES: list[str] = ["evaluation", "compat", "jobs", "admin", "router"]
+FEATURES: list[str] = ["evaluation", "compat", "batches", "jobs", "admin", "router"]
 
 
 class ApiError(Exception):
@@ -169,6 +169,13 @@ class GuardMiddleware:
     def __init__(self, app: Any, cfg: Config, stats: Stats):
         self.app, self.cfg, self.stats = app, cfg, stats
         self.limit = cfg.max_body_mb * 1024 * 1024
+        self.file_limit = cfg.max_file_mb * 1024 * 1024  # F1: POST /v1/files only
+
+    def limit_for(self, scope: dict[str, Any]) -> tuple[int, int]:
+        """(bytes, MB) allowed for this request: the file limit for the upload route, else the body limit."""
+        if scope["method"] == "POST" and scope["path"] == "/v1/files":
+            return self.file_limit, self.cfg.max_file_mb
+        return self.limit, self.cfg.max_body_mb
 
     async def __call__(self, scope: dict[str, Any], receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":
@@ -183,6 +190,7 @@ class GuardMiddleware:
         tracked = is_tracked(scope["method"], scope["path"])
         status = 500
         received = 0
+        limit, limit_mb = self.limit_for(scope)
 
         async def send_wrap(msg: dict[str, Any]) -> None:
             nonlocal status
@@ -201,16 +209,20 @@ class GuardMiddleware:
             msg = await receive()
             if msg["type"] == "http.request":
                 received += len(msg.get("body", b""))
-                if received > self.limit:
-                    raise BodyTooLarge(self.cfg.max_body_mb)
+                if received > limit:
+                    raise BodyTooLarge(limit_mb)
             return msg
 
         try:
             with self.stats.in_flight() if tracked else nullcontext():
                 declared = headers.get("content-length", "")
-                if declared.isdigit() and int(declared) > self.limit:
-                    state["error"] = msg_ = f"request body exceeds {self.cfg.max_body_mb} MB limit"
-                    resp = JSONResponse({"detail": msg_, "request_id": rid}, status_code=413)
+                if declared.isdigit() and int(declared) > limit:
+                    state["error"] = msg_ = f"request body exceeds {limit_mb} MB limit"
+                    if scope["path"] == "/v1/files":  # the OpenAI SDKs parse this error shape
+                        err = {"message": msg_, "type": "invalid_request_error", "param": None, "code": None}
+                        resp = JSONResponse({"error": err}, status_code=413)
+                    else:
+                        resp = JSONResponse({"detail": msg_, "request_id": rid}, status_code=413)
                     await resp(scope, receive, send_wrap)
                 else:
                     await self.app(scope, receive_wrap, send_wrap)

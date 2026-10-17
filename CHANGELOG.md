@@ -30,6 +30,16 @@
   while the current one is on the GPU. Results stay in input order, rows stay gap-free and a resume recomputes at
   most one window. Applies to the classify, score, systemone and evaluate job kinds. Not enabled by default until
   `bench/sort_check.sh` shows a gain over 10% on the GPU (measurement pending, see Performance).
+- **OpenAI Files and Batches (F1)**: `POST/GET/DELETE /v1/files` (multipart upload of `.jsonl`, `purpose=batch`,
+  `/content` streamed) and `POST/GET /v1/batches`, `POST /v1/batches/{id}/cancel`, for chat completions,
+  `/v1/classify` and `/v1/score` lines. The `openai` SDK's `client.files` / `client.batches` work unchanged; errors
+  use the OpenAI shape. A batch is one job of kind `batch` (`GET /v1/jobs?kind=batch`), so it shares the queue,
+  quota, resume and retention; output and error files are streamed from the job's rows, not stored. Private to the
+  key that created them, scope `jobs`. New: `CLEF_MAX_FILE_MB` (200, body limit of `POST /v1/files` only),
+  `CLEF_MAX_BATCH_LINES` (50000), `CLEF_FILE_TTL_HOURS` (720); new `server` dependency `python-multipart`. See
+  docs/openai-compat.md.
+- Jobs: a kind may set `"completed_if_all_failed"` (a run where every item failed still ends `succeeded`), result
+  rows with a 4xx `status_code` do not trip the circuit breaker, and `jobs.tokens` sums the rows' `input_tokens`.
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
   503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)
   the first SIGTERM / Ctrl-C keeps the server up for N seconds answering `draining` (a second signal stops at once),
