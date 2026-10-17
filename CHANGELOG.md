@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Added
+- `bench/vllm/` (Wave G, not yet run on a GPU): `vllm_check.sh` benchmarks a pinned vLLM ROCm nightly container against
+  clef (flags off, and MASK_FREE + FAST_HEAD) with a parity run, load at concurrency 1/8/16/32 and a D12 decision table;
+  `vllm_client.py` maps clef records to vLLM's `/v1/systemone` and fails loudly on a shape mismatch. `clef bench`'s load
+  generator takes an optional response check.
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
   503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)
   the first SIGTERM / Ctrl-C keeps the server up for N seconds answering `draining` (a second signal stops at once),
