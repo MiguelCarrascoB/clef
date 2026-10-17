@@ -137,5 +137,12 @@ Run `caddy run --config Caddyfile`. For a LAN-only hostname without a public dom
 site block (clients must trust Caddy's local CA). Behind a proxy every request comes from `127.0.0.1`, so the rate
 limit is per key, not per client IP: keep API keys on.
 
+**Load balancers.** Point the health check at `/readyz` (open, no key). To take a server out of rotation before
+it stops, set `CLEF_DRAIN_S` (e.g. `5`): after SIGTERM / Ctrl-C clef keeps serving that long while `/readyz`
+answers 503 `draining`, then shuts down; a second signal stops it at once. Pick the probe interval x failure
+threshold below `CLEF_DRAIN_S`, and keep `CLEF_DRAIN_S` below your supervisor's stop timeout (10 s for
+`docker stop`). With the default `0` the listening socket closes at once and the load balancer only sees refused
+connections.
+
 Additional hardening if you do expose it: set a low `CLEF_RATE_LIMIT`, keep `CLEF_ALLOW_URL_FETCH=0` (default), keep
 `CLEF_LOG_STATE=0` (default; request contents are not stored), and restrict by IP in the proxy where possible.

@@ -5,7 +5,7 @@
 
 | Command | What it does |
 | --- | --- |
-| `clef serve [--host --port --device --dtype --quant --offload --max-device-memory-gb --model-path --log-format --detach --timeout]` | start the server (foreground; `--detach` writes a pidfile and waits until healthy) |
+| `clef serve [--host --port --device --dtype --quant --offload --max-device-memory-gb --model-path --log-format --drain-s --detach --timeout]` | start the server (foreground; `--detach` writes a pidfile and waits until healthy) |
 | `clef stop` / `clef status [--json]` / `clef logs [-f] [-n N]` | manage a detached server |
 | `clef doctor [--no-gpu] [--smoke] [--json]` | environment checks per backend; `--smoke` loads the model and runs one record |
 | `clef download [--revision SHA] [--dir DIR] [--yes]` | pinned, resumable download of the weights with a disk-space check |
@@ -23,6 +23,10 @@
 `--log-format`
 :   `text` (default) or `json`, equal to `CLEF_LOG_FORMAT`. json writes one JSON object per log line, including
     the access log; `clef logs` prints the file as it is.
+
+`--drain-s`
+:   Seconds to keep serving after the first SIGTERM / Ctrl-C while `/readyz` answers 503 `draining`, equal to
+    `CLEF_DRAIN_S` (default `0` = stop at once). A second signal stops at once. Use it behind a load balancer.
 
 `--detach`
 :   Spawns the server as a detached process, writes a pidfile, logs to the state dir (rotating the previous log), then

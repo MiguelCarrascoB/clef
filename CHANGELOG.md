@@ -4,15 +4,23 @@
 
 ### Added
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
-  503 with `status` `loading|warming|error|draining`. Shutdown flips it to draining before the engine stops. The
+  503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)
+  the first SIGTERM / Ctrl-C keeps the server up for N seconds answering `draining` (a second signal stops at once),
+  so a load balancer stops routing first; e.g. `5` behind a load balancer, below Docker's 10 s stop timeout. The
   Docker images and compose file now health-check `/readyz` (start period 600 s), so a container whose model failed
   to load is reported unhealthy; `/livez` stays the process-up probe.
 - `CLEF_LOG_FORMAT=json` (`clef serve --log-format json`): app, uvicorn and access log lines as one JSON object per
   line (`ts`, `level`, `logger`, `msg`, `request_id`). The default `text` output is unchanged.
 
 ### Fixed
+- **Console live stream**: a CRLF split across two network chunks was read as a blank line, which could split one
+  server-sent event in two. A trailing `\r` is now held back until the next chunk.
+- **Lost cancel**: a cancel that raced a runner error could be dropped (the job was parked `interrupted` just
+  before the cancel flag was written, which only matched `running` jobs) and the job was later resumed. An
+  `interrupted` job is now cancelled at once, with its `job.cancelled` event, in one transaction.
 - **API key in the access log**: the uvicorn access log wrote `/v1/events?key=<key>` (the console's live stream),
-  so the key ended up in `clef.log`. The `key`, `api_key` and `token` query values are now logged as `REDACTED`,
+  so the key ended up in `clef.log`. The `key`, `api_key` and `token` query values are now logged as `REDACTED`
+  (names are percent-decoded first, as auth reads them, and matched case-insensitively, so `?k%65y=` is masked too),
   and the console reads the stream with `fetch()` and the `X-API-Key` header. `?key=` still works for other
   clients. SECURITY.md has Caddy / nginx snippets for masking keys in proxy logs.
 - **CUDA install**: `accelerate` and `torchvision` are now declared in the `cuda` extra and pinned in

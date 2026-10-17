@@ -25,7 +25,8 @@ stateDiagram-v2
 Interactive requests (`/v1/classify`, `/v1/systemone`, ...) stay responsive while a job runs: the runner
 processes one job at a time and keeps **one chunk** (`CLEF_MAX_MICROBATCH` records, 8 by default) in flight
 at the engine, and the engine queue has a **priority lane**: job chunks go in the background lane, requests in
-the interactive one, and the next micro-batch is always interactive when any request is waiting. A request
+the interactive one, and the next micro-batch is interactive when any request is waiting (up to
+`CLEF_INTERACTIVE_BURST` interactive micro-batches in a row, then one background group). A request
 arriving mid-job therefore waits only for the job micro-batch already being computed (it is never preempted):
 one forward when the chunk shares a length bucket, more when it spans several buckets or carries media (one
 forward per media record). Cancellation also takes effect between chunks.

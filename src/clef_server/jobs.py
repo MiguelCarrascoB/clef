@@ -362,9 +362,22 @@ class JobStore:
                 return False, None
             return True, self._terminal_event(job_id, "cancelled")
 
-    def flag_cancel(self, job_id: str) -> None:
-        with self._lock:
-            self._db.execute("UPDATE jobs SET cancel_requested=1 WHERE id=? AND status='running'", (job_id,))
+    def flag_cancel(self, job_id: str) -> tuple[str | None, str | None]:
+        """Cancel a job that is not queued, in ONE transaction; ``(status, event)``.
+
+        running -> ``cancel_requested=1`` (the runner stops it between chunks): ``("running", None)``.
+        interrupted (parked by a clean stop or a runner error after the caller saw it running) -> cancelled
+        at once, never resumed: ``("cancelled", event)``. Anything else is left alone: ``(None, None)``.
+        """
+        with self._tx():
+            row = self._db.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+            status = row["status"] if row else None
+            if status == "running":
+                self._db.execute("UPDATE jobs SET cancel_requested=1 WHERE id=?", (job_id,))
+                return "running", None
+            if status == "interrupted":
+                return "cancelled", self._cancel_now(job_id)
+            return None, None
 
     def _cancel_now(self, job_id: str) -> str | None:
         """Inside a transaction: a job whose cancel was requested ends cancelled (never resumed)."""
@@ -846,10 +859,14 @@ class JobRunner:
             if event:
                 self.dispatcher.enqueue(job_id, event)
         else:
-            current = await asyncio.to_thread(self.store.get, job_id)
-            if current and current["status"] == "running":
-                self.cancel_ids.add(job_id)
-                await asyncio.to_thread(self.store.flag_cancel, job_id)
+            # Not queued: flag it if running, or cancel it now if a park (clean stop, runner error) got
+            # there first. One atomic store call, not gated on a stale read: a racing park cannot drop it.
+            self.cancel_ids.add(job_id)  # before the flag: a running job may check either one
+            status, event = await asyncio.to_thread(self.store.flag_cancel, job_id)
+            if status != "running":
+                self.cancel_ids.discard(job_id)
+            if event:
+                self.dispatcher.enqueue(job_id, event)
         return await asyncio.to_thread(self.store.get, job_id) or row
 
     def _finish_sync(

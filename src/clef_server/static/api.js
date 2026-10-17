@@ -104,17 +104,30 @@ export async function streamEvents(path, { onOpen, onEvent, signal } = {}) {
     }
     if (data.length && onEvent) onEvent(event, data.join('\n'));
   };
+  // A chunk may end between the \r and \n of a CRLF: hold a trailing \r back until the next chunk (or the end of
+  // the stream) so it is not read as a lone CR line end, which would add a false blank line.
+  let carry = '';
+  const feed = (text, last) => {
+    let raw = carry + text;
+    carry = '';
+    if (!last && raw.endsWith('\r')) {
+      carry = '\r';
+      raw = raw.slice(0, -1);
+    }
+    buf += raw.replace(/\r\n?/g, '\n');
+    let cut;
+    while ((cut = buf.indexOf('\n\n')) >= 0) {
+      dispatch(buf.slice(0, cut));
+      buf = buf.slice(cut + 2);
+    }
+  };
   try {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      buf += dec.decode(value, { stream: true }).replace(/\r\n?/g, '\n');
-      let cut;
-      while ((cut = buf.indexOf('\n\n')) >= 0) {
-        dispatch(buf.slice(0, cut));
-        buf = buf.slice(cut + 2);
-      }
+      feed(dec.decode(value, { stream: true }), false);
     }
+    feed(dec.decode(), true);
   } catch (e) {
     if (e && e.name === 'AbortError') throw e;
     throw new ApiError(`Stream lost: ${e && e.message ? e.message : e}`, { status: 0 });

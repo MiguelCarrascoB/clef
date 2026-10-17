@@ -68,6 +68,7 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_API_KEY` | unset | one key, named `default` |
 | `CLEF_API_KEYS` | unset | `name:key,name2:key2` or a path to a file with one `name:key` per line (`#` comments) |
 | `CLEF_RATE_LIMIT` | `0` | requests per minute per key (per client IP when auth is off); 0 = off |
+| `CLEF_DRAIN_S` | `0` | seconds `main.run` keeps serving after the first SIGTERM / Ctrl-C with `/readyz` 503 `draining` (see [`GET /readyz`](#get-readyz)); `>= 0`, 0 = stop at once. `--drain-s` |
 | `CLEF_CORS_ORIGINS` | empty | comma-separated allowed origins (`*` allowed); empty = CORS off |
 | `CLEF_STATE_DIR` | per OS | Linux `$XDG_STATE_HOME/clef` (`~/.local/state/clef`), macOS `~/Library/Application Support/clef`, Windows `%LOCALAPPDATA%\clef`. Legacy alias `CLEF_LOG_DIR` |
 | `CLEF_MAX_LABELS` | `64` | labels per classify request / saved classifier |
@@ -112,7 +113,7 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_FILE_TTL_HOURS` (planned, v3.2) | `720` | uploaded files without `expires_after` are purged this long after upload |
 | v2 knobs | unchanged | `CLEF_MAX_TOKENS`, `CLEF_MAX_BODY_MB`, `CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES`, `CLEF_VIDEO_FPS`, `CLEF_MAX_BATCH`, `CLEF_MAX_QUESTIONS`, `CLEF_ALLOW_URL_FETCH`, `CLEF_URL_FETCH_MAX_MB`, `CLEF_MAX_MICROBATCH`, `CLEF_BATCH_WINDOW_MS`, `CLEF_BUCKETS`, `CLEF_PAD_MULTIPLE` (64, measured on ROCm only), `CLEF_PAD_TO_BUCKET`, `CLEF_WARMUP`, `CLEF_LOG_STATE`, `CLEF_LOG_BUFFER` |
 
-`Config` validates enums (device, dtype, quant, quant backend, offload, log format), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range, `CLEF_RATE_LIMIT >= 0` and `CLEF_INTERACTIVE_BURST >= 1` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
+`Config` validates enums (device, dtype, quant, quant backend, offload, log format), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range, `CLEF_RATE_LIMIT >= 0`, `CLEF_INTERACTIVE_BURST >= 1` and `CLEF_DRAIN_S >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
 `auth_required`, `is_loopback`, `public_limits()`.
 
 ## Backend interface (`backend.py`)
@@ -242,7 +243,8 @@ Rules (v2 rules kept):
   `background` (`ctx.decide`: jobs, the `evaluate` job kind). Each lane is FIFO. The worker waits for the first item
   of either lane, lets the batch window run, and only then picks the lane for the micro-batch, so an interactive
   item that arrives during a window opened by background work still goes first. A micro-batch holds ONE class:
-  interactive whenever any is queued, else background. Micro-batching and bucketing work as before inside it.
+  interactive whenever any is queued (up to the starvation bound below), else background. Micro-batching and
+  bucketing work as before inside it.
 - Classes are not mixed even when the micro-batch has room. The model is compute-bound (batching adds ~30%
   throughput), so an interactive record riding in a batch of 8 background records pays nearly the whole batch's
   forward time; running it alone first costs the job one extra host overhead (~50% of a single forward).
@@ -505,8 +507,11 @@ Guide: [jobs.md](jobs.md).
   no duplicate). A clean stop (lifespan shutdown) parks the running job as `interrupted` without counting it;
   only a job found still `running` at startup (a crash) increments `resumes`, and more than
   `CLEF_JOB_MAX_RESUMES` crashes fail it. A job whose cancel was requested before the stop or crash ends
-  `cancelled` at that point (or at the next start), never resumed. Every terminal transition (finish, cancel
-  while queued, cancel / give-up at recovery) writes the status and the pending terminal webhook record in ONE
+  `cancelled` at that point (or at the next start), never resumed. Cancel is atomic per state:
+  `JobStore.cancel_queued` (queued / interrupted -> cancelled), else `JobStore.flag_cancel` in one transaction
+  (running -> `cancel_requested=1`; interrupted, i.e. parked meanwhile by a stop or runner error -> cancelled at
+  once), so a park racing the cancel cannot drop it. Every terminal transition (finish, cancel while queued or
+  interrupted, cancel / give-up at recovery) writes the status and the pending terminal webhook record in ONE
   SQLite transaction, so a crash cannot lose the event. A row the engine rejects
   becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
   `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
@@ -531,9 +536,16 @@ Guide: [jobs.md](jobs.md).
 Readiness for load balancers and orchestrators (open, like `/livez`). 200 `{"ready": true}` only when the engine
 status is `ready` and the app is not draining; otherwise 503 `{"ready": false, "status":
 "loading|warming|error|draining", "error": <engine error or null>}`. Unlike `/health`, `warming` is not ready.
-Draining: the lifespan sets `app.state.draining = True` as the first step of shutdown, before the `on_shutdown` hooks
-and `engine.shutdown()`, so `/readyz` flips to 503 while the engine is still serving. Draining does not reject
-requests: inference keeps working until the engine stops. Liveness stays on `/livez` (process up); the Docker
+Draining: uvicorn closes its listening sockets and drains connections BEFORE the lifespan shutdown runs, so a flag
+set there is never seen by a client. `main.run` therefore serves through `DrainingServer` (a `uvicorn.Server`
+subclass): the FIRST SIGTERM / Ctrl-C sets `app.state.draining = True` and keeps serving for `CLEF_DRAIN_S`
+seconds (`/readyz` answers 503 `draining`, every other route works as usual), then calls uvicorn's own
+`handle_exit` and the normal shutdown starts. A second signal during the drain skips the rest of it; after that
+uvicorn's semantics apply (another Ctrl-C forces the exit). `CLEF_DRAIN_S=0` (default) stops at once, as before.
+The lifespan still sets `draining = True` first thing at shutdown, for launchers other than `main.run` (plain
+`uvicorn`). A drain only helps a load balancer that probes `/readyz` faster than it lasts: probe interval x
+failure threshold must be below `CLEF_DRAIN_S`, and `CLEF_DRAIN_S` below the supervisor's stop timeout (Docker
+sends SIGKILL after 10 s by default; `clef stop` waits 30 s). Liveness stays on `/livez` (process up); the Docker
 HEALTHCHECK uses `/readyz` with a long start period so a container whose model failed to load turns unhealthy.
 
 ### `GET /v1/stats?window_s=300`
@@ -582,7 +594,9 @@ in the access log).
   `"exc"` (the formatted traceback) when there is one. Stdlib only.
 - Redaction: `RedactSecretsFilter` rewrites the values of the `key`, `api_key` and `token` query parameters to
   `REDACTED` in every string of `record.args` (keeping the args tuple's shape, which uvicorn's `AccessFormatter`
-  unpacks) and in `record.msg`. It sits on uvicorn's handlers (via `log_config`), on clef's root handler and, from
+  unpacks) and in `record.msg`. It parses each `?query` (up to `#`, whitespace or `"`): the query is split on `&`
+  and a parameter is redacted when its name, percent-decoded (as auth reads it) and lower-cased, is one of the
+  three, so `k%65y=` and `KEY=` are masked and `step_key=` is not; every other parameter stays byte-identical. It sits on uvicorn's handlers (via `log_config`), on clef's root handler and, from
   the lifespan, on the `uvicorn.access` logger, which covers servers started with plain `uvicorn`. Keys therefore never reach
   clef's logs; reverse-proxy logs are the operator's (SECURITY.md has Caddy / nginx masking snippets).
 

@@ -36,6 +36,28 @@ def test_redact_masks_key_and_keeps_other_params():
     assert redact("/v1/events") == "/v1/events"
 
 
+@pytest.mark.parametrize(
+    ("path", "want"),
+    [
+        # auth reads the percent-decoded, case-folded name, so redaction must too
+        ("/v1/events?k%65y=SECRET", "/v1/events?k%65y=REDACTED"),
+        ("/v1/events?%6Bey=SECRET", "/v1/events?%6Bey=REDACTED"),
+        ("/v1/events?KEY=SECRET", "/v1/events?KEY=REDACTED"),
+        ("/x?api%5Fkey=SECRET", "/x?api%5Fkey=REDACTED"),
+        ("/x?%74oken=SECRET&step_s=5", "/x?%74oken=REDACTED&step_s=5"),
+        ("/x?step_key=1", "/x?step_key=1"),
+        ("/x?step%5Fkey=1&a=%41&flag&=v", "/x?step%5Fkey=1&a=%41&flag&=v"),  # others byte-identical
+        ("/x?a=1&key=S1&b=2&token=S2&api_key=S3", "/x?a=1&key=REDACTED&b=2&token=REDACTED&api_key=REDACTED"),
+        ("/x?key=S#frag", "/x?key=REDACTED#frag"),
+        ('GET /x?key=S HTTP/1.1" 200', 'GET /x?key=REDACTED HTTP/1.1" 200'),
+        ("/a?key=1 then /b?k%65y=2", "/a?key=REDACTED then /b?k%65y=REDACTED"),
+    ],
+)
+def test_redact_parses_the_query_like_auth_does(path, want):
+    assert redact(path) == want
+    assert "SECRET" not in redact(path)
+
+
 def test_filter_masks_access_record_and_keeps_tuple_shape():
     rec = access_record("/v1/events?key=abc&step_s=5")
     assert RedactSecretsFilter().filter(rec) is True
@@ -130,12 +152,21 @@ def test_uvicorn_log_config_json_end_to_end(capsys):
 
 @pytest.mark.parametrize("fmt", ["text", "json"])
 def test_run_passes_log_config(monkeypatch, fmt):
-    seen = {}
+    seen = []
+
+    def run(self) -> None:
+        seen.append(self.config)
+        self.started = True
+
     monkeypatch.setattr(main, "create_app", lambda cfg: "app")
-    monkeypatch.setattr(main.uvicorn, "run", lambda app, **kw: seen.update(kw))
-    main.run(Config(log_format=fmt))
-    assert seen["workers"] == 1
-    lc = seen["log_config"]
+    monkeypatch.setattr(main.DrainingServer, "run", run)
+    try:
+        main.run(Config(log_format=fmt))
+    finally:
+        for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):  # uvicorn.Config ran dictConfig
+            logging.getLogger(name).handlers.clear()
+    assert seen[0].workers == 1
+    lc = seen[0].log_config
     assert "redact_secrets" in lc["handlers"]["access"]["filters"]
     assert (lc["formatters"]["access"].get("()") is JsonFormatter) == (fmt == "json")
 

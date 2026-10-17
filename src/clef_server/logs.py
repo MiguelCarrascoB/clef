@@ -12,20 +12,33 @@ import re
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import unquote_plus
 
 TEXT_FORMAT = "%(asctime)s %(levelname)-7s %(name)s %(message)s"
 REDACTED = "REDACTED"
 
-# Query parameters whose value is a secret. `[?&]` anchors the name: `monkey=` / `step_key=` are left alone.
-_SECRET_QUERY = re.compile(r"([?&](?:key|api_key|token)=)[^&#\s\"]*", re.IGNORECASE)
+# Query parameters whose value is a secret, matched on the whole percent-decoded, lower-cased name (what auth
+# reads): `k%65y=` and `KEY=` are redacted, `monkey=` / `step_key=` are left alone.
+_SECRET_NAMES = frozenset({"key", "api_key", "token"})
+# A `?query` part of a logged line: up to a fragment, whitespace or the quote closing uvicorn's request line.
+_QUERY = re.compile(r"\?([^#\s\"]*)")
 
 # Set by GuardMiddleware for the duration of a request; uvicorn logs the access line inside it.
 request_id_var: ContextVar[str | None] = ContextVar("clef_request_id", default=None)
 
 
+def _redact_query(match: re.Match[str]) -> str:
+    parts = match.group(1).split("&")
+    for i, part in enumerate(parts):
+        name, eq, _ = part.partition("=")
+        if eq and unquote_plus(name).lower() in _SECRET_NAMES:
+            parts[i] = f"{name}={REDACTED}"
+    return "?" + "&".join(parts)
+
+
 def redact(text: str) -> str:
-    """`/v1/events?step_s=5&key=abc` -> `/v1/events?step_s=5&key=REDACTED`."""
-    return _SECRET_QUERY.sub(r"\1" + REDACTED, text) if "=" in text else text
+    """`/x?step_s=5&k%65y=abc` -> `/x?step_s=5&k%65y=REDACTED`; other params stay byte-identical."""
+    return _QUERY.sub(_redact_query, text) if "=" in text else text
 
 
 class RedactSecretsFilter(logging.Filter):

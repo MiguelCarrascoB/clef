@@ -1060,3 +1060,48 @@ def test_runner_error_is_not_counted_as_a_crash(monkeypatch):
     with client:
         job = wait(client, submit(client).json()["id"])
         assert job["status"] == "succeeded" and job["resumes"] == 0, job
+
+
+def test_flag_cancel_on_a_job_parked_meanwhile_cancels_it_at_once():
+    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    running = _running(store)
+    assert store.flag_cancel(running) == ("running", None)
+    assert store.get(running)["cancel_requested"] is True and store.get(running)["status"] == "running"
+    parked = _running(store)
+    assert store.park(parked) is None  # a runner error parked it before the cancel landed
+    assert store.flag_cancel(parked) == ("cancelled", "job.cancelled")
+    got = store.get(parked)
+    assert got["status"] == "cancelled" and got["finished_at"]
+    assert got["deliveries"]["job.cancelled"]["status"] == "pending"
+    store.finish(running, "succeeded")
+    assert store.next_runnable() is None  # the parked job is never picked up again
+    assert store.flag_cancel(parked) == (None, None)  # finished: nothing to do
+    store.close()
+
+
+def test_cancel_is_not_lost_when_park_wins_the_race(monkeypatch):
+    client, eng, app = make()
+    runner = app.state.ctx.extra["jobs"]
+    store = runner.store
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(runner.dispatcher, "enqueue", lambda job_id, event: sent.append((job_id, event)))
+    with client:
+        payload = {"inputs": ["a", "b"], "labels": LABELS}
+        jid = store.create("classify", None, payload, None, HOOK, 10)["id"]
+        assert store.mark_running(jid, 0)  # 'running' rows are not picked up by the runner loop
+        real = store.cancel_queued
+
+        def cancel_queued(job_id: str) -> tuple[bool, str | None]:
+            out = real(job_id)  # False: the job is running
+            store.park(job_id)  # ... and the runner-error path parks it before the cancel is flagged
+            return out
+
+        monkeypatch.setattr(store, "cancel_queued", cancel_queued)
+        r = client.post(f"/v1/jobs/{jid}/cancel")
+        assert r.status_code == 200 and r.json()["status"] == "cancelled"
+        assert sent == [(jid, "job.cancelled")]
+        runner.poke()
+        time.sleep(0.1)
+        got = client.get(f"/v1/jobs/{jid}").json()
+        assert got["status"] == "cancelled" and got["resumes"] == 0
+        assert sum(eng.sizes) == 0  # never run
