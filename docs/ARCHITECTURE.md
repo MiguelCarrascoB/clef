@@ -41,7 +41,7 @@ tests. Change it first, then the code.
 | `clef_server/admin.py` (planned, v3.2) | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
 | `clef_server/cache.py` | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
 | `clef_server/router.py`, `clef_server/llm.py` (planned, v3.2) | feature module: routers, label-set versions, the Review queue (`/v1/routers*`, `/v1/review*`); the OpenAI-compatible LLM client |
-| `clef_server/batches.py` (planned, v3.2) | feature module: OpenAI `/v1/files*` and `/v1/batches*` on the `batch` job kind |
+| `clef_server/batches.py` | feature module: OpenAI `/v1/files*` and `/v1/batches*` on the `batch` job kind |
 
 Invariants (unchanged from v2):
 - ONE uvicorn worker per process (one model adapter, one model), ONE thread ever touches the GPU (the engine worker).
@@ -110,9 +110,9 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_ROUTER_MAX_NEW_PER_DAY` (planned, v3.2) | `10` | auto mode: labels a router may add per UTC day |
 | `CLEF_ROUTER_MAX_INPUT_CHARS` (planned, v3.2) | `500` | each buffered input is truncated to this before it is sent to the LLM |
 | `CLEF_REVIEW_TTL_DAYS` (planned, v3.2) | `30` | review items' input text is deleted this long after creation (and at once when resolved) |
-| `CLEF_MAX_FILE_MB` (planned, v3.2) | `200` | body limit for `POST /v1/files` only (everything else keeps `CLEF_MAX_BODY_MB`) |
-| `CLEF_MAX_BATCH_LINES` (planned, v3.2) | `50000` | lines per batch input file; the effective cap is `min(this, CLEF_MAX_JOB_ITEMS)` |
-| `CLEF_FILE_TTL_HOURS` (planned, v3.2) | `720` | uploaded files without `expires_after` are purged this long after upload |
+| `CLEF_MAX_FILE_MB` | `200` | body limit for `POST /v1/files` only (everything else keeps `CLEF_MAX_BODY_MB`) |
+| `CLEF_MAX_BATCH_LINES` | `50000` | lines per batch input file; the effective cap is `min(this, CLEF_MAX_JOB_ITEMS)` |
+| `CLEF_FILE_TTL_HOURS` | `720` | uploaded files without `expires_after` are purged this long after upload |
 | v2 knobs | unchanged | `CLEF_MAX_TOKENS`, `CLEF_MAX_BODY_MB`, `CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES`, `CLEF_VIDEO_FPS`, `CLEF_MAX_BATCH`, `CLEF_MAX_QUESTIONS`, `CLEF_ALLOW_URL_FETCH`, `CLEF_URL_FETCH_MAX_MB`, `CLEF_MAX_MICROBATCH`, `CLEF_BATCH_WINDOW_MS`, `CLEF_BUCKETS`, `CLEF_PAD_MULTIPLE` (64, measured on ROCm only), `CLEF_PAD_TO_BUCKET`, `CLEF_WARMUP`, `CLEF_LOG_STATE`, `CLEF_LOG_BUFFER` |
 
 `Config` validates enums (device, dtype, quant, quant backend, offload, log format), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range, `CLEF_RATE_LIMIT >= 0`, `CLEF_INTERACTIVE_BURST >= 1` and `CLEF_DRAIN_S >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
@@ -335,7 +335,7 @@ appears in `openapi.json`.
 | `GET /v1/classifiers/{name}/versions[/{v}]` | classifier history | Storage |
 | `GET /v1/whoami`, `/v1/admin/keys*`, `GET /v1/admin/audit` (planned, v3.2) | principals, keys, quotas, audit | Keys and principals |
 | `/v1/routers*`, `/v1/review*` (planned, v3.2) | self-evolving router, human review queue | Review queue and router |
-| `/v1/files*`, `/v1/batches*` (planned, v3.2) | OpenAI Files + Batch API | OpenAI Files and Batches |
+| `/v1/files*`, `/v1/batches*` | OpenAI Files + Batch API | OpenAI Files and Batches |
 
 ### Auth, rate limit, CORS (`security.py`)
 
@@ -1672,7 +1672,7 @@ input order); `recover()` unchanged; webhooks unchanged.
 Supersedes when landed: "One runner, FIFO, one job at a time and ONE micro-batch in flight" in Async jobs (the
 "one micro-batch in flight" part stays).
 
-## OpenAI Files and Batches (planned, v3.2)
+## OpenAI Files and Batches
 
 Module boundary: `batches.py` is a feature module listed in `FEATURES` before `jobs` (it registers the `batch` job
 kind); it reaches the runner lazily through `ctx.extra["jobs"]` and only through the `JobRunner` / `JobHandle`
@@ -1778,6 +1778,31 @@ Invariants: files are never in the DB; virtual files never exist on disk; deleti
 and output / error file rows; the batch path uses the same translation as the live routes, so probabilities match
 `/v1/chat/completions`.
 
+As built (F1; clarifications and deviations from the text above, nothing else changed):
+- `prepare_chat(body, cfg, model)` takes the served model id the caller already resolved (`served_model`; its
+  `UnknownModel` is the route's 404, a `model_not_found` line in a batch). `render_chat(chat, result, request_id,
+  total_ms=None)` returns the non-streaming body; `chat_outcome` returns the parts the streaming route also needs.
+- `jobs.py` was touched in three places the contract did not list: `JobStore.add_items` sums `input_tokens` into
+  `jobs.tokens`; the circuit breaker ignores rows that carry a 4xx `status_code` (a bad batch line is the client's
+  mistake, still counted in `jobs.failed`); `_execute` honours `completed_if_all_failed`. E1 owns the real versions.
+- Defaults: `CLEF_MAX_FILE_MB` 200 (OpenAI's limit), `CLEF_MAX_BATCH_LINES` 50000, `CLEF_FILE_TTL_HOURS` 720.
+- A structurally failed batch still needs the `batches.job_id` foreign key, so it gets a terminal `failed` job row
+  (kind `batch`, `payload {}`, nothing reserved, never runnable) written in the same transaction as the batch.
+- `output_file_id` / `error_file_id` are `null` until usable: the batch ended, and the output file has a success /
+  the error file a failed or never-run line. A batch that failed validation has neither.
+- Clarification: an input file that an unfinished batch references cannot be deleted (409) and is skipped by the TTL
+  purge, because the error file re-reads the custom ids from it. After the batch ended the input file may go; the
+  error file then omits the lines that never ran.
+- Clarification: admins list, read and delete every file and batch, but `POST /v1/batches` only accepts an input
+  file the caller uploaded (404 otherwise). The `batch` job re-checks that the file's owner is the job's owner when
+  it runs, so `POST /v1/jobs {"kind": "batch"}` cannot read another key's file. The job's quota reservation is the
+  file row's `lines`, never the payload's.
+- Until the job scheduler (E1) lands, `clef.priority` other than `normal`, `clef.urgent` and `clef.schedule` are
+  refused with 400 (`urgent` without the scope is 403 first), and the batch job gets `expire_after_s = 86400` and
+  `eligible_at = created` from `BatchStore.mark_window`. The seam is `batches.submit_batch_job`; E1 replaces its
+  body with `JobRunner.submit` and deletes `_legacy_submit` and `mark_window`.
+- The audit actions are `batch.cancel` and `file.delete`, as listed in Storage.
+
 ## Build ownership (planned, v3.2)
 
 Files a workstream may create (C) or modify (M). Tests: new files per workstream (see the shared rules), plus the
@@ -1793,7 +1818,7 @@ existing tests a contract change forces. Every workstream may append to `CHANGEL
 | D3 cache | `cache.py` | `engine.py` (`prepare` / `submit` cache calls, `cache_stats`), `stats.py` (`cache` block), `config.py` (`CLEF_CACHE_SIZE`) |
 | E1 scheduler | | `jobs.py`, `evaluation.py` (`job.decide`), `config.py` (`CLEF_JOB_*`), `pyproject.toml` (`tzdata`), `clef_client/*`, `clients/js/*` (job fields), `static/screens/batch.js` (job fields, optional), `docs/jobs.md` |
 | E2 router | `router.py`, `llm.py`, `static/screens/review.js` | `main.py` (`FEATURES` += `router`, low-confidence capture in the classifier-run routes), `classify.py` (`ClassifierDef.review_threshold`), `config.py` (`CLEF_LLM_*`, `CLEF_ROUTER_*`, `CLEF_REVIEW_TTL_DAYS`), `doctor.py` (LLM key check), `static/app.js` (tab), `clef_client/*`, `clients/js/*` (router helpers), new `docs/router.md` |
-| F1 batches | `batches.py` | `compat_openai.py` (`prepare_chat` / `render_chat`), `main.py` (`FEATURES` += `batches`, `GuardMiddleware` file limit), `config.py` (`CLEF_MAX_FILE_MB`, `CLEF_MAX_BATCH_LINES`, `CLEF_FILE_TTL_HOURS`), `pyproject.toml` (`python-multipart`), `docs/openai-compat.md` |
+| F1 batches | `batches.py` | `compat_openai.py` (`prepare_chat` / `render_chat`), `main.py` (`FEATURES` += `batches`, `GuardMiddleware` file limit), `config.py` (`CLEF_MAX_FILE_MB`, `CLEF_MAX_BATCH_LINES`, `CLEF_FILE_TTL_HOURS`), `pyproject.toml` (`python-multipart`), `jobs.py` (three small hooks, see "As built"), `docs/openai-compat.md` |
 | F2 throughput | | `jobs.py` (window sort in `run_chunked`, prefetch via `ctx.prepare`), `evaluation.py` (same for the evaluate kind), `engine.py` only if `Engine.prepare` / `submit` need a fix, `config.py` (`CLEF_JOB_SORT_WINDOW`) |
 
 Same-wave shared files and how they split:
