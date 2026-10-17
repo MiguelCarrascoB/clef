@@ -17,7 +17,7 @@ tests. Change it first, then the code.
 | `clef_server/engine.py` | background model load (`load_model`: standard, quantized or offloaded), single GPU worker thread, micro-batching, length bucketing, warmup |
 | `clef_server/schemas.py` | pydantic v2 SystemOne request/response models + strict validation |
 | `clef_server/classify.py` | classification API models + translation classify/score <-> SystemOne records/answers |
-| `clef_server/classifiers.py` | saved-classifier store (JSON files under `<state_dir>/classifiers/`) |
+| `clef_server/classifiers.py` | saved-classifier store (`ClassifierStore` on `db.py`: versions, owner, audit; one-time import of v3.1 JSON files) |
 | `clef_server/security.py` | multi-key auth, per-key rate limiting, CORS setup |
 | `clef_server/logs.py` | stdlib-only logging: text / JSON formatters, the request-id context, secret redaction for the access log, uvicorn's `log_config` |
 | `clef_server/media.py` | data-URL / (optional) URL fetching with SSRF guard + caps, image/video decode |
@@ -33,10 +33,10 @@ tests. Change it first, then the code.
 | `clef_server/static/` | Clef Console (zero-build Preact + htm SPA, vendored uPlot; screens in `screens/`) served at `/` |
 | `clef_client/` | sync + async Python client (`httpx`), typed classify results |
 | `clients/js/` | dependency-free ESM JS/TS client (`fetch`), Node 18+ and browsers |
-| `clef_server/db.py` (planned, v3.2) | `Database` (SQLAlchemy Core engine from `CLEF_DATABASE_URL`), transactions, Alembic upgrade, `jobs.db`→`clef.db` migration, URL redaction, `audit()` helper |
-| `clef_server/dbschema.py` (planned, v3.2) | the SQLAlchemy `MetaData` and every `Table` in this document (one place; migrations mirror it) |
-| `clef_server/migrations/` (planned, v3.2) | Alembic `env.py`, `script.py.mako`, `versions/NNNN_*.py` |
-| `clef_server/models/` (planned, v3.2) | `base.py` (`DecisionModel`, `LocalTensorAdapter`, `Capabilities`, `ModelSpec`, `UnknownModel`), `registry.py` (`clef.models` entry points, `CLEF_MODEL`), `clef_release.py` (clef-flash, clef 27B) |
+| `clef_server/db.py` | `Database` (SQLAlchemy Core engine from `CLEF_DATABASE_URL`), transactions, Alembic upgrade, `jobs.db`→`clef.db` copy, URL redaction, `audit()` helper |
+| `clef_server/dbschema.py` | the SQLAlchemy `MetaData` and every `Table` in this document (one place; migrations mirror it) |
+| `clef_server/migrations/` | Alembic `env.py`, `script.py.mako`, `versions/NNNN_*.py` |
+| `clef_server/models/` | `base.py` (`DecisionModel`, `LocalTensorAdapter`, `Capabilities`, `ModelSpec`, `UnknownModel`), `registry.py` (`clef.models` entry points, `CLEF_MODEL`), `clef_release.py` (clef-flash, clef 27B) |
 | `clef_server/keystore.py` (planned, v3.2) | principals, hashed keys, key cache, quotas (`Quotas`), on `db.py`; shared by the server and `clef keys` |
 | `clef_server/admin.py` (planned, v3.2) | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
 | `clef_server/cache.py` (planned, v3.2) | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
@@ -44,7 +44,7 @@ tests. Change it first, then the code.
 | `clef_server/batches.py` (planned, v3.2) | feature module: OpenAI `/v1/files*` and `/v1/batches*` on the `batch` job kind |
 
 Invariants (unchanged from v2):
-- ONE uvicorn worker per process (one model), ONE thread ever touches the GPU (the engine worker).
+- ONE uvicorn worker per process (one model adapter, one model), ONE thread ever touches the GPU (the engine worker).
 - Python `>=3.10` (the WSL venv is 3.10): no `typing.Self`, `tomllib`, `ExceptionGroup` or other 3.11+ features.
 - Never edit files in the model directory; wrap or re-implement in the engine.
 
@@ -86,9 +86,9 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_SAMPLE_INTERVAL_S` | `2` | gauge sampling period for the time series (memory, telemetry, queue) |
 | `CLEF_INTERACTIVE_BURST` | `8` | interactive micro-batches in a row before waiting background (job) work gets one; `>= 1` |
 | `CLEF_LOG_FORMAT` | `text` | `text` or `json`: server log lines (app, uvicorn, access log); json = one object per line, see [Logging](#logging-logspy) |
-| `CLEF_DATABASE_URL` (planned, v3.2) | unset | SQLAlchemy URL. Unset: `sqlite:///<state_dir>/clef.db`. `postgresql://` / `postgres://` are normalised to `postgresql+psycopg://` (needs the `postgres` extra). See Storage |
-| `CLEF_DATABASE_POOL_SIZE` (planned, v3.2) | `5` | Postgres pool size (`max_overflow` = the same); ignored on SQLite; `>= 1` |
-| `CLEF_MODEL` (planned, v3.2) | `clef-flash` | `<id>[@<revision>]` from the model catalog (`clef-flash`, `clef`). `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` stay as aliases, see Decision model interface |
+| `CLEF_DATABASE_URL` | unset | SQLAlchemy URL. Unset: `sqlite:///<state_dir>/clef.db`. `postgresql://` / `postgres://` are normalised to `postgresql+psycopg://` (needs the `postgres` extra). See Storage |
+| `CLEF_DATABASE_POOL_SIZE` | `5` | Postgres pool size (`max_overflow` = the same); ignored on SQLite; `>= 1` |
+| `CLEF_MODEL` | `clef-flash` | `<id>[@<revision>]` from the model catalog (`clef-flash`, `clef`). `CLEF_MODEL_PATH` / `_REPO` / `_REVISION` stay as aliases, see Decision model interface |
 | `CLEF_MASK_FREE` (planned, v3.2) | `0` | `1`: text batches call the backbone with `attention_mask=None` and the head uses CPU lengths (D2; becomes the default only after `bench/parity.py` passes) |
 | `CLEF_CACHE_SIZE` (planned, v3.2) | `10000` | result-cache entries (in-memory LRU); `0` = off |
 | `CLEF_JOB_TZ` (planned, v3.2) | `UTC` | IANA zone for job windows that give no `tz` and for `CLEF_JOB_WINDOW` |
@@ -330,7 +330,7 @@ appears in `openapi.json`.
 | `POST /v1/evaluate`, `POST /v1/evaluate/metrics` | accuracy, F1, confusion matrix, calibration | [Evaluation](#evaluation-evaluationpy) |
 | `POST /v1/jobs`, `GET /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/results`, `POST /v1/jobs/{id}/cancel`, `DELETE /v1/jobs/{id}` | async jobs | [Jobs](#async-jobs-and-webhooks-jobspy-webhookspy) |
 | `GET /v1/stats`, `/v1/stats/timeseries`, `/v1/log`, `/v1/events` | observability (console) | below |
-| `GET /v1/classifiers/{name}/versions[/{v}]` (planned, v3.2) | classifier history | Storage |
+| `GET /v1/classifiers/{name}/versions[/{v}]` | classifier history | Storage |
 | `GET /v1/whoami`, `/v1/admin/keys*`, `GET /v1/admin/audit` (planned, v3.2) | principals, keys, quotas, audit | Keys and principals |
 | `/v1/routers*`, `/v1/review*` (planned, v3.2) | self-evolving router, human review queue | Review queue and router |
 | `/v1/files*`, `/v1/batches*` (planned, v3.2) | OpenAI Files + Batch API | OpenAI Files and Batches |
@@ -394,7 +394,7 @@ Labels: either a list of unique non-empty strings (`["billing", "technical"]`) o
 - score -> `questions = {"score": {"type": "score", "criteria": levels, "instructions": I}}` (instructions only when
   given).
 - `state` = `input` verbatim (string or any JSON); `images`/`videos` pass through `load_media` exactly as on
-  `/v1/systemone`; `model` defaults to `"clef-flash"`.
+  `/v1/systemone`; `model` is optional (omitted or null = the served model; another id is 404).
 
 #### `POST /v1/classify`
 ```json
@@ -432,16 +432,16 @@ Errors name the index: `inputs[3]: ...`.
 - `PUT /v1/classifiers/{name}` body
   `{"kind": "classify" | "score", "labels": ... (classify), "levels": [...] (score), "instructions": str?,
   "multi_label": false, "threshold": float?, "description": str?}` -> 200 the stored definition +
-  `{"name", "created_at", "updated_at"}` (ISO-8601 UTC; `created_at` kept on overwrite). Validation as above.
+  `{"name", "created_at", "updated_at", "version", "owner", "model"}` (ISO-8601 UTC; `created_at` = version 1). A
+  changed definition adds a version, an identical one is a no-op (Storage). Validation as above.
 - `GET /v1/classifiers` -> `{"classifiers": [<definition>, ...]}` sorted by name.
 - `GET /v1/classifiers/{name}` -> the definition, 404 if missing.
 - `DELETE /v1/classifiers/{name}` -> `{"deleted": "<name>"}`, 404 if missing.
 - `POST /v1/classifiers/{name}` `{"input": ..., "images"?, "videos"?, "threshold"?}` -> the classify (or score)
   response + `"classifier": "<name>"`.
 - `POST /v1/classifiers/{name}/batch` `{"inputs": [...]}` -> the batch response + `"classifier"`.
-- Names: `^[a-z0-9][a-z0-9_-]{0,63}$` (400 otherwise). Files: `<state_dir>/classifiers/<name>.json`, path built only
-  from a validated name, written atomically (temp file + `os.replace`), at most `max_classifiers` (409 beyond).
-  Unreadable/corrupt files are skipped in the list and logged.
+- Names: `^[a-z0-9][a-z0-9_-]{0,63}$` (400 otherwise). Stored in the database (`classifiers` +
+  `classifier_versions`, see Storage), at most `max_classifiers` names (409 beyond).
 
 ### OpenAI and Hugging Face compat (`compat*.py`)
 
@@ -449,7 +449,8 @@ Guide: [openai-compat.md](openai-compat.md). Both dialects translate to ONE Syst
 through `ctx.infer`, so keys, rate limit, log, stats and limits are shared and the probabilities equal the
 equivalent `/v1/systemone` call.
 
-- `GET /v1/models` lists `clef-flash`; `GET /v1/models/{id}` returns it, any other id is 404 `model_not_found`.
+- `GET /v1/models` lists the served model; `GET /v1/models/{id}` returns it, any other id is 404 `model_not_found`
+  (details in Decision model interface).
 - `POST /v1/chat/completions`: the schema comes from `response_format` (`json_schema`) or from exactly one forced
   tool. Each top-level property becomes one question (`compat_schema.py`): string enum -> `choice`; boolean ->
   `noul` (true when P >= 0.5); integer enum, bounded integer (2..64 values) or string enum with `x-clef-ordinal` ->
@@ -499,9 +500,10 @@ Guide: [jobs.md](jobs.md).
   webhook delivery status), `GET /v1/jobs/{id}/results` (JSON pages with `next_offset`, or a full stream with
   `?format=ndjson|csv`; CSV neutralises cells starting with `=`, `+`, `-`, `@`), `POST /v1/jobs/{id}/cancel`,
   `DELETE /v1/jobs/{id}` (409 while queued or running).
-- Storage: SQLite `<state_dir>/jobs.db` (jobs, payloads, result rows, webhook deliveries). Statuses: `queued`,
-  `running`, `succeeded`, `failed`, `cancelled`, `interrupted`. One runner, FIFO, one job at a time and ONE
-  micro-batch in flight (`CLEF_MAX_MICROBATCH` records through `ctx.decide`), so interactive requests interleave.
+- Storage: the database (`ctx.db`: SQLite `<state_dir>/clef.db` or `CLEF_DATABASE_URL`; jobs, payloads, result rows,
+  webhook deliveries; see Storage). Statuses: `queued`, `running`, `succeeded`, `failed`, `cancelled`,
+  `interrupted`. One runner, FIFO, one job at a time and ONE micro-batch in flight (`CLEF_MAX_MICROBATCH` records
+  through `ctx.decide`), so interactive requests interleave.
   A job interrupted by a stop or crash resumes after its last stored row on the next start. Rows are appended in
   one transaction that reads `done` inside it, so an in-flight chunk is either stored whole or recomputed (no gap,
   no duplicate). A clean stop (lifespan shutdown) parks the running job as `interrupted` without counting it;
@@ -912,7 +914,7 @@ As built (C1; additions to the interface above, nothing in it changed):
 - The alembic logger is set to WARNING; `upgrade()` logs `database: schema <from> -> <to>` at INFO when it
   changed something.
 
-Supersedes when landed: "Storage: SQLite `<state_dir>/jobs.db`" in Async jobs, the `classifiers.py` row of the
+Superseded (applied): "Storage: SQLite `<state_dir>/jobs.db`" in Async jobs, the `classifiers.py` row of the
 package layout, and the "Files: `<state_dir>/classifiers/<name>.json`" bullet in Saved classifiers.
 
 ## Decision model interface
@@ -1081,8 +1083,8 @@ Perf hooks (D2, F2, wave G; nothing here changes probabilities by itself):
   batches keep the mask. Gate: `bench/parity.py` (max |dp| within the fp16 noise floor, 0 flips).
 - TunableOp results are kept per model: `PYTORCH_TUNABLEOP_FILENAME` under
   `<state_dir>/tunableop/<spec.id>@<rev8>/` (set by `backend.prepare_environment` from `CLEF_MODEL`, through
-  `registry.model_slug(environ)`: the `resolve_spec` rules over the built-in catalog, so `CLEF_MODEL_REPO=Cloudflare/clef`
-  alone gives the 27B's slug; `@local` with `CLEF_MODEL_PATH` and no revision).
+  `registry.model_slug(environ)`: the `resolve_spec` rules over the built-in catalog, so
+  `CLEF_MODEL_REPO=Cloudflare/clef` alone gives the 27B's slug; `@local` with `CLEF_MODEL_PATH` and no revision).
 - Graph capture (wave G) belongs in `forward`, keyed by `(batch["input_ids"].shape)`; warmup already visits every
   bucket <= 1024 at batch sizes {1, max_microbatch}.
 - F2 tokenizes ahead with `ctx.prepare` (below): encoding is not "in flight"; only `submit` enqueues.
@@ -1138,9 +1140,9 @@ As built (C2), beyond the text above:
 - The TunableOp directory is created by the engine before the load (prepare_environment does no I/O).
 - Saved-classifier runs (`/v1/classifiers/{name}[/batch]`) take `model` from the request body.
 
-Supersedes when landed: "ONE uvicorn worker per process (one model)" (becomes "one adapter"), the engine's
-`loader` / `load_release_model` wording in Engine interface, "`GET /v1/models` lists `clef-flash`" and "`model`
-defaults to `"clef-flash"`" in the Classification and Compat sections.
+Superseded (applied): "ONE uvicorn worker per process (one model)" (now "one model adapter"), "`GET /v1/models`
+lists `clef-flash`" and "`model` defaults to `"clef-flash"`" in the Classification and Compat sections. The
+`load_release_model` wording in Engine interface stays: the engine still calls the release's `load_release_model`.
 
 ## Keys and principals (planned, v3.2)
 
