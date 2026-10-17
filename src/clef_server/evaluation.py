@@ -680,7 +680,7 @@ def router(ctx: AppContext) -> APIRouter:
         Rows the engine rejects (too long, OOM) become ``{"index", "error"}`` items and are left out of the
         metrics (``n_errors``). Resumable: items already stored are replayed into the metrics and skipped.
         """
-        from .jobs import ItemError, JobCancelled, decide_resilient
+        from .jobs import ItemError, JobCancelled
 
         total = len(spec.rows)
         job.set_total(total)
@@ -712,7 +712,7 @@ def router(ctx: AppContext) -> APIRouter:
                     except ValueError as exc:
                         built.append((i, ItemError(str(exc))))
                 good = [r for _, r in built if not isinstance(r, ItemError)]
-                results = iter(await decide_resilient(_ctx, job, good) if good else [])
+                results = iter(await job.decide(good) if good else [])
                 ok_idx: list[int] = []
                 ok_scores: list[dict[str, float]] = []
                 items: list[dict[str, Any]] = []
