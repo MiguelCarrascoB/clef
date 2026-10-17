@@ -684,7 +684,7 @@ Rules shared by every planned section:
   coordinator can keep both sides of a conflict. `openapi.json`, `uv.lock` and `CHANGELOG.md` are regenerated or
   merged by the coordinator at the wave merge, never hand-merged.
 
-## Storage (planned, v3.2)
+## Storage
 
 Module boundary: `db.py` owns the engine, connections, transactions, migrations and URL handling. `dbschema.py` owns
 the table definitions. Stores (`JobStore` in `jobs.py`, `ClassifierStore` in `classifiers.py`, `KeyStore` in
@@ -839,7 +839,10 @@ becomes version 1 with `owner` NULL and `created_by` `import`; the directory is 
 Routes (changes; every existing body stays valid):
 - `PUT /v1/classifiers/{name}` -> 200 the definition with `version`, `owner`, `model`. Owner = the caller's
   principal on the first PUT (NULL with auth off). A later PUT or DELETE by another principal is 403 unless the
-  caller has `admin`; anyone may change a classifier whose owner is NULL.
+  caller has `admin`; anyone may change a classifier whose owner is NULL. The admin test is one helper: the
+  request's `principal.has("admin")` when `request.state.principal` is set (D1), else any caller with a key is
+  admin (until D1 lands every key is an env key, and env principals have every scope), so before D1 the owner is
+  recorded but no PUT / DELETE is refused.
 - `GET /v1/classifiers/{name}?version=N`; `GET /v1/classifiers/{name}/versions` -> `{"name", "versions": [...]}`;
   `GET /v1/classifiers/{name}/versions/{v}` -> that definition. 404 for an unknown name or version.
 - `POST /v1/classifiers/{name}[/batch]`, and the `classifier` field of jobs and `POST /v1/evaluate`, accept an
@@ -853,17 +856,40 @@ clef db upgrade                          # alembic upgrade heads (the server als
 clef db copy --from URL --to URL [--yes] # every table in FK order, 1000 rows per batch; the target is upgraded
                                          # first and must be empty (exit 1 otherwise); Postgres identity sequences
                                          # are reset (setval to max); refuses while a server answers on the port
-clef backup [--out PATH]                 # SQLite: VACUUM INTO <state_dir>/backups/clef-<UTC yyyymmddThhmmssZ>.db
-                                         # (safe while the server runs); Postgres: exit 2 with a pg_dump hint
+clef backup [--out PATH]                 # SQLite: the sqlite3 online backup API into
+                                         # <state_dir>/backups/clef-<UTC yyyymmddThhmmssZ>.db (file 0600; safe
+                                         # while the server runs); Postgres: exit 2 with a pg_dump hint
 clef classifiers export [--out DIR] [--name N]   # latest version of each as <DIR>/<name>.json (today's file format
                                                  # + "version"); default DIR ./classifiers
 ```
 
 Error codes: 403 (not the owner), 404 (unknown version), 409 (`CLEF_MAX_CLASSIFIERS`), 503 `database unavailable`
-(`DatabaseError` and SQLAlchemy `OperationalError` in `map_exception`).
+(`DatabaseError` and SQLAlchemy `OperationalError`: an exception handler registered in `create_app`, plus the
+classifier routes, which map them before `map_exception`; `map_exception` itself stays C2's hunk).
 
 Invariants: payload columns stay out of list selects (the `_COLS` discipline); store APIs are sync; one writer
 transaction at a time on SQLite; the request path reaches the DB only through stores called in the threadpool.
+
+As built (C1; additions to the interface above, nothing in it changed):
+- `Database` also has `serialize(conn, name)` (inside `tx()`: a transaction advisory lock on Postgres for
+  check-then-write sections such as `CLEF_MAX_JOBS` / `CLEF_MAX_CLASSIFIERS`; a no-op on SQLite, where `BEGIN
+  IMMEDIATE` already serialises), `set_meta(conn, key, value)`, `acquire_server_lock()` (called by
+  `open_database`) and `info()` (the cached `/health` block; no I/O). Nested `tx()` / `read()` on the same thread
+  join the open transaction. `db.py` also holds the CLI / doctor helpers (`peek_version` opens nothing for
+  writing, `version_state`, `copy_database`, `backup_sqlite`, `migrate_legacy_file`) and `is_unavailable(exc)`.
+- `claim_next()` returns the running row plus `claimed_from` (`"queued"` | `"interrupted"`, the status before
+  the claim); `run_base_done` is set to `done` by the claim and zeroed by `reset_items`. The runner seeds
+  `cancel_ids` from the claimed row and never discards an id after a claim. `JobStore.close()` closes its
+  `Database` (tests); the server never calls it. When `claim_next` itself raises (possibly after its commit),
+  `_runner_failed(None)` calls `park_running()`: safe with one job at a time, but E1 (`CLEF_JOB_ACTIVE > 1`)
+  must replace it, since it would park jobs other tasks are still running.
+- `ClassifierStore.put` / `delete` take keyword-only `actor`, `ip`, `request_id` for the audit row (`actor`
+  defaults to `created_by`, then `"anonymous"`). The JSON import writes `classifier.put` rows with actor `import`.
+- `AppContext.model_ref()` / `check_model()` are methods (they read the engine's hooks at call time).
+- Job payloads of `classify` / `score` accept `version` next to `classifier`; the snapshot drops it and records
+  `classifier_version`. `EvaluateRequest` has both fields too.
+- The alembic logger is set to WARNING; `upgrade()` logs `database: schema <from> -> <to>` at INFO when it
+  changed something.
 
 Supersedes when landed: "Storage: SQLite `<state_dir>/jobs.db`" in Async jobs, the `classifiers.py` row of the
 package layout, and the "Files: `<state_dir>/classifiers/<name>.json`" bullet in Saved classifiers.
@@ -1638,7 +1664,7 @@ existing tests a contract change forces. Every workstream may append to `CHANGEL
 
 | WS | Creates | Modifies |
 | --- | --- | --- |
-| C1 DB | `db.py`, `dbschema.py`, `migrations/**` | `jobs.py` (store port, `claim_next`, `jobs.model`, payload `model` default + submit check, `classifier_version`), `classifiers.py`, `classify.py` (`version` on `ClassifierRunRequest` / `ClassifierBatchRequest` only), `evaluation.py` (`version` next to `classifier` on `EvaluateRequest` and its `ctx.store.get` lookup only), `main.py` (create_app: `open_database`, store wiring, `AppContext(...)` db/model fields; classifier routes; `/health` `db`; lifespan close), `appctx.py` (`db`, `model_ref`, `check_model`), `paths.py` (`database_path`, legacy rename), `config.py` (`CLEF_DATABASE_*`), `cli.py` (`db`, `backup`, `classifiers export`), `doctor.py` (database check), `pyproject.toml` (sqlalchemy, alembic, `postgres` extra), `docker-compose.yml` (comment), `docs/jobs.md`, `SECURITY.md` |
+| C1 DB | `db.py`, `dbschema.py`, `migrations/**` | `jobs.py` (store port, `claim_next`, `jobs.model`, payload `model` default + submit check, `classifier_version`), `classifiers.py`, `classify.py` (`version` on `ClassifierRunRequest` / `ClassifierBatchRequest` only), `evaluation.py` (`version` and the server-set `classifier_version` next to `classifier` on `EvaluateRequest`, its `ctx.store.get` lookup, and the `classifier_version` line in `snapshot_job`), `main.py` (create_app: `open_database`, store wiring, `AppContext(...)` db/model fields; classifier routes; `/health` `db`; lifespan close), `appctx.py` (`db`, `model_ref`, `check_model`), `paths.py` (`database_path`, `jobs_db` kept for the legacy rename; the rename and its `PRAGMA` live in `db.py`), `config.py` (`CLEF_DATABASE_*`), `cli.py` (`db`, `backup`, `classifiers export`), `doctor.py` (database check), `pyproject.toml` (sqlalchemy, alembic, `postgres` extra), `docker-compose.yml` (comment), `docs/jobs.md`, `SECURITY.md` |
 | C2 models | `models/__init__.py`, `models/base.py`, `models/registry.py`, `models/clef_release.py` | `engine.py`, `offload.py`, `backend.py` (TunableOp path per model, `fast_path` from capabilities), `paths.py` (`resolve_model_path(spec)`, `WEIGHTS_GB`), `config.py` (`CLEF_MODEL`, aliases), `schemas.py`, `classify.py`, `evaluation.py` (`model`), `compat_openai.py`, `compat_hf.py`, `main.py` (`infer` / `decide` / `prepare` region, `Cache-Control` read, `map_exception` UnknownModel, `/health` `model`, OpenAPI title, `/schema-example`), `appctx.py` (`prepare`, `decide_prepared`), `doctor.py` (model files from the adapter), `cli.py` (`download --model`, `models`), `pyproject.toml` (entry points), `clef_client/*`, `clients/js/*`, `static/screens/{playground,batch}.js`, `static/util.js`, `bench/parity.py` |
 | D1 keys | `keystore.py`, `admin.py`, `static/screens/keys.js` | `security.py`, `main.py` (auth / rate-limit region, `ctx.scope` on core routes, quota in `infer`, `FEATURES` += `admin`, `AppContext(...)` D1 fields, 403 in `ERRORS`), `appctx.py`, `jobs.py` (scopes, admin view, `auth_enabled`, audit calls), `compat_openai.py`, `compat_hf.py`, `compat_errors.py` (403), `evaluation.py` (scopes), `cli.py` (`keys`), `config.py` (none expected), `static/app.js`, `static/api.js`, `static/components/topbar.js`, `docs/remote-access.md`, `SECURITY.md` |
 | D2 perf | `bench/` scripts as needed | `models/clef_release.py` (forward, head), `backend.py` (`prepare_environment`), `config.py` (`CLEF_MASK_FREE`), `docs/performance.md`, `docs/hardware-results.md` |
@@ -1655,7 +1681,7 @@ Same-wave shared files and how they split:
 | C | `main.py` | C1: `create_app` store / DB construction, the `AppContext(...)` call, classifier routes, `/health` `db` key, lifespan close. C2: `map_exception`, `infer` / `decide` / `prepare`, `/health` `model` key, title, `/schema-example`. Distinct hunks; the two `/health` keys are adjacent lines (keep both). C2 passes its new ctx fields by appending keyword arguments at the end of the `AppContext(...)` call |
 | C | `appctx.py` | append-only: C1 adds `db`, `model_ref`, `check_model`; C2 adds `prepare`, `decide_prepared`. The `model_ref` / `check_model` hook lets C1 store and validate models in `jobs.py` without C2 touching it (C2 implements `Engine.model_ref` / `check_model`; fakes fall back) |
 | C | `jobs.py` | C1 only. C2 must not edit it; the model default and the submit 404 are C1's, through `ctx.check_model` |
-| C | `classify.py`, `evaluation.py` | C1: only the classifier `version` field (`ClassifierRunRequest`, `ClassifierBatchRequest`, `EvaluateRequest`) and the versioned `store.get(name, version)` lookup. C2: the `model` fields / defaults and the evaluate `model` check. Different fields; each adds its field on its own line |
+| C | `classify.py`, `evaluation.py` | C1: only the classifier `version` field (`ClassifierRunRequest`, `ClassifierBatchRequest`, `EvaluateRequest`, plus `classifier_version` on `EvaluateRequest`), the versioned `store.get(name, version)` lookup and the `classifier_version` line of the evaluate `snapshot_job`. C2: the `model` fields / defaults and the evaluate `model` check. Different fields; each adds its field on its own line |
 | C | `config.py`, `pyproject.toml` | append-only blocks (`# C1`, `# C2`); different sections of `pyproject.toml` (extras vs `[project.entry-points]`) |
 | C | `paths.py` | C1: state-dir / DB helpers (new functions). C2: `resolve_model_path`, `WEIGHTS_GB`, `MODEL_MARKER`. Different functions |
 | C | `cli.py` | C1: new `db`, `backup`, `classifiers` subparsers and `cmd_*` functions. C2: the `download` parser + `cmd_download`, new `models` subparser. New subparsers are appended in `build_parser` in that order (C1 block, then C2 block) |

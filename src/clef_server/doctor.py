@@ -383,6 +383,45 @@ def check_port(r: Report, cfg: Config) -> bool:
     return False
 
 
+def check_database(r: Report, cfg: Config) -> None:
+    """C1: connect (read-only; never creates or renames anything) and compare the schema with this code."""
+    try:
+        from . import db
+    except ImportError as exc:
+        r.add(FAIL, "database", f"needs the server extra (sqlalchemy, alembic): {exc}")
+        return
+    url = db.database_url(cfg)
+    shown = db.redact_url(url)
+    try:
+        version = db.peek_version(url)
+    except Exception as exc:  # DatabaseError (unreachable, missing driver), a corrupt file, ...
+        r.add(FAIL, "database", f"{shown}: {exc}")
+        return
+    expected = db.code_version()
+    if version is None:
+        from .paths import jobs_db
+
+        legacy = " (jobs.db from v3.1 is renamed and upgraded then)" if jobs_db(cfg).exists() else ""
+        r.add(OK, "database", f"{shown} does not exist yet; created at the first start{legacy}")
+        return
+    state = db.version_state(version)
+    if state == "current":
+        r.add(OK, "database", f"{shown}, schema {version}")
+    elif state == "behind":
+        r.add(
+            FAIL,
+            "database",
+            f"{shown} is at schema {version or 'none'}, this clef expects {expected}: the server upgrades it"
+            " at startup, or run `clef db upgrade`",
+        )
+    else:
+        r.add(
+            FAIL,
+            "database",
+            f"{shown} is at schema {version}, newer than this clef ({expected}): upgrade clef",
+        )
+
+
 # ---------------------------------------------------------------------------------------------- smoke
 class _NullStats:
     def record_forward(self, *a: Any, **k: Any) -> None: ...
@@ -444,6 +483,7 @@ def run_checks(no_gpu: bool = False, smoke: bool = False, echo: bool = True) -> 
     if cfg is None:
         return r
     server_up = check_port(r, cfg)
+    check_database(r, cfg)
     if no_gpu:
         r.add(SKIP, "gpu / weights / disk", "skipped (--no-gpu)")
         if smoke:

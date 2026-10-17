@@ -491,6 +491,162 @@ def cmd_open(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---- C1: database commands (stdlib at import time; clef_server.db is imported inside each command)
+
+NEEDS_SERVER_EXTRA = "needs the server extra: pip install 'clef-local[server]'"
+
+
+def _db_module() -> Any:
+    try:
+        from clef_server import db
+    except ImportError:
+        return None
+    return db
+
+
+def cmd_db(args: argparse.Namespace) -> int:
+    db = _db_module()
+    if db is None:
+        print(f"clef db: {NEEDS_SERVER_EXTRA}", file=sys.stderr)
+        return 2
+    cfg = load_config()
+    try:
+        if args.db_command == "current":
+            url = db.database_url(cfg)
+            version = db.peek_version(url)
+            state = db.version_state(version)
+            shown = {None: "(no database yet)", "": "(empty)", "legacy": "legacy v3.1 jobs schema"}
+            print(f"database: {db.redact_url(url)}")
+            print(f"schema:   {shown.get(version, version)} (this clef expects {db.code_version()}: {state})")
+            return 0 if state == "current" else 1
+        if args.db_command == "upgrade":
+            if not cfg.database_url:
+                db.migrate_legacy_file(cfg)
+            database = db.Database(db.database_url(cfg))
+            try:
+                before = database.schema_version()
+                database.upgrade()
+                print(f"{database.display_url}: schema {before or 'none'} -> {database.schema_version()}")
+            finally:
+                database.close()
+            return 0
+        if args.db_command == "copy":
+            return _db_copy(db, cfg, args)
+    except db.DatabaseError as exc:
+        print(f"clef db: {exc}", file=sys.stderr)
+        return 1
+    return 2
+
+
+def _db_copy(db: Any, cfg: Any, args: argparse.Namespace) -> int:
+    if livez(base_url(cfg)):
+        print(
+            f"clef db copy: a clef server answers on {base_url(cfg)}; stop it first (clef stop)",
+            file=sys.stderr,
+        )
+        return 1
+    src_url, dst_url = db.normalise_url(args.source), db.normalise_url(args.target)
+    if src_url == dst_url:
+        print("clef db copy: --from and --to are the same database", file=sys.stderr)
+        return 1
+    print(f"from: {db.redact_url(src_url)}\nto:   {db.redact_url(dst_url)}")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("clef db copy: pass --yes to copy non-interactively", file=sys.stderr)
+            return 1
+        if input("Copy every table? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("aborted")
+            return 1
+    if db.peek_version(src_url) is None:
+        print(f"clef db copy: {db.redact_url(src_url)} does not exist", file=sys.stderr)
+        return 1
+    source, target = db.Database(src_url), db.Database(dst_url)
+    try:
+        copied = db.copy_database(source, target)
+    finally:
+        source.close()
+        target.close()
+    for name, n in copied.items():
+        if n:
+            print(f"  {name}: {n} row(s)")
+    print(f"copied {sum(copied.values())} row(s); point CLEF_DATABASE_URL at the target to use it")
+    return 0
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    db = _db_module()
+    if db is None:
+        print(f"clef backup: {NEEDS_SERVER_EXTRA}", file=sys.stderr)
+        return 2
+    cfg = load_config()
+    url = db.database_url(cfg)
+    if not url.startswith("sqlite"):
+        print(
+            "clef backup: the database is Postgres; back it up with pg_dump, e.g.\n"
+            f"  pg_dump --format=custom --file clef.dump '{db.redact_url(url)}'  (fill in the password)",
+            file=sys.stderr,
+        )
+        return 2
+    from sqlalchemy.engine import make_url
+
+    from clef_server.paths import database_path, state_dir
+
+    path = database_path(cfg) if not cfg.database_url else Path(make_url(url).database or "")
+    if not path.is_file():
+        print(f"clef backup: no database at {path}", file=sys.stderr)
+        return 1
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    out = Path(args.out).expanduser() if args.out else state_dir(cfg) / "backups" / f"clef-{stamp}.db"
+    if out.exists():
+        print(f"clef backup: {out} already exists", file=sys.stderr)
+        return 1
+    db.backup_sqlite(path, out)
+    print(f"backup written to {out} ({out.stat().st_size / 1e6:.1f} MB)")
+    return 0
+
+
+def cmd_classifiers(args: argparse.Namespace) -> int:
+    db = _db_module()
+    if db is None:
+        print(f"clef classifiers: {NEEDS_SERVER_EXTRA}", file=sys.stderr)
+        return 2
+    from clef_server.classifiers import ClassifierStore, InvalidName, export_file
+
+    cfg = load_config()
+    url = db.database_url(cfg)
+    try:
+        if db.peek_version(url) is None:
+            print(
+                f"clef classifiers: no database at {db.redact_url(url)} (start the server once)",
+                file=sys.stderr,
+            )
+            return 1
+        database = db.Database(url)
+        try:
+            store = ClassifierStore(database)
+            docs = [store.get(args.name)] if args.name else store.list()
+        finally:
+            database.close()
+    except InvalidName as exc:
+        print(f"clef classifiers: {exc}", file=sys.stderr)
+        return 1
+    except db.DatabaseError as exc:
+        print(f"clef classifiers: {exc}", file=sys.stderr)
+        return 1
+    if args.name and docs[0] is None:
+        print(f"clef classifiers: {args.name!r} not found", file=sys.stderr)
+        return 1
+    out = Path(args.out).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    for doc in docs:
+        assert doc is not None
+        target = out / f"{doc['name']}.json"
+        target.write_text(json.dumps(export_file(doc), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"{target} (version {doc['version']})")
+    print(f"exported {len(docs)} classifier(s) to {out}")
+    return 0
+
+
 def cmd_version(_args: argparse.Namespace) -> int:
     from clef_server.config import VERSION
 
@@ -591,6 +747,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("version", help="print the version")
     sp.set_defaults(func=cmd_version)
+
+    # C1: database (direct access via CLEF_DATABASE_URL or the default file; works with the server stopped)
+    sp = sub.add_parser("db", help="database: current, upgrade, copy (see docs/jobs.md)")
+    dbsub = sp.add_subparsers(dest="db_command", metavar="<db command>", required=True)
+    dbsub.add_parser("current", help="schema version and (redacted) database URL")
+    dbsub.add_parser("upgrade", help="migrate to this version's schema (the server also does it at startup)")
+    cp = dbsub.add_parser("copy", help="copy every table into an empty database (e.g. SQLite -> Postgres)")
+    cp.add_argument("--from", dest="source", required=True, metavar="URL", help="source database URL")
+    cp.add_argument("--to", dest="target", required=True, metavar="URL", help="target database URL (empty)")
+    cp.add_argument("--yes", "-y", action="store_true", help="do not ask for confirmation")
+    sp.set_defaults(func=cmd_db)
+
+    sp = sub.add_parser("backup", help="consistent copy of the SQLite database (safe while the server runs)")
+    sp.add_argument("--out", metavar="PATH", help="default <state_dir>/backups/clef-<UTC time>.db")
+    sp.set_defaults(func=cmd_backup)
+
+    sp = sub.add_parser("classifiers", help="saved classifiers: export")
+    csub = sp.add_subparsers(dest="classifiers_command", metavar="<classifiers command>", required=True)
+    ex = csub.add_parser("export", help="latest version of each as <DIR>/<name>.json")
+    ex.add_argument("--out", default="classifiers", metavar="DIR", help="default ./classifiers")
+    ex.add_argument("--name", metavar="NAME", help="only this classifier")
+    sp.set_defaults(func=cmd_classifiers)
     return p
 
 

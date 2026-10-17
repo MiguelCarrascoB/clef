@@ -13,15 +13,41 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from test_api import FakeEngine
 
 from clef_server.config import Config
+from clef_server.db import Database, database_url, open_database
 from clef_server.engine import InputTooLarge
 from clef_server.jobs import JobStore, public_job
 from clef_server.main import create_app
 from clef_server.paths import jobs_db
 
+pytestmark = pytest.mark.postgres  # also run on Postgres when CLEF_TEST_DATABASE_URL is set (conftest.py)
+
 LABELS = ["billing", "technical"]
+
+
+def open_store(cfg: Config) -> JobStore:
+    """The job store on cfg's database, as a second process would open it (no server lock)."""
+    db = Database(database_url(cfg))
+    db.upgrade()
+    return JobStore(db)
+
+
+def hold_runner(monkeypatch: pytest.MonkeyPatch, store: JobStore) -> list[bool]:
+    """Keep the runner's atomic claim_next off jobs a test sets up by hand; `.clear()` releases it."""
+    hold, real = [True], store.claim_next
+    monkeypatch.setattr(store, "claim_next", lambda: None if hold else real())
+    return hold
+
+
+def sql(store: JobStore, stmt: str, **params: Any) -> list[Any]:
+    """Raw SQL for test set-up (the store's own connection discipline)."""
+    with store.db.tx() as conn:
+        res = conn.execute(text(stmt), params)
+        return res.all() if res.returns_rows else []
 
 
 class SlowEngine(FakeEngine):
@@ -398,7 +424,7 @@ def test_restart_resumes_from_last_persisted_row():
         while client.get(f"/v1/jobs/{jid}").json()["progress"]["done"] < 16:
             time.sleep(0.01)
     # graceful shutdown: the job is parked as interrupted, rows persisted so far are kept
-    store = JobStore(jobs_db(Config(state_dir=state)))
+    store = open_store(Config(state_dir=state))
     parked = store.get(jid)
     store.close()
     # a clean stop is not a crash: it does not count toward CLEF_JOB_MAX_RESUMES
@@ -419,9 +445,9 @@ def test_restart_resumes_from_last_persisted_row():
 def test_hard_crash_running_job_becomes_interrupted_then_resumes():
     state = tempfile.mkdtemp(prefix="clef-jobs-")
     cfg = Config(state_dir=state, api_key=None)
-    store = JobStore(jobs_db(cfg))
+    store = open_store(cfg)
     row = store.create("classify", None, {"inputs": ["a", "b", "c", "d"], "labels": LABELS}, None, None, 10)
-    assert store.mark_running(row["id"], 0)
+    assert store.claim(row["id"])
     store.add_items(row["id"], [{"index": 0, "label": "billing"}, {"index": 1, "label": "billing"}])
     store.close()  # process "dies" with the job running
     client, eng, _ = make(SlowEngine(), state_dir=state)
@@ -436,9 +462,9 @@ def test_hard_crash_running_job_becomes_interrupted_then_resumes():
 def test_non_resumable_kind_restarts_from_scratch():
     state = tempfile.mkdtemp(prefix="clef-jobs-")
     cfg = Config(state_dir=state, api_key=None)
-    store = JobStore(jobs_db(cfg))
+    store = open_store(cfg)
     row = store.create("evaluate", None, {"n": 3}, None, None, 10)
-    store.mark_running(row["id"], 0)
+    store.claim(row["id"])
     store.add_items(row["id"], [{"i": 0}])
     store.close()
     calls: list[int] = []
@@ -458,7 +484,7 @@ def test_non_resumable_kind_restarts_from_scratch():
 
 def test_unknown_kind_on_resume_fails_cleanly():
     state = tempfile.mkdtemp(prefix="clef-jobs-")
-    store = JobStore(jobs_db(Config(state_dir=state)))
+    store = open_store(Config(state_dir=state))
     row = store.create("gone", None, {}, None, None, 10)
     store.close()
     client, _, _ = make(state_dir=state)
@@ -469,27 +495,27 @@ def test_unknown_kind_on_resume_fails_cleanly():
 
 def test_retention_purges_old_finished_jobs_only():
     state = tempfile.mkdtemp(prefix="clef-jobs-")
-    store = JobStore(jobs_db(Config(state_dir=state)))
+    store = open_store(Config(state_dir=state))
     old = store.create("classify", None, {}, None, None, 10)["id"]
     fresh = store.create("classify", None, {}, None, None, 10)["id"]
     queued = store.create("classify", None, {}, None, None, 10)["id"]
     for jid in (old, fresh):
-        store.mark_running(jid, 0)
+        store.claim(jid)
         store.add_items(jid, [{"x": 1}])
         store.finish(jid, "succeeded")
-    store._db.execute("UPDATE jobs SET finished_at=? WHERE id=?", (time.time() - 3 * 3600, old))
+    sql(store, "UPDATE jobs SET finished_at=:t WHERE id=:id", t=time.time() - 3 * 3600, id=old)
     assert store.purge(time.time() - 2 * 3600) == 1
     assert store.get(old) is None and store.get(fresh) and store.get(queued)
-    (n,) = store._db.execute("SELECT COUNT(*) FROM items WHERE job_id=?", (old,)).fetchone()
+    [(n,)] = sql(store, "SELECT COUNT(*) FROM items WHERE job_id=:id", id=old)
     assert n == 0  # results go with the job
     store.close()
 
     state2 = tempfile.mkdtemp(prefix="clef-jobs-")
-    s2 = JobStore(jobs_db(Config(state_dir=state2)))
+    s2 = open_store(Config(state_dir=state2))
     j = s2.create("classify", None, {}, None, None, 10)["id"]
-    s2.mark_running(j, 0)
+    s2.claim(j)
     s2.finish(j, "failed", error="x")
-    s2._db.execute("UPDATE jobs SET finished_at=?", (time.time() - 10 * 3600,))
+    sql(s2, "UPDATE jobs SET finished_at=:t", t=time.time() - 10 * 3600)
     s2.close()
     client, _, _ = make(state_dir=state2, job_ttl_hours=1)
     with client:
@@ -519,7 +545,7 @@ def test_ownership_with_api_keys():
 
 
 def test_public_job_hides_secrets_and_payload():
-    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    store = open_store(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
     hook = {"url": "https://h.example.com/x", "secret": "s3cret"}
     row = store.create("classify", "alice", {"inputs": ["private"]}, None, hook, 10)
     text = json.dumps(public_job(row))
@@ -639,15 +665,15 @@ def test_failed_job_is_logged_with_its_id_and_error_text_stays_generic(caplog):
 
 
 def test_recover_gives_up_after_max_resumes():
-    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    store = open_store(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
     row = store.create("classify", None, {}, None, None, 10)
-    store.mark_running(row["id"], 0)
+    store.claim(row["id"])
     assert store.recover(3) == (1, [], []) and store.get(row["id"])["status"] == "interrupted"
     for _ in range(2):  # crashes 2 and 3 are still resumed
-        store.mark_running(row["id"], 0)
+        store.claim(row["id"])
         assert store.recover(3) == (1, [], [])
     assert store.get(row["id"])["resumes"] == 3
-    store.mark_running(row["id"], 0)
+    store.claim(row["id"])
     assert store.recover(3) == (0, [row["id"]], [])  # the 4th interruption: give up
     got = store.get(row["id"])
     assert (
@@ -656,17 +682,17 @@ def test_recover_gives_up_after_max_resumes():
     assert store.recover(3) == (0, [], [])  # a finished job is left alone
     unlimited = store.create("classify", None, {}, None, None, 10)["id"]
     for _ in range(6):
-        store.mark_running(unlimited, 0)
+        store.claim(unlimited)
         assert store.recover(0) == (1, [], [])
     store.close()
 
 
 def test_crash_looping_job_is_failed_at_startup_and_logged(caplog):
     state = tempfile.mkdtemp(prefix="clef-jobs-")
-    store = JobStore(jobs_db(Config(state_dir=state)))
+    store = open_store(Config(state_dir=state))
     poison = store.create("classify", None, {"inputs": ["a"], "labels": LABELS}, None, None, 10)["id"]
-    store._db.execute("UPDATE jobs SET resumes=3 WHERE id=?", (poison,))
-    store.mark_running(poison, 0)
+    sql(store, "UPDATE jobs SET resumes=3 WHERE id=:id", id=poison)
+    store.claim(poison)
     healthy = store.create("classify", None, {"inputs": ["a"], "labels": LABELS}, None, None, 10)["id"]
     store.close()
     client, _, _ = make(state_dir=state, job_max_resumes=3)
@@ -700,20 +726,21 @@ def test_poison_pill_job_is_failed_after_a_few_runner_errors(monkeypatch):
         assert wait(client, submit(client).json()["id"])["status"] == "succeeded"  # the queue moves on
 
 
-def test_cancel_arriving_right_after_mark_running_is_not_lost(monkeypatch):
+def test_cancel_arriving_right_after_the_claim_is_not_lost(monkeypatch):
     eng = SlowEngine(delay=0.05)
     client, _, app = make(eng)
     runner = app.state.ctx.extra["jobs"]
-    real = runner.store.mark_running
+    real = runner.store.claim_next
 
-    def mark_running(job_id: str, resume_done: int) -> bool:
-        ok = real(job_id, resume_done)
-        # exactly what request_cancel does for a running job, landing in the old race window
-        runner.cancel_ids.add(job_id)
-        runner.store.flag_cancel(job_id)
-        return ok
+    def claim_next() -> dict | None:
+        row = real()
+        if row is not None:
+            # exactly what request_cancel does for a running job, landing right after the claim
+            runner.cancel_ids.add(row["id"])
+            runner.store.flag_cancel(row["id"])
+        return row
 
-    monkeypatch.setattr(runner.store, "mark_running", mark_running)
+    monkeypatch.setattr(runner.store, "claim_next", claim_next)
     with client:
         payload = {"inputs": [f"t{i}" for i in range(40)], "labels": LABELS}
         job = wait(client, submit(client, payload=payload).json()["id"])
@@ -737,17 +764,17 @@ def test_retention_runs_on_its_own_timer_while_a_job_is_running(monkeypatch):
 
 
 def test_purge_keeps_jobs_whose_terminal_webhook_is_still_pending():
-    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    store = open_store(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
     hook = {"url": "https://hooks.example.com/h"}
     ids = {}
     for state in ("pending", "failed", "delivered"):
         jid = store.create("classify", None, {}, None, hook, 10)["id"]
-        store.mark_running(jid, 0)
+        store.claim(jid)
         store.finish(jid, "succeeded")
         store.set_delivery(jid, "job.succeeded", {"id": "d", "status": state, "attempts": 1})
         ids[state] = jid
     plain = store.create("classify", None, {}, None, None, 10)["id"]
-    store.mark_running(plain, 0)
+    store.claim(plain)
     store.finish(plain, "succeeded")
     assert store.purge(time.time() + 10) == 3
     assert store.get(ids["pending"]) and not store.get(ids["failed"]) and not store.get(plain)
@@ -772,12 +799,13 @@ def test_csv_neutralises_strings_only_never_numbers():
     assert flatten(row)["label"] == "=cmd()"  # plain flatten (column discovery) leaves text alone
 
 
-def test_csv_export_of_a_job_with_negative_numbers_is_not_quoted():
+def test_csv_export_of_a_job_with_negative_numbers_is_not_quoted(monkeypatch):
     client, _, app = make()
     store = app.state.ctx.extra["jobs"].store
+    hold_runner(monkeypatch, store)
     with client:
         jid = store.create("custom", None, {}, None, None, 10)["id"]
-        store.mark_running(jid, 0)
+        store.claim(jid)
         store.add_items(jid, [{"index": 0, "score": -0.5, "note": "-bad"}])
         store.finish(jid, "succeeded")
         table = list(csv.DictReader(io.StringIO(client.get(f"/v1/jobs/{jid}/results?format=csv").text)))
@@ -788,9 +816,9 @@ def test_csv_export_of_a_job_with_negative_numbers_is_not_quoted():
 async def test_csv_export_is_capped_at_the_snapshot_so_columns_match_rows():
     from clef_server.jobs import _csv
 
-    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    store = open_store(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
     jid = store.create("custom", None, {}, None, None, 10)["id"]
-    store.mark_running(jid, 0)
+    store.claim(jid)
     store.add_items(jid, [{"index": 0, "a": 1}, {"index": 1, "a": 2}])
     stream = _csv(store, jid, 0, 2)  # 2 = the job's `done` when the request arrived
     header = await anext(stream)
@@ -800,12 +828,13 @@ async def test_csv_export_is_capped_at_the_snapshot_so_columns_match_rows():
     store.close()
 
 
-def test_running_job_exports_stop_at_the_rows_present_when_requested():
+def test_running_job_exports_stop_at_the_rows_present_when_requested(monkeypatch):
     client, _, app = make()
     store = app.state.ctx.extra["jobs"].store
+    hold_runner(monkeypatch, store)
     with client:
         jid = store.create("custom", None, {}, None, None, 10)["id"]
-        store.mark_running(jid, 0)
+        store.claim(jid)
         store.add_items(jid, [{"index": 0}, {"index": 1}, {"index": 2}])
         r = client.get(f"/v1/jobs/{jid}/results", params={"format": "csv", "limit": 2})
         assert [row["index"] for row in csv.DictReader(io.StringIO(r.text))] == ["0", "1"]
@@ -865,8 +894,9 @@ def test_idempotency_key_returns_the_same_job():
         assert submit(client, headers=h).json()["id"] == first.json()["id"]  # also after it finished
 
 
-def test_old_database_without_idem_key_is_migrated():
-    path = jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
+def test_old_database_without_idem_key_is_migrated(sqlite_only):
+    cfg = Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))
+    path = jobs_db(cfg)  # a v3.1 jobs.db: renamed to clef.db, stamped 0001, upgraded
     db = sqlite3.connect(str(path))
     db.executescript(
         "CREATE TABLE jobs (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,"
@@ -881,7 +911,8 @@ def test_old_database_without_idem_key_is_migrated():
     )
     db.commit()
     db.close()
-    store = JobStore(path)
+    store = JobStore(open_database(cfg))
+    assert not path.exists() and (path.parent / "clef.db").exists()
     assert store.get("job_old")["status"] == "queued"
     assert store.create("classify", None, {}, None, None, 10, "k")["id"] != "job_old"
     assert store.create("classify", None, {}, None, None, 10, "k").get("replayed")
@@ -912,14 +943,14 @@ HOOK = {"url": "https://hooks.example.com/h"}
 def _running(store: JobStore, cancel: bool = False, hook: dict | None = HOOK, n: int = 2) -> str:
     payload = {"inputs": [f"t{i}" for i in range(n)], "labels": LABELS}
     jid = store.create("classify", None, payload, None, hook, 10)["id"]
-    assert store.mark_running(jid, 0)
+    assert store.claim(jid)
     if cancel:
         store.flag_cancel(jid)
     return jid
 
 
 def test_recover_cancels_a_job_whose_cancel_was_requested_before_the_crash():
-    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    store = open_store(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
     doomed, plain = _running(store, cancel=True), _running(store)
     assert store.recover(3) == (1, [], [doomed])
     got = store.get(doomed)
@@ -928,10 +959,10 @@ def test_recover_cancels_a_job_whose_cancel_was_requested_before_the_crash():
     assert rec["status"] == "pending" and rec["attempts"] == 0 and rec["id"]
     assert store.get(plain)["status"] == "interrupted" and store.get(plain)["resumes"] == 1
     poison = _running(store, cancel=True)  # the user's cancel wins over giving up
-    store._db.execute("UPDATE jobs SET resumes=3 WHERE id=?", (poison,))
+    sql(store, "UPDATE jobs SET resumes=3 WHERE id=:id", id=poison)
     assert store.recover(3) == (0, [], [poison]) and store.get(poison)["status"] == "cancelled"
     given_up = _running(store)
-    store._db.execute("UPDATE jobs SET resumes=3 WHERE id=?", (given_up,))
+    sql(store, "UPDATE jobs SET resumes=3 WHERE id=:id", id=given_up)
     assert store.recover(3) == (0, [given_up], [])
     assert store.get(given_up)["deliveries"]["job.failed"]["status"] == "pending"  # written by recover itself
     store.close()
@@ -941,7 +972,7 @@ def test_cancel_requested_before_a_crash_ends_cancelled_with_its_webhook_after_r
     from test_webhooks import Recorder, delivery, hook_cfg, with_receiver
 
     state = tempfile.mkdtemp(prefix="clef-jobs-")
-    store = JobStore(jobs_db(Config(state_dir=state)))
+    store = open_store(Config(state_dir=state))
     jid = _running(store, cancel=True, n=4)
     store.add_items(jid, [{"index": 0, "label": "billing"}])
     store.close()  # the process "dies" right after the cancel was flagged
@@ -962,27 +993,28 @@ def test_cancel_requested_before_a_crash_ends_cancelled_with_its_webhook_after_r
         assert sum(eng.sizes) == 0  # not resumed
 
 
-def test_terminal_status_and_pending_event_are_one_transaction():
+def test_terminal_status_and_pending_event_are_one_transaction(sqlite_only):
     _, _, app = make()
     runner = app.state.ctx.extra["jobs"]
     store = runner.store
     running = _running(store)
     queued = store.create("classify", None, {}, None, HOOK, 10)["id"]
     crashed = _running(store, cancel=True)
-    store._db.execute(
-        "CREATE TRIGGER boom BEFORE UPDATE OF deliveries ON jobs BEGIN SELECT RAISE(ABORT, 'boom'); END"
+    sql(
+        store,
+        "CREATE TRIGGER boom BEFORE UPDATE OF deliveries ON jobs BEGIN SELECT RAISE(ABORT, 'boom'); END",
     )
-    with pytest.raises(sqlite3.Error):
+    with pytest.raises(DBAPIError):
         runner._finish_sync(running, "succeeded", None, None)
-    with pytest.raises(sqlite3.Error):
+    with pytest.raises(DBAPIError):
         runner._cancel_queued_sync(queued)
-    with pytest.raises(sqlite3.Error):
+    with pytest.raises(DBAPIError):
         store.recover(3)
-    with pytest.raises(sqlite3.Error):
+    with pytest.raises(DBAPIError):
         store.park(crashed)
     # nothing half-written: no status changed without its event
     assert [store.get(j)["status"] for j in (running, queued, crashed)] == ["running", "queued", "running"]
-    store._db.execute("DROP TRIGGER boom")
+    sql(store, "DROP TRIGGER boom")
     assert runner._finish_sync(running, "succeeded", None, None) == (True, "job.succeeded")
     assert runner._cancel_queued_sync(queued) == (True, "job.cancelled")
     assert store.get(running)["deliveries"]["job.succeeded"]["status"] == "pending"
@@ -992,7 +1024,7 @@ def test_terminal_status_and_pending_event_are_one_transaction():
 
 
 def test_park_is_a_clean_stop_not_a_resume_and_honours_a_pending_cancel():
-    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    store = open_store(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
     plain, cancel = _running(store), _running(store, cancel=True)
     queued = store.create("classify", None, {}, None, HOOK, 10)["id"]
     assert store.park(plain) is None
@@ -1008,13 +1040,14 @@ def test_park_is_a_clean_stop_not_a_resume_and_honours_a_pending_cancel():
     store.close()
 
 
-def test_clean_stop_parks_a_job_left_running_outside_the_kind():
+def test_clean_stop_parks_a_job_left_running_outside_the_kind(monkeypatch):
     client, _, app = make()
     store = app.state.ctx.extra["jobs"].store
     state = app.state.ctx.cfg.state_dir
+    hold_runner(monkeypatch, store)
     with client:
-        jid = _running(store, hook=None)  # e.g. stopped between mark_running and the kind's first await
-    reopened = JobStore(jobs_db(Config(state_dir=state)))
+        jid = _running(store, hook=None)  # e.g. stopped between claim_next and the kind's first await
+    reopened = open_store(Config(state_dir=state))
     got = reopened.get(jid)
     reopened.close()
     assert got["status"] == "interrupted" and got["resumes"] == 0
@@ -1023,18 +1056,18 @@ def test_clean_stop_parks_a_job_left_running_outside_the_kind():
 def test_clean_restarts_do_not_count_toward_max_resumes():
     state = tempfile.mkdtemp(prefix="clef-jobs-")
     n = 48
-    store = JobStore(jobs_db(Config(state_dir=state)))
+    store = open_store(Config(state_dir=state))
     payload = {"inputs": [f"t{i}" for i in range(n)], "labels": LABELS}
     jid = store.create("classify", None, payload, None, None, 10)["id"]
-    store._db.execute("UPDATE jobs SET resumes=2 WHERE id=?", (jid,))  # two real crashes already
+    sql(store, "UPDATE jobs SET resumes=2 WHERE id=:id", id=jid)  # two real crashes already
     store.close()
     client, _, _ = make(SlowEngine(delay=0.05), state_dir=state, max_microbatch=8, job_max_resumes=3)
     with client:  # a clean stop mid-job
         while client.get(f"/v1/jobs/{jid}").json()["progress"]["done"] < 8:
             time.sleep(0.01)
-    store = JobStore(jobs_db(Config(state_dir=state)))
+    store = open_store(Config(state_dir=state))
     assert store.get(jid)["status"] == "interrupted" and store.get(jid)["resumes"] == 2
-    store._db.execute("UPDATE jobs SET status='running' WHERE id=?", (jid,))  # then a third real crash
+    sql(store, "UPDATE jobs SET status='running' WHERE id=:id", id=jid)  # then a third real crash
     store.close()
     client2, _, _ = make(SlowEngine(), state_dir=state, max_microbatch=8, job_max_resumes=3)
     with client2:
@@ -1047,23 +1080,23 @@ def test_runner_error_is_not_counted_as_a_crash(monkeypatch):
     monkeypatch.setattr("clef_server.jobs.RUNNER_RETRY_PAUSE_S", 0.01)
     client, _, app = make()
     runner = app.state.ctx.extra["jobs"]
-    real = runner.store.mark_running
+    real = runner.store.claim_next
     boom = [True]
 
-    def mark_running(job_id: str, resume_done: int) -> bool:
-        ok = real(job_id, resume_done)
-        if boom.pop() if boom else False:
+    def claim_next() -> dict | None:
+        row = real()
+        if row is not None and (boom.pop() if boom else False):
             raise RuntimeError("transient")  # the runner fails with the job left 'running'
-        return ok
+        return row
 
-    monkeypatch.setattr(runner.store, "mark_running", mark_running)
+    monkeypatch.setattr(runner.store, "claim_next", claim_next)
     with client:
         job = wait(client, submit(client).json()["id"])
         assert job["status"] == "succeeded" and job["resumes"] == 0, job
 
 
 def test_flag_cancel_on_a_job_parked_meanwhile_cancels_it_at_once():
-    store = JobStore(jobs_db(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-"))))
+    store = open_store(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
     running = _running(store)
     assert store.flag_cancel(running) == ("running", None)
     assert store.get(running)["cancel_requested"] is True and store.get(running)["status"] == "running"
@@ -1074,7 +1107,7 @@ def test_flag_cancel_on_a_job_parked_meanwhile_cancels_it_at_once():
     assert got["status"] == "cancelled" and got["finished_at"]
     assert got["deliveries"]["job.cancelled"]["status"] == "pending"
     store.finish(running, "succeeded")
-    assert store.next_runnable() is None  # the parked job is never picked up again
+    assert store.claim_next() is None  # the parked job is never picked up again
     assert store.flag_cancel(parked) == (None, None)  # finished: nothing to do
     store.close()
 
@@ -1085,10 +1118,12 @@ def test_cancel_is_not_lost_when_park_wins_the_race(monkeypatch):
     store = runner.store
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr(runner.dispatcher, "enqueue", lambda job_id, event: sent.append((job_id, event)))
+    hold = hold_runner(monkeypatch, store)
     with client:
         payload = {"inputs": ["a", "b"], "labels": LABELS}
         jid = store.create("classify", None, payload, None, HOOK, 10)["id"]
-        assert store.mark_running(jid, 0)  # 'running' rows are not picked up by the runner loop
+        assert store.claim(jid)  # 'running' rows are not picked up by the runner loop
+        hold.clear()
         real = store.cancel_queued
 
         def cancel_queued(job_id: str) -> tuple[bool, str | None]:

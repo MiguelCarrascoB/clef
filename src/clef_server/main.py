@@ -11,6 +11,7 @@ See docs/ARCHITECTURE.md for the API contract. Run: clef serve (one uvicorn work
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib
 import json
 import logging
@@ -30,12 +31,13 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import OperationalError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config as config_mod
 from .appctx import AppContext
-from .classifiers import ClassifierStore, InvalidName, TooManyClassifiers, validate_name
+from .classifiers import ClassifierStore, ClassifierVersions, InvalidName, TooManyClassifiers, validate_name
 from .classify import (
     ClassifierBatchRequest,
     ClassifierDef,
@@ -58,10 +60,10 @@ from .classify import (
     score_to_systemone,
 )
 from .config import VERSION, Config
+from .db import DatabaseError, is_unavailable, open_database
 from .engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge
 from .logs import install_access_filter, request_id_var, setup_logging, uvicorn_log_config
 from .media import MediaError, load_media
-from .paths import classifiers_dir
 from .schemas import (
     DEFAULT_MODEL,
     BatchRequest,
@@ -257,7 +259,8 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     started = time.time()
     auth = KeyAuth(cfg.api_keys())
     limiter = RateLimiter(cfg.rate_limit)
-    store = ClassifierStore(classifiers_dir(cfg), cfg.max_classifiers)
+    db = open_database(cfg)  # the one Database of this process (ctx.db); closed at the end of the lifespan
+    store = ClassifierStore(db, cfg.max_classifiers)
 
     async def sampler() -> None:
         """Feed the time series every sample_interval_s: engine.sample() (in a thread) + queue depth."""
@@ -297,6 +300,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             eng.shutdown()
+            await asyncio.to_thread(db.close)
 
     app = FastAPI(
         title="clef-flash local",
@@ -325,6 +329,12 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     @app.exception_handler(StarletteHTTPException)
     async def _http(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         return _error(request, exc.status_code, str(exc.detail), dict(exc.headers or {}))
+
+    @app.exception_handler(DatabaseError)
+    @app.exception_handler(OperationalError)
+    async def _db_unavailable(request: Request, exc: Exception) -> JSONResponse:
+        log.error("database unavailable [%s]: %s", _rid(request), exc)
+        return _error(request, 503, "database unavailable", {"Retry-After": "5"})
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
@@ -587,39 +597,120 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         except InvalidName as exc:
             raise ApiError(400, str(exc)) from exc
 
-    async def load_classifier(name: str) -> dict[str, Any]:
+    async def load_classifier(name: str, version: int | None = None) -> dict[str, Any]:
         checked_name(name)
-        doc = await run_in_threadpool(store.get, name)
+        doc = await run_in_threadpool(store.get, name, version)
         if doc is None:
+            if version is not None and await run_in_threadpool(store.get, name) is not None:
+                raise ApiError(404, f"classifier {name!r} has no version {version}")
             raise ApiError(404, f"classifier {name!r} not found")
         return doc
 
+    def store_error(exc: Exception) -> Exception:
+        if is_unavailable(exc):
+            log.error("database unavailable: %s", exc)
+            return ApiError(503, "database unavailable", {"Retry-After": "5"})
+        return map_exception(exc)
+
+    def is_admin(request: Request) -> bool:
+        """The owner check's override (decision 2). D1 sets ``request.state.principal``; until then every
+        caller is an env key (or auth is off), and env principals have every scope."""
+        principal = getattr(request.state, "principal", None)
+        return True if principal is None else bool(principal.has("admin"))
+
+    async def check_owner(request: Request, name: str) -> None:
+        """403 unless the caller owns ``name``, is admin, or nobody owns it (NULL owner)."""
+        owner = await run_in_threadpool(store.owner, name)
+        caller = getattr(request.state, "key_name", None)
+        if owner is not None and owner != caller and not is_admin(request):
+            raise ApiError(
+                403, f"classifier {name!r} belongs to {owner!r}; only its owner or an admin may change it"
+            )
+
+    owner_errors: dict[int | str, dict[str, Any]] = {
+        403: {"model": ErrorBody, "description": "Not the classifier's owner"}
+    }
+
     @v1.put(
-        "/classifiers/{name}", response_model=ClassifierInfo, summary="Create or replace a saved classifier"
+        "/classifiers/{name}",
+        response_model=ClassifierInfo,
+        summary="Create a saved classifier or add a version",
+        responses=owner_errors,
     )
-    async def put_classifier(name: str, body: ClassifierDef) -> dict[str, Any]:
+    async def put_classifier(name: str, body: ClassifierDef, request: Request) -> dict[str, Any]:
         checked_name(name)
+        await check_owner(request, name)
+        caller = getattr(request.state, "key_name", None)
         try:
             if body.kind == "classify":
                 check_label_count(body.labels or [], body.multi_label, cfg.max_labels)
             else:
                 check_levels_count(body.levels or [], cfg.max_labels)
-            return await run_in_threadpool(store.put, name, body.model_dump())
+            return await run_in_threadpool(
+                functools.partial(
+                    store.put,
+                    name,
+                    body.model_dump(),
+                    owner=caller,
+                    created_by=caller,
+                    model=ctx.model_ref(),
+                    actor=caller or "anonymous",
+                    ip=request.client.host if request.client else None,
+                    request_id=_rid(request),
+                )
+            )
         except Exception as exc:
-            raise map_exception(exc) from exc
+            raise store_error(exc) from exc
 
     @v1.get("/classifiers", response_model=ClassifierList, summary="List saved classifiers")
     async def list_classifiers() -> dict[str, Any]:
         return {"classifiers": await run_in_threadpool(store.list)}
 
     @v1.get("/classifiers/{name}", response_model=ClassifierInfo, summary="Get a saved classifier")
-    async def get_classifier(name: str) -> dict[str, Any]:
-        return await load_classifier(name)
+    async def get_classifier(
+        name: str, version: int | None = Query(None, ge=1, description="default: the latest")
+    ) -> dict[str, Any]:
+        return await load_classifier(name, version)
 
-    @v1.delete("/classifiers/{name}", response_model=ClassifierDeleted, summary="Delete a saved classifier")
-    async def delete_classifier(name: str) -> dict[str, str]:
+    @v1.get(
+        "/classifiers/{name}/versions",
+        response_model=ClassifierVersions,
+        summary="Versions of a saved classifier (newest first)",
+    )
+    async def classifier_versions(name: str) -> dict[str, Any]:
         checked_name(name)
-        if not await run_in_threadpool(store.delete, name):
+        versions = await run_in_threadpool(store.versions, name)
+        if versions is None:
+            raise ApiError(404, f"classifier {name!r} not found")
+        return {"name": name, "versions": versions}
+
+    @v1.get(
+        "/classifiers/{name}/versions/{version}",
+        response_model=ClassifierInfo,
+        summary="One version of a saved classifier",
+    )
+    async def classifier_version(name: str, version: int) -> dict[str, Any]:
+        return await load_classifier(name, version)
+
+    @v1.delete(
+        "/classifiers/{name}",
+        response_model=ClassifierDeleted,
+        summary="Delete a saved classifier (every version)",
+        responses=owner_errors,
+    )
+    async def delete_classifier(name: str, request: Request) -> dict[str, str]:
+        checked_name(name)
+        await check_owner(request, name)
+        deleted = await run_in_threadpool(
+            functools.partial(
+                store.delete,
+                name,
+                actor=getattr(request.state, "key_name", None) or "anonymous",
+                ip=request.client.host if request.client else None,
+                request_id=_rid(request),
+            )
+        )
+        if not deleted:
             raise ApiError(404, f"classifier {name!r} not found")
         return {"deleted": name}
 
@@ -638,7 +729,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         dependencies=limited,
     )
     async def run_classifier(name: str, body: ClassifierRunRequest, request: Request) -> dict[str, Any]:
-        doc = await load_classifier(name)
+        doc = await load_classifier(name, body.version)
         common = {"state": body.input, "images": body.images, "videos": body.videos, "classifier": name}
         if doc["kind"] == "score":
             if body.threshold is not None:
@@ -670,7 +761,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     async def run_classifier_batch(
         name: str, body: ClassifierBatchRequest, request: Request
     ) -> dict[str, Any]:
-        doc = await load_classifier(name)
+        doc = await load_classifier(name, body.version)
         if doc["kind"] == "score":
             raise ApiError(400, "batch is only supported for classify classifiers")
         return await run_classify_batch(
@@ -751,6 +842,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         run_classify=run_classify,
         run_classify_batch=run_classify_batch,
         run_score=run_score,
+        db=db,
     )
     app.state.ctx = ctx
     for name in FEATURES:
@@ -770,6 +862,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             "uptime_s": int(time.time() - started),
             "error": eng.error,
             "limits": cfg.public_limits(),
+            "db": db.info(),
         }
         return JSONResponse(body, status_code=200 if ok else 503)
 
@@ -891,7 +984,11 @@ def run(cfg: Config | None = None) -> None:
             log.warning(line)
     # log_config: redact ?key= in the access log and apply CLEF_LOG_FORMAT to uvicorn's own loggers
     log_config = uvicorn_log_config(cfg.log_format)
-    app = create_app(cfg)
+    try:
+        app = create_app(cfg)
+    except DatabaseError as exc:  # C1: bad URL, no driver, a second server, failed upgrade
+        log.error("cannot start: %s", exc)
+        sys.exit(3)
     config = uvicorn.Config(app, host=cfg.host, port=cfg.port, workers=1, log_config=log_config)
     server = DrainingServer(config, app, cfg.drain_s)
     # the tail of uvicorn.run(): the re-raised Ctrl-C after a clean exit is not an error; a failed start is 3

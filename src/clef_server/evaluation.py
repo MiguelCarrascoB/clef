@@ -436,6 +436,8 @@ class EvaluateRequest(_Base):
 
     labels: Labels | None = Field(None, description="label set; omit when `classifier` is given")
     classifier: str | None = Field(None, description="name of a saved classify classifier")
+    version: int | None = Field(None, ge=1, description="classifier version (default: the latest)")  # C1
+    classifier_version: int | None = Field(None, description="set by the jobs API: the version copied")  # C1
     instructions: str | None = None
     multi_label: bool = False
     threshold: float | None = Field(None, ge=0.0, le=1.0)
@@ -501,6 +503,7 @@ class Spec:
     bins: int
     include_predictions: bool
     classifier: str | None = None
+    classifier_version: int | None = None  # C1
 
 
 def preview(value: Any) -> str:
@@ -529,10 +532,19 @@ def router(ctx: AppContext) -> APIRouter:
         Raises ValueError (bad input) or LookupError (unknown classifier). Blocking: run it in a thread.
         """
         labels, instructions, multi, thr = body.labels, body.instructions, body.multi_label, body.threshold
+        version = body.classifier_version  # C1: a snapshot keeps the version it copied
+        if body.version is not None and body.classifier is None:
+            raise ValueError("version: only allowed with classifier")
         if body.classifier is not None:
-            doc = ctx.store.get(body.classifier)
+            doc = (
+                ctx.store.get(body.classifier)
+                if body.version is None
+                else ctx.store.get(body.classifier, body.version)
+            )
             if doc is None:
-                raise LookupError(f"classifier {body.classifier!r} not found")
+                what = "" if body.version is None else f" version {body.version}"
+                raise LookupError(f"classifier {body.classifier!r}{what} not found")
+            version = doc.get("version")
             if doc.get("kind") != "classify":
                 raise ValueError("classifier: only classify classifiers can be evaluated")
             labels, instructions = doc["labels"], doc.get("instructions")
@@ -544,7 +556,9 @@ def router(ctx: AppContext) -> APIRouter:
         for i, row in enumerate(body.rows):  # fail before spending GPU time
             _gold_list(row.gold, multi, names, i)
         name = body.classifier or body.snapshot_of
-        return Spec(labels, instructions, multi, thr, body.rows, body.bins, body.include_predictions, name)
+        return Spec(
+            labels, instructions, multi, thr, body.rows, body.bins, body.include_predictions, name, version
+        )
 
     async def resolve(body: EvaluateRequest) -> Spec:
         return await run_in_threadpool(resolve_sync, body)
@@ -748,8 +762,11 @@ def router(ctx: AppContext) -> APIRouter:
         if payload.get("classifier") is None:
             return payload
         drop = ("classifier", "labels", "instructions", "multi_label", "threshold", "snapshot_of")
+        drop += ("version", "classifier_version")  # C1
         snap = {k: v for k, v in payload.items() if k not in drop}
         snap.update(labels=spec.labels, multi_label=spec.multi_label, snapshot_of=payload["classifier"])
+        if spec.classifier_version is not None:  # C1
+            snap["classifier_version"] = spec.classifier_version
         if spec.instructions is not None:
             snap["instructions"] = spec.instructions
         if spec.multi_label and spec.threshold is not None:

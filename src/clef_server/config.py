@@ -207,6 +207,10 @@ class Config:
         default_factory=lambda: _str("CLEF_LOG_FORMAT", "text").lower()
     )  # see LOG_FORMATS
 
+    # C1: database (docs/jobs.md, ARCHITECTURE Storage). Unset = sqlite:///<state_dir>/clef.db.
+    database_url: str | None = field(default_factory=lambda: _env("CLEF_DATABASE_URL"))
+    database_pool_size: int = field(default_factory=lambda: _int("CLEF_DATABASE_POOL_SIZE", 5))
+
     def __post_init__(self) -> None:
         for name, value, allowed in (
             ("CLEF_DEVICE", self.device.split(":")[0], DEVICES),
