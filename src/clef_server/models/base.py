@@ -191,6 +191,17 @@ class LocalTensorAdapter(DecisionModel, Protocol):
         return None
 
 
+# Python 3.10's typing replaces a Protocol class's own __init__ (fixed in 3.11), and subclasses that do not
+# define one would inherit the replacement and reject (spec, cfg). Put the real one back on both protocols.
+def _adapter_init(self: Any, spec: ModelSpec, cfg: Any) -> None:
+    self.spec = spec
+    self.cfg = cfg
+
+
+DecisionModel.__init__ = _adapter_init  # type: ignore[method-assign]
+LocalTensorAdapter.__init__ = _adapter_init  # type: ignore[method-assign]
+
+
 __all__ = [
     "Capabilities",
     "DecisionModel",

@@ -497,3 +497,17 @@ def test_cli_models_and_download_model(monkeypatch, capsys, tmp_path):
     assert cli.main(["download", "--yes", "--model", "clef"]) == 1
     assert "at least 57 GB" in capsys.readouterr().err
     assert cli.main(["download", "--yes", "--model", "gpt-4o"]) == 2
+
+
+def test_a_minimal_third_party_adapter_constructs():
+    """Python 3.10 replaces a Protocol's __init__; subclasses that define none must still take (spec, cfg)."""
+    from clef_server.models import LocalTensorAdapter
+
+    class Minimal(LocalTensorAdapter):
+        name = "minimal"
+        capabilities = Capabilities()
+
+    spec = ModelSpec("m", "minimal", None, None, 1.0)
+    adapter = Minimal(spec, Config())
+    assert adapter.spec is spec and adapter.info()["ref"] == "m@local"
+    adapter.validate({"questions": {"q": {"type": "noul"}}})
