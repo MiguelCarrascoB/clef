@@ -105,6 +105,72 @@ def test_a_returning_owner_does_not_collect_the_turns_it_missed():
     assert "aa" not in order and "bb" not in order  # alternating, b did not get a burst of 5
 
 
+async def _share_run(s: Scheduler, t: list[float], jobs: list[str], until: float) -> list[str]:
+    """Drive ``jobs`` (one worker each, 1 s and 32 records per turn) until the fake clock reaches ``until``."""
+    log: list[str] = []
+
+    async def worker(job_id: str) -> None:
+        while True:
+            await s.turn(job_id)
+            try:
+                await asyncio.sleep(0)  # the engine call
+                log.append(job_id)
+                t[0] += 1.0
+            finally:
+                s.done(job_id, 32)
+
+    tasks = [asyncio.create_task(worker(j)) for j in jobs]
+    while t[0] < until:
+        await asyncio.sleep(0)
+        s.refresh(t[0])
+        s.dispatch()
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    return log
+
+
+def test_an_owner_paused_off_hours_does_not_collect_the_missed_turns_when_its_window_reopens():
+    """Review E/F #1: alice's jobs sit out a window closure while bob runs alone; once it reopens, the turns
+    stay about 50/50 instead of alice taking every turn until her stale pass catches up."""
+
+    async def main() -> tuple[list[str], list[str], dict[str, float]]:
+        t0 = NOON + 8 * HOUR  # 20:00 UTC: the window is open
+        s, t = sched(active=8, now=t0)
+        win = parse_window("20:00-06:00", "UTC")
+        for i, (job_id, owner, w) in enumerate(
+            [("a1", "alice", win), ("a2", "alice", win), ("b1", "bob", None), ("b2", "bob", None)]
+        ):
+            s.register(ent(job_id, owner, seq=i, window=w, ref=t0))
+        jobs = ["a1", "a2", "b1", "b2"]
+        before = await _share_run(s, t, jobs, t0 + 600)
+        t[0] = t0 + 10 * HOUR  # 06:00: alice is paused
+        s.refresh(t[0])
+        await _share_run(s, t, ["b1", "b2"], t0 + 10 * HOUR + 2000)  # bob alone (pass races ahead)
+        t[0] = t0 + 24 * HOUR  # 20:00 the next day: the window reopens
+        passes = dict(s.passes)
+        after = await _share_run(s, t, jobs, t0 + 24 * HOUR + 600)
+        return before, after, passes
+
+    before, after, passes = asyncio.run(main())
+    assert passes["bob"] > passes["alice"] + 10_000  # the setup really left alice far behind
+    share = lambda log: sum(j.startswith("a") for j in log) / len(log)  # noqa: E731
+    assert 0.45 <= share(before) <= 0.55
+    assert len(after) > 100 and 0.45 <= share(after) <= 0.55, share(after)
+    assert "aaa" not in "".join(j[0] for j in after[:20])
+
+
+def test_a_new_job_of_an_owner_whose_jobs_are_all_paused_starts_level_with_the_others():
+    """register(): an owner with only paused entries is not runnable; its new job does not reuse a stale pass."""
+    s, _ = sched(active=8, now=NOON)
+    s.register(ent("a1", "alice", seq=1, window=parse_window("20:00-06:00", "UTC")))
+    s.refresh(NOON)  # closed at noon: a1 is paused off-hours
+    s.register(ent("b1", "bob", seq=2))
+    s.passes["bob"] = 5000.0
+    s.register(ent("a2", "alice", seq=3))
+    assert s.passes["alice"] == 5000.0
+
+
 # ------------------------------------------------------------------ policy: priority and aging
 
 

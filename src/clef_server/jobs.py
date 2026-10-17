@@ -894,10 +894,20 @@ class Scheduler:
     def has_slot(self) -> bool:
         return self.slots_used() < self.active
 
+    def runnable_owners(self) -> set[str]:
+        """Owners with at least one entry that may take turns (not paused)."""
+        return {x.owner for x in self.entries.values() if x.pause is None}
+
+    def _lift(self, owner: str, runnable: set[str]) -> None:
+        """An owner that becomes runnable again starts level with the owners in ``runnable`` (the lowest of
+        their passes, or ``vtime`` when nobody else runs): it does not collect the turns it missed."""
+        others = [self.passes.get(o, 0.0) for o in runnable if o != owner]
+        self.passes[owner] = max(self.passes.get(owner, 0.0), min(others) if others else self.vtime)
+
     def register(self, e: Entry) -> None:
-        others = [self.passes.get(x.owner, 0.0) for x in self.entries.values() if x.owner != e.owner]
-        if not any(x.owner == e.owner for x in self.entries.values()):
-            self.passes[e.owner] = max(self.passes.get(e.owner, 0.0), min(others) if others else self.vtime)
+        runnable = self.runnable_owners()
+        if e.pause is None and e.owner not in runnable:  # new, or all its other jobs are paused
+            self._lift(e.owner, runnable)
         self.entries[e.id] = e
 
     def unregister(self, job_id: str) -> None:
@@ -916,7 +926,13 @@ class Scheduler:
 
     # ---- windows, slots, expiry
     def refresh(self, now: float) -> None:
-        """Pause jobs that left their window, give free slots to those back in, expire the late ones."""
+        """Pause jobs that left their window, give free slots to those back in, expire the late ones.
+
+        An owner that goes from no runnable job back to runnable (its window reopened, a slot came free) is
+        lifted like a new owner in ``register``, so a pause never banks turns; a job that leaves a pause also
+        restarts its aging clock (it was not waiting for a turn while paused).
+        """
+        before = self.runnable_owners()
         for e in self.entries.values():
             if e.deadline is not None and now >= e.deadline:
                 self.interrupt(e.id, JobExpired(EXPIRED))
@@ -929,6 +945,14 @@ class Scheduler:
         ):
             if self.has_slot():
                 e.pause = None
+                e.ref = now
+        self._lift_returning(before)
+
+    def _lift_returning(self, before: set[str]) -> None:
+        after = self.runnable_owners()
+        still = before & after
+        for owner in sorted(after - before):
+            self._lift(owner, still)
 
     def waiting(self, job_id: str) -> str | None:
         """``waiting_reason`` of a job that is in the scheduler."""

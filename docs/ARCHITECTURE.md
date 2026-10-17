@@ -1650,7 +1650,10 @@ Policy:
   job's effective class rises one level per `CLEF_JOB_AGING_S` without a turn, never to `urgent`.
 - Fair share inside a class: stride scheduling per **owner** (principal name; `NULL` = one owner). `pass +=
   cost / weight`, weight 1 for everyone in v3.2, cost = the chunk's records. The next turn goes to the lowest pass;
-  an owner that comes back sets `pass = max(own, current minimum)`. Within one owner: higher class first, then
+  an owner that comes back sets `pass = max(own, current minimum)`. "Comes back" = goes from no runnable job to
+  runnable: a new job, or a job leaving a pause (its window reopened, a slot came free); the minimum is over the
+  owners that were runnable already (`vtime` when there are none), and an un-paused job's aging clock restarts,
+  so a pause never banks turns. Within one owner: higher class first, then
   interrupted, then `seq`. State is in memory and rebuilt after a restart.
 - Turn gate: `await scheduler.turn(job)` before every engine call of a job; `scheduler.done(job, cost)` after.
   The gate wraps each engine call inside `decide_resilient` (so a bisected chunk takes one turn per call and no

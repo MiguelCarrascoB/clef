@@ -295,7 +295,8 @@ chunk), `active_limit` (no free slot), `off_hours` (outside its window; `next_wi
 
 **Fair share.** Inside a class, turns are shared per key name (the job owner), weighted by records: two keys with
 one huge job each advance at the same speed, and a key with ten jobs does not get ten times the turns. A key
-that comes back after being idle starts level with the others; it does not collect the turns it missed.
+that comes back after being idle, or whose jobs were paused (off-hours, or waiting for a slot), starts level with
+the others; it does not collect the turns it missed.
 
 **Off-hours window.** `"schedule": {"window": "20:00-06:00", "tz": "Europe/Madrid"}` restricts a job to a window
 (`start > end` crosses midnight, `start == end` is 24 h; `tz` defaults to `CLEF_JOB_TZ`). Without `schedule`, a

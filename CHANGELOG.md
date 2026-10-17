@@ -19,7 +19,7 @@
   classes, aging with `CLEF_JOB_AGING_S`), `urgent` (new `urgent` scope: top class, ignores the window), `schedule`
   (`{"window": "20:00-06:00", "tz": ...}` or `CLEF_JOB_WINDOW` / `CLEF_JOB_TZ`; a job that leaves its window stays
   `running` with `waiting_reason: "off_hours"`) and `expire_after_s` (counted from when the window opens; ends
-  `cancelled` with `error: "expired"`). Turns are shared fairly per key (stride scheduling). Job objects gain
+  `cancelled` with `error: "expired"`). Turns are shared fairly per key (stride scheduling; a key whose jobs sat out a window or waited for a slot starts level with the others when they resume, it does not bank the missed turns). Job objects gain
   `priority`, `urgent`, `schedule`, `waiting_reason`, `next_window_at`, `expired`, `model`, `tokens`;
   `GET /v1/jobs?priority=`. The daily record quota is reserved at submit (UTC day of the submit, refunded for
   what a cancelled / failed / expired job did not process); result-cache hits are not charged. Python API:
