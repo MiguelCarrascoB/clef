@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Added
+- **Self-evolving router and Review queue (E2)**: `PUT|GET|DELETE /v1/routers/{name}`, `POST .../route[/batch]`,
+  `.../propose`, `.../versions[/{v}/activate]`, `GET /v1/review`, `POST /v1/review/{id}/resolve`. A router buffers
+  what its classifier cannot place ("other", or below a threshold that rises with the label count), sends 20 items at
+  a time to an LLM for new labels, re-classifies them with clef against the proposed set before accepting, and only
+  adds labels (at most 63 plus `other`). Review mode (default) queues proposals; auto mode publishes them as a new
+  classifier version. Cold start proposes a starter set from the first 20 items. Off unless `GEMINI_API_KEY` (or
+  `CLEF_LLM_API_KEY`) is set; `CLEF_LLM_BASE_URL` / `CLEF_LLM_MODEL` point it at ollama, LM Studio or OpenAI. New
+  `CLEF_ROUTER_*`, `CLEF_LLM_*` and `CLEF_REVIEW_TTL_DAYS` settings, `docs/router.md`, a console **Review** screen,
+  router and review helpers in the Python and JS clients, and an LLM line in `clef doctor`.
+- Saved classifiers accept `review_threshold` (single-label): interactive runs below it are queued for review. Review
+  input text is dropped when resolved and after `CLEF_REVIEW_TTL_DAYS` (30).
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
   503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)
   the first SIGTERM / Ctrl-C keeps the server up for N seconds answering `draining` (a second signal stops at once),

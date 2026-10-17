@@ -76,6 +76,25 @@ See [Jobs & webhooks](jobs.md).
 | `CLEF_SAMPLE_INTERVAL_S` | `2` | gauge sampling period for the console charts |
 | `CLEF_LOG_FORMAT` | `text` | `text` or `json`. json writes the app, uvicorn and access log lines as one JSON object per line (`ts`, `level`, `logger`, `msg`, plus `request_id` inside a request and `exc` for a traceback). `--log-format` |
 
+## Router and review
+
+The router is off unless a key is set in the process environment ([Router and Review](router.md)).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | unset | the router's LLM key. Unset (and no `CLEF_LLM_API_KEY`) = off. Never logged |
+| `CLEF_LLM_API_KEY` | unset | key for another OpenAI-compatible provider; wins over `GEMINI_API_KEY` |
+| `CLEF_LLM_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | OpenAI-compatible endpoint (ollama, LM Studio, OpenAI) |
+| `CLEF_LLM_MODEL` | `gemini-3.8-flash` | model id sent to the endpoint |
+| `CLEF_LLM_TIMEOUT_S` | `60` | timeout of one LLM request (2 retries on 429 / 5xx) |
+| `CLEF_ROUTER_BATCH` | `20` | buffered items per proposal call |
+| `CLEF_ROUTER_COLD_BATCH` | `20` | buffered items before the cold-start call |
+| `CLEF_ROUTER_FLUSH_S` | `600` | call after this long even below the batch size (0 = never) |
+| `CLEF_ROUTER_MODE` | `review` | default mode of new routers: `review` or `auto` |
+| `CLEF_ROUTER_MAX_NEW_PER_DAY` | `10` | auto mode: labels a router may add per UTC day |
+| `CLEF_ROUTER_MAX_INPUT_CHARS` | `500` | characters of each buffered input sent to the LLM |
+| `CLEF_REVIEW_TTL_DAYS` | `30` | review rows lose their input text this long after creation (and at once when resolved); 0 = keep |
+
 Example for LAN access:
 
 ```bash
