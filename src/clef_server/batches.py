@@ -7,8 +7,8 @@ streamed in and renamed); output and error files are virtual, streamed from the 
 docs/openai-compat.md and docs/ARCHITECTURE.md ("OpenAI Files and Batches").
 
 The batch logic stays here. ``jobs.py`` only knows the ``completed_if_all_failed`` kind key, the 4xx-rows rule
-of the circuit breaker and the ``jobs.tokens`` counter. Wherever the job scheduler (E1) matters, the code goes
-through ``submit_batch_job`` (the one seam) and ``run_chunked`` (E1 / F2 own it); ``# E1:`` marks the spots.
+of the circuit breaker and the ``jobs.tokens`` counter. The job scheduler is reached through
+``submit_batch_job`` (the one seam, ``JobRunner.submit``) and ``run_chunked``.
 """
 
 from __future__ import annotations
@@ -253,17 +253,6 @@ class BatchStore:
         with self.db.tx() as conn:
             conn.execute(
                 update(b).where(b.c.id == batch_id, b.c.cancelling_at.is_(None)).values(cancelling_at=_now())
-            )
-
-    def mark_window(self, job_id: str, expire_after_s: float, eligible_at: float) -> None:
-        # E1: the scheduler sets jobs.eligible_at itself, when the job's window first opens. Until it lands
-        # there is no window, so a batch is eligible at once and its 24 h start now.
-        j = dbschema.jobs
-        with self.db.tx() as conn:
-            conn.execute(
-                update(j)
-                .where(j.c.id == job_id)
-                .values(expire_after_s=expire_after_s, eligible_at=eligible_at)
             )
 
 
@@ -858,63 +847,36 @@ def batch_view(b: dict[str, Any], j: dict[str, Any], lines: int | None, model: s
 async def submit_batch_job(
     ctx: AppContext, request: Request, payload: dict[str, Any], options: ClefOptions
 ) -> dict[str, Any]:
-    """Create the job of a new batch; returns its row (``id`` at least). The one seam to the scheduler.
+    """Create the job of a new batch; returns its public job view (``id`` at least). The one seam to E1.
 
-    Raises ApiError: 400 (a scheduler option), 403 (`urgent` without the scope), 409 (CLEF_MAX_JOBS),
-    429 (daily quota; nothing stays reserved).
+    ``JobRunner.submit`` validates the payload, reserves the daily quota (the file's stored line count, once),
+    queues the job with its priority / window / 24 h expiry and wakes the scheduler.
 
-    # E1: replace the body with ``JobRunner.submit`` (validates, snapshots, reserves quota, creates, pokes):
-    #   row = await runner.submit(KIND, payload, principal=principal, priority=options.priority,
-    #                             urgent=options.urgent, schedule=options.schedule, expire_after_s=WINDOW_S)
-    # mapping ValueError -> 400, PermissionError -> 403, QuotaExceeded -> 429, JobsFull -> 409 (see
-    # `_scheduler_error`). Then delete `_legacy_submit`, `BatchStore.mark_window` and the "need the job
-    # scheduler" refusal below.
+    Raises ApiError: 400 (a bad option), 403 (`urgent` without the scope), 404 (a model not served),
+    409 (CLEF_MAX_JOBS), 429 (daily quota; nothing stays reserved).
     """
     runner = ctx.extra["jobs"]
     principal = ctx.principal(request)
-    owner = getattr(request.state, "key_name", None)
-    if options.urgent and principal is not None and not principal.has("urgent"):
-        raise ctx.api_error(403, f"key {principal.name!r} lacks scope 'urgent'")
-    if options.priority != "normal" or options.urgent or options.schedule:
-        # E1: priority, urgent and schedule are the scheduler's; until it lands they cannot be honoured.
-        raise ctx.api_error(400, "clef.priority / clef.urgent / clef.schedule need the job scheduler")
-    return await _legacy_submit(ctx, runner, request, owner, payload)
-
-
-async def _legacy_submit(
-    ctx: AppContext, runner: Any, request: Request, owner: str | None, payload: dict[str, Any]
-) -> dict[str, Any]:
-    """Today's ``POST /v1/jobs`` sequence for one job: reserve the daily quota, create, refund on failure."""
-    spec = ctx.extra["job_kinds"][KIND]
-    principal = ctx.principal(request)
-    parsed = await run_in_threadpool(spec["validate"], payload)
-    try:  # the whole job is charged to the submit day; the unprocessed part comes back when it ends
-        reservation = ctx.quotas.reserve(principal, int(spec["records"](parsed)))
+    try:
+        row = await runner.submit(
+            KIND,
+            payload,
+            principal=principal,
+            priority=options.priority,
+            urgent=options.urgent,
+            schedule=options.schedule,
+            expire_after_s=WINDOW_S,
+        )
     except QuotaExceeded as exc:
         request.state.quota = (exc.limit, exc.remaining)
         raise _scheduler_error(ctx, exc) from exc
-    request.state.quota = ctx.quotas.remaining(principal)
-    try:
-        row = await run_in_threadpool(
-            runner.store.create,
-            KIND,
-            owner,
-            payload,
-            None,
-            None,
-            ctx.cfg.max_jobs,
-            None,
-            ctx.model_ref(),
-            reservation.day if reservation else None,
-            reservation.n if reservation else 0,
-        )
-    except BaseException as exc:  # JobsFull, a DB error: nothing was queued, charge nothing
-        if reservation is not None:
-            ctx.quotas.refund(reservation, reservation.n)
-            request.state.quota = ctx.quotas.remaining(principal)
-        if isinstance(exc, JobsFull):
-            raise _scheduler_error(ctx, exc) from exc
+    except (KeyError, IndexError):
         raise
+    except LookupError as exc:
+        raise ctx.api_error(404, str(exc)) from exc
+    except (JobsFull, PermissionError, ValueError) as exc:
+        raise _scheduler_error(ctx, exc) from exc
+    request.state.quota = ctx.quotas.remaining(principal)
     return row
 
 
@@ -1295,12 +1257,10 @@ def router(ctx: AppContext) -> APIRouter:
         batch_row, out_row, err_row = rows_for(job["id"])
         try:
             await run_in_threadpool(store.create_batch, batch_row, out_row, err_row)
-            await run_in_threadpool(store.mark_window, job["id"], WINDOW_S, now)
         except BaseException:
             with contextlib.suppress(Exception):
                 await ctx.extra["jobs"].request_cancel(job)
             raise
-        ctx.extra["jobs"].poke()
         return await view(batch_row)
 
     @api.get("/batches", response_model=BatchList, summary="List your batches (newest first)")

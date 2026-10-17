@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ import pytest
 from sqlalchemy import text
 from test_api import FakeEngine, make
 from test_compat import chat
-from test_jobs import SlowEngine
+from test_jobs import SlowEngine, hold_runner
 from test_keys import _scope_marks, add_key, api_routes, hdr
 
 from clef_server import batches
@@ -423,7 +424,7 @@ def test_cancel_a_queued_batch(monkeypatch):
     client, _, app = make(Eng())
     with client:
         store = app.state.ctx.extra["jobs"].store
-        monkeypatch.setattr(store, "claim_next", lambda: None)  # the runner never picks it up
+        monkeypatch.setattr(store, "runnable", lambda: [])  # the scheduler never sees it
         b = run_batch(client, [line("a"), line("b")])
         assert b["status"] == "in_progress" and b["in_progress_at"] is None
         r = client.post(f"/v1/batches/{b['id']}/cancel").json()
@@ -439,7 +440,7 @@ def test_an_expired_batch_serves_what_it_did_and_names_the_rest(api):
     fid = upload(client, jsonl(*[line(f"c{i}") for i in range(4)])).json()["id"]
     # make the job look expired after two rows (E1 ends such a job `cancelled` with error "expired")
     store = app.state.ctx.extra["jobs"].store
-    store.claim_next = lambda: None  # type: ignore[method-assign]
+    store.runnable = lambda: []  # type: ignore[method-assign]
     b = new_batch(client, fid).json()
     job_id = "job_" + b["id"].removeprefix("batch_")
     items = [
@@ -476,7 +477,7 @@ def test_an_input_file_in_use_is_not_deleted_or_purged(monkeypatch):
     client, _, app = make(Eng())
     with client:
         store = app.state.ctx.extra["jobs"].store
-        monkeypatch.setattr(store, "claim_next", lambda: None)
+        monkeypatch.setattr(store, "runnable", lambda: [])
         b = run_batch(client, [line("a")])
         r = client.delete(f"/v1/files/{b['input_file_id']}")
         assert r.status_code == 409 and "cancel" in r.json()["error"]["message"]
@@ -593,14 +594,126 @@ def test_the_daily_quota_is_reserved_at_create_and_refused_when_short():
         assert new_batch(client, fid, headers=small).status_code == 429  # spent: 2 of 2 used
 
 
+# ------------------------------------------------------------------ scheduler options (E1 seam)
+
+NOON = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc).timestamp()
+HOUR = 3600.0
+NIGHT = {"window": "20:00-06:00", "tz": "UTC"}  # closed at NOON, open from 20:00
+
+
+def fake_clock(app: Any, start: float = NOON) -> list[float]:
+    t = [start]
+    app.state.ctx.extra["jobs"].clock = lambda: t[0]
+    return t
+
+
+def job_of(app: Any, b: dict[str, Any]) -> dict[str, Any]:
+    return app.state.ctx.extra["jobs"].store.get("job_" + b["id"].removeprefix("batch_"))
+
+
+def poke(client: Any, app: Any) -> None:
+    client.portal.call(app.state.ctx.extra["jobs"].poke)  # the event is not thread safe
+
+
+def test_a_batch_carries_its_priority_into_the_job(monkeypatch):
+    client, _, app = make(Eng())
+    hold = hold_runner(monkeypatch, app.state.ctx.extra["jobs"].store)
+    with client:
+        low = run_batch(client, [line("a")], clef={"priority": "low"})
+        high = run_batch(client, [line("a")], clef={"priority": "high"})
+        plain = run_batch(client, [line("a")])
+        assert [job_of(app, b)["priority"] for b in (low, high, plain)] == [0, 2, 1]
+        bad = new_batch(client, upload(client, jsonl(line("a"))).json()["id"], clef={"priority": "soon"})
+        assert bad.status_code == 400  # not one of low, normal, high
+        hold.clear()
+        poke(client, app)
+        for b in (low, high, plain):
+            assert wait_batch(client, b["id"])["status"] == "completed"
+
+
+def test_urgent_needs_its_scope_and_runs_outside_the_window():
+    client, _, app = keyed()
+    t = fake_clock(app)
+    with client:
+        plain = hdr(add_key(app, "plain", "jobs"))
+        boss = hdr(add_key(app, "boss", "jobs,urgent"))
+        fid = upload(client, jsonl(line("a")), headers=plain).json()["id"]
+        r = new_batch(client, fid, headers=plain, clef={"urgent": True})
+        assert r.status_code == 403 and "urgent" in r.json()["error"]["message"]
+        assert client.get("/v1/jobs", headers=plain).json()["total"] == 0
+        b = run_batch(client, [line("a")], headers=boss, clef={"urgent": True, "schedule": NIGHT})
+        assert job_of(app, b)["priority"] == 3  # the window is closed at NOON, urgent ignores it
+        assert wait_batch(client, b["id"], headers=boss)["status"] == "completed"
+        assert t[0] == NOON
+
+
+def test_a_batch_waits_for_its_schedule_window_and_expires_24h_after_it_opens():
+    client, _, app = make(Eng())
+    t = fake_clock(app)
+    with client:
+        b = run_batch(client, [line("a")], clef={"schedule": NIGHT})
+        assert b["status"] == "in_progress" and b["in_progress_at"] is None
+        opens = NOON + 8 * HOUR  # 20:00
+        assert b["expires_at"] == int(opens + 24 * HOUR)  # real, counted from when it can first run
+        assert job_of(app, b)["schedule"] == NIGHT
+        time.sleep(0.3)
+        assert client.get(f"/v1/batches/{b['id']}").json()["status"] == "in_progress"
+        assert job_of(app, b)["status"] == "queued"
+        t[0] = opens + 60
+        poke(client, app)
+        assert wait_batch(client, b["id"])["status"] == "completed"
+        bad = new_batch(
+            client, upload(client, jsonl(line("a"))).json()["id"], clef={"schedule": {"window": "nope"}}
+        )
+        assert bad.status_code == 400 and "schedule" in bad.json()["error"]["message"]
+
+
+def test_an_unscheduled_batch_expires_24h_after_it_was_created(monkeypatch):
+    client, _, app = make(Eng())
+    t = fake_clock(app)
+    hold = hold_runner(monkeypatch, app.state.ctx.extra["jobs"].store)
+    with client:
+        b = run_batch(client, [line("a"), line("b")])
+        assert b["expires_at"] == int(NOON + 24 * HOUR)
+        assert job_of(app, b)["expire_after_s"] == 24 * HOUR
+        t[0] = NOON + 24 * HOUR + 1  # the day is over before the batch got a slot
+        hold.clear()
+        poke(client, app)
+        done = wait_batch(client, b["id"])
+        assert done["status"] == "expired" and done["expired_at"] and done["expires_at"] == b["expires_at"]
+        assert [e["error"]["code"] for e in rows(client, done["error_file_id"])] == ["batch_expired"] * 2
+
+
+def test_the_quota_is_charged_once_per_line_and_comes_back_on_cancel(monkeypatch):
+    client, _, app = keyed()
+    hold = hold_runner(monkeypatch, app.state.ctx.extra["jobs"].store)
+    with client:
+        h = hdr(add_key(app, "ci", "jobs", daily_quota=10))
+        b = run_batch(client, [line(f"c{i}") for i in range(4)], headers=h)
+        assert app.state.ctx.quotas.used("ci") == 4  # reserved at create, by the file's line count
+        row = job_of(app, b)
+        assert row["quota_reserved"] == 4 and row["quota_day"] == app.state.ctx.quotas.today()
+        assert client.post(f"/v1/batches/{b['id']}/cancel", headers=h).json()["status"] == "cancelled"
+        for _ in range(100):
+            if app.state.ctx.quotas.used("ci") == 0:
+                break
+            time.sleep(0.02)
+        assert app.state.ctx.quotas.used("ci") == 0  # nothing ran: all of it comes back
+        hold.clear()
+        b = run_batch(client, [line(f"c{i}") for i in range(4)], headers=h)
+        assert wait_batch(client, b["id"], headers=h)["status"] == "completed"
+        assert app.state.ctx.quotas.used("ci") == 4  # charged once, not twice
+        assert client.get("/v1/jobs", headers=h).json()["total"] == 2
+
+
 # ------------------------------------------------------------------ resume
 
 
 def test_a_batch_resumes_after_an_interruption(api):
     client, _, app = api
     store = app.state.ctx.extra["jobs"].store
-    real = store.claim_next
-    store.claim_next = lambda: None  # type: ignore[method-assign]
+    real = store.runnable
+    store.runnable = lambda: []  # type: ignore[method-assign]
     b = run_batch(client, [line(f"c{i}") for i in range(5)])
     job_id = "job_" + b["id"].removeprefix("batch_")
     # two rows were stored before the "crash"; the job is interrupted and resumable
@@ -616,7 +729,7 @@ def test_a_batch_resumes_after_an_interruption(api):
     ]
     store.add_items(job_id, rows_)
     sql(app, "UPDATE jobs SET status = 'interrupted', resumes = 1 WHERE id = :i", i=job_id)
-    store.claim_next = real  # type: ignore[method-assign]
+    store.runnable = real  # type: ignore[method-assign]
     app.state.ctx.extra["jobs"].poke()
     b = wait_batch(client, b["id"])
     assert b["status"] == "completed" and b["request_counts"] == {"total": 5, "completed": 5, "failed": 0}
