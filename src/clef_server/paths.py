@@ -1,4 +1,4 @@
-"""Filesystem locations: state dir (logs, pidfile, saved classifiers) and model weights resolution.
+"""Filesystem locations: state dir (logs, pidfile, database) and model weights resolution.
 
 Torch-free and cheap to import (the CLI uses it before any heavy import).
 """
@@ -37,8 +37,13 @@ def classifiers_dir(cfg: Any) -> Path:
 
 
 def jobs_db(cfg: Any) -> Path:
-    """SQLite file holding async jobs and their results (src/clef_server/jobs.py)."""
+    """The v3.1 SQLite file (jobs only); renamed to clef.db once at startup (db.migrate_legacy_file)."""
     return state_dir(cfg) / "jobs.db"
+
+
+def database_path(cfg: Any) -> Path:
+    """Default database file (CLEF_DATABASE_URL unset): jobs, classifiers, keys, ... (see db.py)."""
+    return state_dir(cfg) / "clef.db"
 
 
 def legacy_model_dir() -> Path:
