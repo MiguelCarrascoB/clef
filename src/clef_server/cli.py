@@ -1,4 +1,4 @@
-"""`clef` command line: serve / stop / status / logs / doctor / download / bench / open / version.
+"""`clef` command line: serve / stop / status / logs / doctor / download / bench / open / version / models.
 
 Stdlib only at import time (no torch, no httpx, no fastapi): `clef --help`, `clef version` and
 `clef doctor --no-gpu` must start fast on a machine without a GPU. Heavy modules are imported lazily
@@ -435,19 +435,39 @@ def free_gb(path: Path) -> float:
     return shutil.disk_usage(probe).free / 1e9
 
 
-def cmd_download(args: argparse.Namespace) -> int:
-    from clef_server import config, paths
+def selected_spec(model: str | None = None) -> Any:
+    """The ModelSpec `clef serve` would load (CLEF_MODEL + aliases), or `model` (`id[@rev]`) instead of
+    CLEF_MODEL. Its revision is the pin even when CLEF_MODEL_PATH is set. Raises ValueError / UnknownModel."""
+    import dataclasses
 
-    repo = os.environ.get("CLEF_MODEL_REPO", config.MODEL_REPO)
-    revision = args.revision or os.environ.get("CLEF_MODEL_REVISION", config.MODEL_REVISION)
+    from clef_server.models.registry import resolve_spec
+
+    cfg = load_config()
+    changes: dict[str, Any] = {"model_path": None}
+    if model:
+        changes["model"] = model
+    return resolve_spec(dataclasses.replace(cfg, **changes))
+
+
+def cmd_download(args: argparse.Namespace) -> int:
+    from clef_server.models import UnknownModel
+
+    try:
+        spec = selected_spec(args.model)
+    except (ValueError, UnknownModel) as exc:
+        print(f"clef: {exc}", file=sys.stderr)
+        return 2
+    repo = spec.repo
+    revision = args.revision or spec.revision or "main"
     target = args.dir or os.environ.get("CLEF_MODEL_PATH") or None
     dest = Path(target).expanduser() if target else hf_cache_dir()
     free = free_gb(dest)
-    print(f"model:       {repo}@{revision[:12]}")
+    need = max(MIN_FREE_GB, spec.weights_gb + 2.0)  # headroom for the partial download
+    print(f"model:       {spec.id} = {repo}@{revision[:12]}")
     print(f"destination: {dest}{'' if target else ' (Hugging Face cache)'}")
-    print(f"size:        about {paths.WEIGHTS_GB:.0f} GB; free space: {free:.1f} GB")
-    if free < MIN_FREE_GB:
-        print(f"clef: need at least {MIN_FREE_GB:.0f} GB free on that disk; aborting", file=sys.stderr)
+    print(f"size:        about {spec.weights_gb:.0f} GB; free space: {free:.1f} GB")
+    if free < need:
+        print(f"clef: need at least {need:.0f} GB free on that disk; aborting", file=sys.stderr)
         return 1
     if not args.yes:
         if not sys.stdin.isatty():
@@ -469,8 +489,52 @@ def cmd_download(args: argparse.Namespace) -> int:
         kwargs["local_dir"] = str(dest)
     path = snapshot_download(repo, **kwargs)  # resumable; re-running continues where it stopped
     print(f"downloaded to {path}")
+    serve = "clef serve" if spec.id == "clef-flash" else f"CLEF_MODEL={spec.id} clef serve"
     if target:
-        print(f"use it with: CLEF_MODEL_PATH={path} clef serve")
+        print(f"use it with: CLEF_MODEL_PATH={path} {serve}")
+    elif spec.id != "clef-flash":
+        print(f"use it with: {serve}")
+    return 0
+
+
+def cmd_models(args: argparse.Namespace) -> int:
+    """The model catalog (every installed adapter's ids), marking the one `clef serve` would load."""
+    from clef_server.models import UnknownModel, registry
+
+    try:
+        selected = selected_spec()
+        error = None
+    except (ValueError, UnknownModel) as exc:
+        selected, error = None, str(exc)
+    rows = []
+    for spec in registry.catalog().values():
+        rows.append(
+            {
+                "id": spec.id,
+                "adapter": spec.adapter,
+                "repo": spec.repo,
+                "revision": spec.revision,
+                "weights_gb": spec.weights_gb,
+                "selected": selected is not None and spec.id == selected.id,
+            }
+        )
+    adapters = [
+        {"name": name, "class": f"{cls.__module__}.{cls.__qualname__}", "from": registry.adapter_origin(name)}
+        for name, cls in sorted(registry.adapters().items())
+    ]
+    if args.json:
+        print(json.dumps({"models": rows, "adapters": adapters, "error": error}, indent=2))
+        return 0 if error is None else 1
+    for row in rows:
+        mark = "*" if row["selected"] else " "
+        rev = (row["revision"] or "local")[:12]
+        where = f"{row['repo'] or '-'}@{rev}"
+        print(f"{mark} {row['id']:<16} {where:<36} ~{row['weights_gb']:.0f} GB  ({row['adapter']})")
+    print("adapters: " + ", ".join(f"{a['name']} ({a['from']})" for a in adapters))
+    if error:
+        print(f"clef: {error}", file=sys.stderr)
+        return 1
+    print("select one with CLEF_MODEL=<id>[@<revision>]; fetch it with `clef download --model <id>`")
     return 0
 
 
@@ -729,7 +793,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_doctor)
 
-    sp = sub.add_parser("download", help="download the pinned model weights (about 19 GB, resumable)")
+    sp = sub.add_parser("download", help="download the pinned model weights (clef-flash ~19 GB, resumable)")
+    sp.add_argument(
+        "--model",
+        metavar="ID[@REV]",
+        help="catalog id (`clef models`); default: the selected model (CLEF_MODEL)",
+    )
     sp.add_argument("--revision", metavar="SHA")
     sp.add_argument("--dir", metavar="DIR", help="download here instead of the Hugging Face cache")
     sp.add_argument("--yes", "-y", action="store_true", help="do not ask for confirmation")
@@ -769,6 +838,10 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--out", default="classifiers", metavar="DIR", help="default ./classifiers")
     ex.add_argument("--name", metavar="NAME", help="only this classifier")
     sp.set_defaults(func=cmd_classifiers)
+    # C2
+    sp = sub.add_parser("models", help="list the model catalog and installed adapters (* = selected)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_models)
     return p
 
 

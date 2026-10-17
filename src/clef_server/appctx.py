@@ -63,6 +63,11 @@ class AppContext:
         """The served model id for a request's ``model``; raises a LookupError (-> 404) for another model."""
         fn = getattr(self.engine, "check_model", None)
         return fn(requested) if callable(fn) else (requested or "clef-flash")
+    # C2: decide in two steps (tokenize ahead, then queue). prepare(reqs, batch=True, label="batch",
+    # cache=True) -> engine.Prepared: limits, the model check (UnknownModel -> 404), media, engine.prepare.
+    # decide_prepared(prepared, priority="background") -> results. decide(...) = both; it also takes cache=.
+    prepare: Callable[..., Awaitable[Any]] | None = None
+    decide_prepared: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None
 
 
 __all__ = ["AppContext", "Hook", "SystemOneRequest"]

@@ -10,6 +10,7 @@ dist/
 
 # Local data and secrets
 models/
+!src/clef_server/models/
 bench/out/
 *.log
 .env

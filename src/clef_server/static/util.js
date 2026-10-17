@@ -180,7 +180,7 @@ export function buildRequest({ stateMode, stateText, media, questions }) {
     if (r.error) throw new Error(`State JSON: ${r.error}`);
     state = r.value;
   }
-  const req = { model: 'clef-flash', state, questions };
+  const req = { state, questions }; // no `model`: the server uses the one it serves (GET /v1/models)
   const images = media.filter((m) => m.kind === 'image' && m.dataUrl).map((m) => m.dataUrl);
   const videos = media.filter((m) => m.kind === 'video' && m.dataUrl).map((m) => m.dataUrl);
   if (images.length) req.images = images;

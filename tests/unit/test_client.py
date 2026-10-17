@@ -27,7 +27,7 @@ def _handler(seen: list[httpx.Request]):
                     json={"detail": "questions: required", "request_id": "abc"},
                     headers={"X-Request-ID": "abc"},
                 )
-            return httpx.Response(200, json={"model": body["model"], "answers": {}, "echo": body})
+            return httpx.Response(200, json={"model": body.get("model"), "answers": {}, "echo": body})
         if path == "/v1/batch":
             return httpx.Response(
                 200, json={"batch_ms": 1.0, "results": json.loads(request.content)["batch"]}
@@ -45,7 +45,7 @@ def test_decide_builds_request_and_sends_key():
     seen: list[httpx.Request] = []
     c = ClefClient(api_key="k", transport=httpx.MockTransport(_handler(seen)))
     out = c.decide("hi", Q, images=["data:image/png;base64,AA=="])
-    assert out["echo"]["model"] == "clef-flash"
+    assert "model" not in out["echo"]  # the server's own model
     assert out["echo"]["images"] == ["data:image/png;base64,AA=="]
     assert "videos" not in out["echo"]
     assert seen[0].headers["x-api-key"] == "k"

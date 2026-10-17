@@ -75,7 +75,7 @@ def test_to_systemone_record_matches_hand_built():
     }
     sc = score_to_systemone("x", ["l", "h"]).to_record()
     assert sc["questions"] == {"score": {"type": "score", "criteria": ["l", "h"]}} and sc["state"] == "x"
-    assert sc["model"] == "clef-flash"
+    assert sc["model"] is None  # = the served model
 
 
 def test_media_passthrough():

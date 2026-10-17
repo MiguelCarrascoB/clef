@@ -10,6 +10,14 @@ Loads the model twice (reference first, then the candidate, freeing the GPU in b
 absolute probability difference over every answer option, how many top-1 choices flipped, and latency for both.
 Results go to bench/out/parity_<backend>_<dtype>_<quant>.json (copy the table into docs/hardware-results.md).
 Refuses to run while a clef server holds the GPU.
+
+Engine parity (code changes, not settings): run the eval set through the production `Engine.decide` (one record
+per call, then max_microbatch per call) with the current CLEF_* settings and dump the answers, optionally with
+another source tree first on sys.path (e.g. pre-refactor main), then compare two dumps:
+
+    python bench/parity.py --engine-dump out/ref.json --src /tmp/ref/src   # the reference tree's engine
+    python bench/parity.py --engine-dump out/new.json                     # this tree's engine
+    python bench/parity.py --compare out/ref.json out/new.json            # exit 1 on a flip or |dp| > --tol
 """
 
 from __future__ import annotations
@@ -33,6 +41,9 @@ from _model import default_model_path  # noqa: E402
 _SRC = _HERE.parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:  # run from a checkout without `pip install -e .`
     sys.path.insert(0, str(_SRC))
+# --src DIR: import clef_server from another tree (an engine parity reference). Must win before any import.
+if "--src" in sys.argv[:-1]:
+    sys.path.insert(0, str(Path(sys.argv[sys.argv.index("--src") + 1]).expanduser().resolve()))
 
 _TEXTS = [
     "Checkout errors, orders blocked since 03:00 UTC.",
@@ -198,8 +209,112 @@ def run_setting(
     return probs, lat, info
 
 
+def flat_answers(res: dict) -> dict:
+    """SystemOne answers -> {"question.option": prob} (noul: true / false). Rounded as the API rounds them."""
+    flat = {}
+    for qid, ans in res["answers"].items():
+        if "probabilities" in ans:
+            for opt, p in ans["probabilities"].items():
+                flat[f"{qid}.{opt}"] = float(p)
+        elif "noul" in ans:
+            flat[f"{qid}.true"] = float(ans["noul"])
+            flat[f"{qid}.false"] = 1.0 - float(ans["noul"])
+    return flat
+
+
+class _NullStats:
+    def record_forward(self, *a, **k):
+        pass
+
+    def set_queue_depth(self, *a, **k):
+        pass
+
+
+def engine_dump(out_path: str, records: list[dict], timeout: float = 1800.0) -> int:
+    """The production path: Engine(Config()) with the CLEF_* environment (warmup off), decide() per record,
+    then in max_microbatch chunks. Works with the pre- and post-refactor engines (same public API)."""
+    import asyncio
+    import dataclasses
+
+    import clef_server
+    from clef_server.config import Config
+    from clef_server.engine import Engine
+
+    print(f"engine from {Path(clef_server.__file__).parent}", flush=True)
+    cfg = dataclasses.replace(Config(), warmup=False)
+    eng = Engine(cfg, _NullStats())
+    eng.start()
+    t0 = time.perf_counter()
+    while eng.status == "loading" and time.perf_counter() - t0 < timeout:
+        time.sleep(0.5)
+    if eng.status not in ("ready", "warming"):
+        print(f"engine {eng.status}: {eng.error}", file=sys.stderr)
+        eng.shutdown()
+        return 1
+    info = eng.info()
+    print(f"loaded on {info['backend']} {info['dtype']} in {eng.load_seconds}s", flush=True)
+
+    async def go():
+        singles = [(await eng.decide([dict(r)]))[0] for r in records]
+        step = max(1, int(cfg.max_microbatch))
+        batched = []
+        for i in range(0, len(records), step):
+            batched.extend(await eng.decide([dict(r) for r in records[i : i + step]]))
+        return singles, batched
+
+    try:
+        singles, batched = asyncio.run(go())
+    finally:
+        eng.shutdown()
+    model_ref = eng.model_ref() if hasattr(eng, "model_ref") else None
+    result = {
+        "src": str(Path(clef_server.__file__).parent),
+        "model": model_ref,
+        "backend": info["backend"],
+        "dtype": info["dtype"],
+        "quant": cfg.quant,
+        "load_seconds": eng.load_seconds,
+        "singles": [flat_answers(r) for r in singles],
+        "batched": [flat_answers(r) for r in batched],
+        "lat": [r["timing"]["forward_ms"] for r in singles],
+        "result_models": sorted({r.get("model") for r in singles + batched}),
+    }
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_text(json.dumps(result))
+    print(f"wrote {out_path} ({len(records)} records, model {model_ref or 'pre-refactor'})")
+    return 0
+
+
+def compare_dumps(a_path: str, b_path: str, tol: float) -> int:
+    a, b = json.loads(Path(a_path).read_text()), json.loads(Path(b_path).read_text())
+    ok = True
+    for mode in ("singles", "batched"):
+        st = compare(a[mode], b[mode])
+        good = st["top1_flips"] == 0 and st["max_abs_diff"] <= tol
+        ok = ok and good
+        print(
+            f"{mode:<8} max |dp| = {st['max_abs_diff']:.5f}  mean |dp| = {st['mean_abs_diff']:.6f}  "
+            f"top-1 flips {st['top1_flips']}/{st['questions']}  {'OK' if good else 'FAIL'}"
+        )
+    for name, d in (("A", a), ("B", b)):
+        lat = statistics.median(d["lat"]) if d.get("lat") else 0.0
+        print(f"{name}: {d['src']} model={d.get('model')} {d['backend']}/{d['dtype']} p50 {lat:.1f} ms")
+    print("PARITY OK" if ok else f"PARITY FAIL (tolerance {tol})")
+    return 0 if ok else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--engine-dump", metavar="OUT.json", help="engine parity: dump Engine.decide answers")
+    ap.add_argument(
+        "--src", metavar="DIR", help="with --engine-dump: import clef_server from DIR (a src/ dir)"
+    )
+    ap.add_argument(
+        "--compare", nargs=2, metavar=("A.json", "B.json"), help="compare two --engine-dump files"
+    )
+    ap.add_argument(
+        "--tol", type=float, default=2e-3, help="--compare: max |dp| allowed (answers are rounded)"
+    )
     ap.add_argument("--model-path", default=default_model_path())
     ap.add_argument("--device", default=os.environ.get("CLEF_DEVICE", "auto"))
     ap.add_argument("--dtype", default=os.environ.get("CLEF_DTYPE", "float16"), help="candidate dtype")
@@ -217,6 +332,8 @@ def main() -> int:
     ap.add_argument("--out", default=str(_HERE / "out"))
     args = ap.parse_args()
 
+    if args.compare:
+        return compare_dumps(args.compare[0], args.compare[1], args.tol)
     if not args.force and server_running(args.port):
         print(
             f"REFUSING: a clef server on :{args.port} holds the GPU. Stop it or pass --force.",
@@ -225,6 +342,8 @@ def main() -> int:
         return 2
 
     records = build_eval_set(args.n, images=args.images)
+    if args.engine_dump:
+        return engine_dump(args.engine_dump, records)
     print(f"eval set: {len(records)} records; reference = bfloat16 / no quant")
     if args.reference:
         saved = json.loads(Path(args.reference).read_text())

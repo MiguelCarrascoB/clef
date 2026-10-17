@@ -26,7 +26,8 @@ from .types import (
     parse_score,
 )
 
-DEFAULT_MODEL = "clef-flash"
+# None: `model` is left out of requests and the server uses the model it serves (GET /v1/models).
+DEFAULT_MODEL: str | None = None
 
 
 class ClefClient:
@@ -76,7 +77,7 @@ class ClefClient:
         questions: dict[str, Any],
         images: list[str] | None = None,
         videos: list[str] | None = None,
-        model: str = DEFAULT_MODEL,
+        model: str | None = DEFAULT_MODEL,
     ) -> dict[str, Any]:
         return self._request("POST", "/v1/systemone", json=c.record(state, questions, images, videos, model))
 
@@ -85,6 +86,10 @@ class ClefClient:
 
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/health")
+
+    def models(self) -> list[dict[str, Any]]:
+        """The model the server serves (OpenAI list format; one entry: id, owned_by, clef: adapter / ref)."""
+        return list((self._request("GET", "/v1/models")).get("data") or [])
 
     def stats(self) -> dict[str, Any]:
         return self._request("GET", "/v1/stats")

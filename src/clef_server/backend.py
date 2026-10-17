@@ -84,8 +84,12 @@ def prepare_environment(environ: MutableMapping[str, str] = os.environ) -> list[
             wanted["PYTORCH_TUNABLEOP_ENABLED"] = "1"
             try:
                 from .config import default_state_dir
+                from .models.registry import model_slug
 
-                wanted["PYTORCH_TUNABLEOP_FILENAME"] = str(default_state_dir() / "tunableop_%d.csv")
+                # tuned GEMMs are per model: <state_dir>/tunableop/<id>@<rev8>/ (CLEF_MODEL from `environ`);
+                # the engine creates the directory before the load
+                tdir = default_state_dir() / "tunableop" / model_slug(environ)
+                wanted["PYTORCH_TUNABLEOP_FILENAME"] = str(tdir / "tunableop_%d.csv")
             except Exception:  # pragma: no cover - cosmetic
                 pass
     if sys.platform == "darwin":

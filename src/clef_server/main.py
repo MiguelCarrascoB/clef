@@ -61,11 +61,12 @@ from .classify import (
 )
 from .config import VERSION, Config
 from .db import DatabaseError, is_unavailable, open_database
-from .engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge
+from .engine import Engine, EngineNotReady, GpuOutOfMemory, InputTooLarge, Prepared
 from .logs import install_access_filter, request_id_var, setup_logging, uvicorn_log_config
 from .media import MediaError, load_media
+from .models import UnknownModel
+from .models.registry import served_model
 from .schemas import (
-    DEFAULT_MODEL,
     BatchRequest,
     BatchResponse,
     ErrorBody,
@@ -86,7 +87,7 @@ ERRORS: dict[int | str, dict[str, Any]] = {
     for c, d in {
         400: "Invalid input",
         401: "Missing/invalid API key",
-        404: "Unknown classifier",
+        404: "Unknown classifier, or a model this server does not serve",
         409: "Too many saved classifiers",
         413: "Request too large",
         429: "Rate limit exceeded (see Retry-After)",
@@ -120,10 +121,18 @@ def _error(request: Request, status: int, detail: str, headers: dict[str, str] |
     return JSONResponse({"detail": detail, "request_id": _rid(request)}, status_code=status, headers=headers)
 
 
+def wants_no_cache(request: Request) -> bool:
+    """`Cache-Control: no-cache` (the token anywhere in the header, any case): skip the cache lookup."""
+    header = request.headers.get("cache-control") or ""
+    return any(part.strip().split("=")[0].strip().lower() == "no-cache" for part in header.split(","))
+
+
 def map_exception(exc: Exception) -> ApiError:
     """Engine/media/validation exceptions -> contract HTTP errors (never leaks a traceback)."""
     if isinstance(exc, ApiError):
         return exc
+    if isinstance(exc, UnknownModel):
+        return ApiError(404, str(exc))
     if isinstance(exc, GpuOutOfMemory):
         return ApiError(503, str(exc) or "GPU out of memory, retry shortly")
     if isinstance(exc, EngineNotReady):
@@ -303,7 +312,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             await asyncio.to_thread(db.close)
 
     app = FastAPI(
-        title="clef-flash local",
+        title="clef local",
         version=VERSION,
         lifespan=lifespan,
         description=(
@@ -381,19 +390,35 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         }
         if cfg.log_state:
             rec["state_preview"] = json.dumps(reqs[0].state, default=str, ensure_ascii=False)[:200]
-        results = await decide(reqs, batch=batch, label=label, priority="interactive")
+        cache = not wants_no_cache(request)
+        results = await decide(reqs, batch=batch, label=label, priority="interactive", cache=cache)
         rec["input_tokens"] = sum(int(r.get("usage", {}).get("input_tokens", 0)) for r in results)
         return results
 
     async def decide(
-        reqs: list[SystemOneRequest], batch: bool = True, label: str = "batch", priority: str = "background"
+        reqs: list[SystemOneRequest],
+        batch: bool = True,
+        label: str = "batch",
+        priority: str = "background",
+        cache: bool = True,
     ) -> list[dict[str, Any]]:
-        """Limits, media load (threadpool), ONE engine.decide(). No request needed (background work).
+        """Limits, media load (threadpool), ONE engine call. No request needed (background work).
 
         ``priority`` picks the engine lane: background by default (jobs), interactive from ``infer``.
+        = decide_prepared(await prepare(...)).
         """
+        prepared = await prepare(reqs, batch=batch, label=label, cache=cache)
+        return await decide_prepared(prepared, priority=priority)
+
+    async def prepare(
+        reqs: list[SystemOneRequest], batch: bool = True, label: str = "batch", cache: bool = True
+    ) -> Prepared:
+        """Limits, the model check (404 before any inference), media load (threadpool) and engine.prepare
+        (capabilities, cache lookup, tokenizing in threads). Nothing is queued until decide_prepared."""
+        ids = []
         for i, r in enumerate(reqs):
             check_limits(r, cfg, f"{label}[{i}]." if batch else "")
+            ids.append(served_model(eng, r.model))
         gpu_ready()
 
         def build() -> list[dict[str, Any]]:
@@ -403,11 +428,19 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                     images, videos = load_media(r.images, r.videos, cfg)
                 except MediaError as exc:
                     raise MediaError(f"{label}[{i}].{exc}" if batch else str(exc)) from exc
-                records.append(r.to_record(images, videos))
+                records.append({**r.to_record(images, videos), "model": ids[i]})
             return records
 
         records = await run_in_threadpool(build)
-        return await eng.decide(records, priority=priority)
+        if callable(getattr(eng, "prepare", None)):
+            return await eng.prepare(records, cache=cache)
+        return Prepared(records, [None] * len(records), {}, [None] * len(records))  # test engines
+
+    async def decide_prepared(prepared: Prepared, priority: str = "background") -> list[dict[str, Any]]:
+        """Queue prepared records in the engine lane `priority` and await their results (input order)."""
+        if callable(getattr(eng, "submit", None)):
+            return await eng.submit(prepared, priority=priority)
+        return await eng.decide(prepared.records, priority=priority)  # test engines
 
     def with_total(res: dict[str, Any], total_ms: float) -> dict[str, Any]:
         return {**res, "timing": {**res.get("timing", {}), "total_ms": round(total_ms, 1)}}
@@ -445,9 +478,10 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         return {"usage": out.get("usage", {}), "timing": out["timing"]}
 
     def classify_one(
-        res: dict[str, Any], labels: Any, multi: bool, thr: float | None, model: str, ms: float
+        res: dict[str, Any], labels: Any, multi: bool, thr: float | None, model: str | None, ms: float
     ) -> dict[str, Any]:
-        return {**classify_result(res["answers"], labels, multi, thr, model), **usage_timing(res, ms)}
+        served = res.get("model") or model  # the engine reports the served id
+        return {**classify_result(res["answers"], labels, multi, thr, served), **usage_timing(res, ms)}
 
     async def run_classify(
         request: Request,
@@ -457,7 +491,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         instructions: str | None,
         multi_label: bool,
         threshold: float | None,
-        model: str,
+        model: str | None,
         images: list[str] | None,
         videos: list[str] | None,
         classifier: str | None = None,
@@ -484,7 +518,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         instructions: str | None,
         multi_label: bool,
         threshold: float | None,
-        model: str,
+        model: str | None,
         classifier: str | None = None,
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
@@ -513,7 +547,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         state: Any,
         levels: list[str],
         instructions: str | None,
-        model: str,
+        model: str | None,
         images: list[str] | None,
         videos: list[str] | None,
         classifier: str | None = None,
@@ -526,7 +560,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         except Exception as exc:
             raise map_exception(exc) from exc
         out = {
-            **score_result(results[0]["answers"], levels, model),
+            **score_result(results[0]["answers"], levels, results[0].get("model") or model),
             **usage_timing(results[0], (time.perf_counter() - t0) * 1000),
             "request_id": _rid(request),
         }
@@ -738,7 +772,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                 request,
                 levels=doc["levels"],
                 instructions=doc.get("instructions"),
-                model=DEFAULT_MODEL,
+                model=body.model,
                 **common,
             )
         return await run_classify(
@@ -747,7 +781,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             instructions=doc.get("instructions"),
             multi_label=bool(doc.get("multi_label")),
             threshold=run_threshold(doc, body.threshold),
-            model=DEFAULT_MODEL,
+            model=body.model,
             **common,
         )
 
@@ -771,11 +805,22 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             instructions=doc.get("instructions"),
             multi_label=bool(doc.get("multi_label")),
             threshold=run_threshold(doc, body.threshold),
-            model=DEFAULT_MODEL,
+            model=body.model,
             classifier=name,
         )
 
     # ---- observability
+    def model_info() -> dict[str, Any]:
+        """The served model (engine.model_info(): id, adapter, revision, ref, capabilities, distribution)."""
+        fn = getattr(eng, "model_info", None)
+        if callable(fn):
+            try:
+                return dict(fn())
+            except Exception:
+                log.exception("engine.model_info() failed")
+        model_id = served_model(eng, None)
+        return {"id": model_id, "adapter": None, "revision": None, "ref": f"{model_id}@local"}
+
     def info() -> dict[str, Any]:
         try:
             return dict(eng.info())
@@ -843,6 +888,8 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         run_classify_batch=run_classify_batch,
         run_score=run_score,
         db=db,
+        prepare=prepare,
+        decide_prepared=decide_prepared,
     )
     app.state.ctx = ctx
     for name in FEATURES:
@@ -863,6 +910,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             "error": eng.error,
             "limits": cfg.public_limits(),
             "db": db.info(),
+            "model": model_info(),
         }
         return JSONResponse(body, status_code=200 if ok else 503)
 
@@ -881,7 +929,6 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     async def schema_example() -> dict[str, Any]:
         return {
             "text_json": {
-                "model": "clef-flash",
                 "state": {"ticket": {"text": "Checkout errors, orders blocked.", "customers_affected": 1200}},
                 "questions": {
                     "department": {
@@ -894,7 +941,6 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                 },
             },
             "media": {
-                "model": "clef-flash",
                 "state": "Review the attached receipt.",
                 "images": ["data:image/jpeg;base64,<base64 bytes of the image>"],
                 "videos": ["data:video/mp4;base64,<base64 bytes of the video>"],
@@ -907,6 +953,10 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             },
             "batch": {"batch": ["<1..N systemone request objects, media allowed>"]},
             "auth": "If CLEF_API_KEY is set send X-API-Key: <key> or Authorization: Bearer <key> on /v1/*.",
+            "model": (
+                f"Omit `model` to use the served model ({served_model(eng, None)!r}, see GET /v1/models); "
+                "a model this server does not serve is 404."
+            ),
             "note": "clef returns CALIBRATED PROBABILITIES for every option in one forward pass - no text generation.",  # noqa: E501
         }
 

@@ -108,8 +108,9 @@ class Config:
     # model / device
     # None = resolve: ~/models/clef-flash if it holds a release, else the pinned HF cache snapshot (paths.py)
     model_path: str | None = field(default_factory=lambda: os.environ.get("CLEF_MODEL_PATH") or None)
-    model_repo: str = field(default_factory=lambda: _str("CLEF_MODEL_REPO", MODEL_REPO))
-    model_revision: str = field(default_factory=lambda: _str("CLEF_MODEL_REVISION", MODEL_REVISION))
+    # Aliases of CLEF_MODEL (models/registry.py resolve_spec): None = the selected catalog entry's repo / pin.
+    model_repo: str | None = field(default_factory=lambda: _env("CLEF_MODEL_REPO"))
+    model_revision: str | None = field(default_factory=lambda: _env("CLEF_MODEL_REVISION"))
     device: str = field(default_factory=lambda: _str("CLEF_DEVICE", "auto").lower())  # see DEVICES
     dtype: str = field(default_factory=lambda: _str("CLEF_DTYPE", "auto").lower())  # see DTYPES
     quant: str = field(
@@ -210,6 +211,9 @@ class Config:
     # C1: database (docs/jobs.md, ARCHITECTURE Storage). Unset = sqlite:///<state_dir>/clef.db.
     database_url: str | None = field(default_factory=lambda: _env("CLEF_DATABASE_URL"))
     database_pool_size: int = field(default_factory=lambda: _int("CLEF_DATABASE_POOL_SIZE", 5))
+    # C2: the decision model. CLEF_MODEL=<id>[@<revision>] from the catalog (`clef models`); None = clef-flash
+    # (or the catalog entry whose repo is CLEF_MODEL_REPO). Resolved by models.registry.resolve_spec.
+    model: str | None = field(default_factory=lambda: _env("CLEF_MODEL"))
 
     def __post_init__(self) -> None:
         for name, value, allowed in (
@@ -234,6 +238,16 @@ class Config:
         if self.drain_s < 0:
             raise ValueError("CLEF_DRAIN_S must be >= 0 (0 = no drain)")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
+        # C2: CLEF_MODEL syntax and the @rev / CLEF_MODEL_REVISION alias (an unknown id is a load error)
+        if self.model:
+            model_id, sep, rev = self.model.strip().partition("@")
+            if sep and (not model_id or not rev):
+                raise ValueError(f"CLEF_MODEL={self.model!r} must be <id> or <id>@<revision>")
+            if rev and self.model_revision and rev != self.model_revision:
+                raise ValueError(
+                    f"CLEF_MODEL={self.model!r} and CLEF_MODEL_REVISION={self.model_revision!r} disagree; "
+                    "set only one"
+                )
 
     def api_keys(self) -> dict[str, str]:
         """name -> key (empty dict = auth disabled)."""

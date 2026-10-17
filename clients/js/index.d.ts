@@ -188,6 +188,8 @@ export class ClefClient {
   ): Promise<Record<string, any>>;
   batch(records: Array<Record<string, any>>): Promise<Record<string, any>>;
   health(): Promise<Record<string, any>>;
+  /** The model the server serves (OpenAI list format). Omit `model` in requests to use it. */
+  models(): Promise<Array<Record<string, any>>>;
   stats(): Promise<Record<string, any>>;
   classify(input: unknown, labels: Labels, opts?: ClassifyOptions): Promise<Classification>;
   classifyMany(inputs: unknown[], labels: Labels, opts?: ClassifyManyOptions): Promise<Classification[]>;
