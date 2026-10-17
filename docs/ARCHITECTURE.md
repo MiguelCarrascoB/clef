@@ -725,9 +725,16 @@ Engine setup:
   `foreign_keys=ON`, `busy_timeout=30000`; writes are serialised by the `tx()` RLock + `BEGIN IMMEDIATE`. A new file
   is created `0600` on POSIX.
 - Postgres: `pool_size=CLEF_DATABASE_POOL_SIZE`, `max_overflow=pool_size`, `pool_pre_ping=True`. At open, a dedicated
-  connection takes `pg_try_advisory_lock(1667032422)` and holds it for the process lifetime; a second server on the
-  same DB fails with `DatabaseError("another clef server holds this database (one server per database)")`. The CLI
-  commands do not take the lock.
+  connection (its own `NullPool` engine, libpq TCP keepalives `keepalives=1`, `keepalives_idle=10`,
+  `keepalives_interval=5`, `keepalives_count=3`; never a pooled connection) takes `pg_try_advisory_lock(1667032422)`
+  and holds it for the process lifetime; a second server on the same DB fails with `DatabaseError("another clef
+  server holds this database (one server per database)")`. The CLI commands do not take the lock.
+- Lock heartbeat (`Database.start_heartbeat`, started by the lifespan): a daemon thread checks every 10 s, on the lock
+  connection, `SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND objid = <key> AND
+  granted` (an error counts as lost: the session, and so the lock, is gone). When lost, a second server may already
+  own the DB: it logs CRITICAL, sets `lock_lost` (`tx()` then raises `DatabaseError`, `claim_next` returns None) and
+  exits the process with status 3 at once (`os._exit`: no shutdown hooks, which would write), so a supervisor
+  restarts it; the restarted server takes the lock again or stops at startup.
 - `open_database` is called once in `create_app` and published as `ctx.db`. `JobStore`, `ClassifierStore` and the
   later stores receive it; nothing else opens connections. The lifespan closes `ctx.db` after the shutdown hooks
   (`runner.stop` no longer closes the store).

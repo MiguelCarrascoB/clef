@@ -233,8 +233,11 @@ class JobStore:
 
         Interrupted jobs first (they were running), then FIFO by ``seq``. ``FOR UPDATE SKIP LOCKED`` on
         Postgres; on SQLite ``BEGIN IMMEDIATE`` serialises. The returned row is the running job plus
-        ``claimed_from`` (its status before the claim: "queued" or "interrupted").
+        ``claimed_from`` (its status before the claim: "queued" or "interrupted"). None once the server lock
+        on Postgres is lost (another server may own the database; this one is exiting).
         """
+        if self.db.lock_lost:
+            return None
         with self.db.tx() as conn:
             row = conn.execute(
                 select(_JOBS.c.id, _JOBS.c.status)

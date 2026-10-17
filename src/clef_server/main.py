@@ -294,6 +294,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         log.info("starting clef server %s (model load runs in background)", VERSION)
         app_.state.draining = False
         eng.start()
+        db.start_heartbeat()  # Postgres: exit (status 3) if the one-server lock is ever lost
         task = asyncio.create_task(sampler())
         for hook in ctx.on_startup:
             await hook()

@@ -327,6 +327,83 @@ def test_second_server_on_the_same_postgres_database_is_refused(cfg, db_backend)
     open_database(cfg).close()  # released with the first server
 
 
+def test_a_lost_server_lock_stops_the_server(cfg, db_backend, caplog):
+    if db_backend != "postgres":
+        pytest.skip("advisory lock: Postgres only")
+    first = open_database(cfg)
+    store = JobStore(first)
+    submit_row = store.create("classify", None, {"inputs": ["a"], "labels": LABELS}, None, None, 1)
+    lost = threading.Event()
+    assert first.server_lock_held()
+    first.start_heartbeat(interval=0.1, on_lost=lost.set)
+    pid = first._pg_lock.exec_driver_sql("SELECT pg_backend_pid()").scalar()
+    with first.engine.connect() as conn:  # the lock's backend dies (a restart, a network cut, an admin)
+        assert conn.execute(text("SELECT pg_terminate_backend(:p)"), {"p": pid}).scalar()
+        conn.commit()
+    with caplog.at_level("CRITICAL", logger="clef"):
+        assert lost.wait(10)
+    assert any("server lock" in r.getMessage() and r.levelname == "CRITICAL" for r in caplog.records)
+    assert first.lock_lost and not first.server_lock_held()
+    assert store.claim_next() is None  # no more claims: another server may own the database now
+    with pytest.raises(DatabaseError, match="server lock"):
+        store.claim(submit_row["id"])
+    second = open_database(cfg)  # which is why the first one must exit
+    assert JobStore(second).get(submit_row["id"])["status"] == "queued"
+    second.close()
+    first.close()
+
+
+def test_a_lost_server_lock_exits_the_process_with_status_3(cfg, db_backend):
+    if db_backend != "postgres":
+        pytest.skip("advisory lock: Postgres only")
+    code = (
+        "import sys, time; from clef_server.config import Config; from clef_server.db import open_database\n"
+        "db = open_database(Config(state_dir=sys.argv[1]))\n"
+        "db.start_heartbeat(interval=0.1)\n"
+        "print(db._pg_lock.exec_driver_sql('SELECT pg_backend_pid()').scalar(), flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    src = str(Path(db_mod.__file__).parents[1])
+    env = dict(os.environ, PYTHONPATH=src)
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, cfg.state_dir], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    try:
+        pid = int(child.stdout.readline())
+        probe = Database(database_url(cfg))
+        with probe.engine.connect() as conn:
+            conn.execute(text("SELECT pg_terminate_backend(:p)"), {"p": pid})
+            conn.commit()
+        probe.close()
+        assert child.wait(15) == db_mod.LOCK_LOST_EXIT
+        assert b"lost the server lock" in child.stderr.read()
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_the_server_lock_has_its_own_connection_with_tcp_keepalives(cfg, db_backend):
+    if db_backend != "postgres":
+        pytest.skip("advisory lock: Postgres only")
+    from sqlalchemy.pool import NullPool
+
+    database = open_database(cfg)
+    try:
+        assert isinstance(database._pg_lock.engine.pool, NullPool)  # never handed out, never recycled
+        assert database._pg_lock.engine is not database.engine
+        dsn = database._pg_lock.connection.dbapi_connection.info.dsn
+        assert "keepalives=1" in dsn and "keepalives_idle=" in dsn
+    finally:
+        database.close()
+
+
+def test_heartbeat_is_a_noop_on_sqlite(db, db_backend):
+    if db_backend != "sqlite":
+        pytest.skip("SQLite-specific test")
+    db.start_heartbeat(interval=0.01, on_lost=lambda: pytest.fail("no lock to lose on SQLite"))
+    assert db.server_lock_held() and not db.lock_lost
+
+
 def test_claim_next_hands_each_job_to_exactly_one_claimer(db):
     store = JobStore(db)
     ids = {store.create("classify", None, {}, None, None, 0)["id"] for _ in range(40)}

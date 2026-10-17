@@ -358,7 +358,9 @@ review, router and batch tables live there too. One clef server per database: Po
   `pg_dump` command instead (exit 2).
 * **One server per database.** On Postgres a server holds an advisory lock for its lifetime; a second server on the
   same database stops at startup with `another clef server holds this database (one server per database)`. The
-  CLI commands do not take the lock. On SQLite nothing enforces it: do not point two servers at one state dir
+  server checks every 10 s that it still holds the lock; if it lost it (its database connection was cut or
+  killed), it logs a CRITICAL line and exits with status 3 at once, so run it under a supervisor that restarts it
+  (systemd `Restart=on-failure`, Docker `restart: unless-stopped`). The CLI commands do not take the lock. On SQLite nothing enforces it: do not point two servers at one state dir
   (each would recover the other's running job at startup).
 * **Errors.** A database that cannot be reached answers `503 database unavailable`. Drop everything by deleting
   `clef.db` (SQLite) or the database (Postgres) with the server stopped.

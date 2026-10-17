@@ -28,7 +28,7 @@ from sqlalchemy import create_engine, event, func, insert, inspect, select, upda
 from sqlalchemy.engine import Connection, Engine, make_url
 from sqlalchemy.exc import ArgumentError, OperationalError
 from sqlalchemy.exc import DatabaseError as SADatabaseError
-from sqlalchemy.pool import QueuePool
+from sqlalchemy.pool import NullPool, QueuePool
 
 from . import dbschema as t
 
@@ -36,6 +36,14 @@ log = logging.getLogger("clef")
 logging.getLogger("alembic").setLevel(logging.WARNING)  # per-plugin INFO noise; upgrade() logs the result
 
 PG_LOCK_KEY = 1667032422  # pg_try_advisory_lock key held by the one server on a database
+LOCK_HEARTBEAT_S = 10.0  # how often a server checks it still holds PG_LOCK_KEY
+LOCK_LOST_EXIT = 3  # exit status when it does not (a supervisor restarts the server)
+# libpq TCP keepalives on the lock connection: a dead peer is noticed in ~25 s, not after the OS's 2 hours
+_LOCK_KEEPALIVES = {"keepalives": 1, "keepalives_idle": 10, "keepalives_interval": 5, "keepalives_count": 3}
+_LOCK_HELD = (
+    "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+    f" AND classid = 0 AND objid = {PG_LOCK_KEY} AND objsubid = 1 AND granted"
+)
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 _NEEDS_PSYCOPG = (
     "CLEF_DATABASE_URL is Postgres but psycopg is not installed: pip install 'clef-local[postgres]'"
@@ -131,6 +139,9 @@ class Database:
         self._lock = threading.RLock()
         self._local = threading.local()
         self._pg_lock: Connection | None = None
+        self._heartbeat: threading.Thread | None = None
+        self._closing = threading.Event()
+        self.lock_lost = False  # set by the heartbeat; tx() refuses from then on
         self._version: str | None = None
         if self.dialect == "sqlite":
             if not parsed.database or parsed.database == ":memory:":
@@ -185,6 +196,8 @@ class Database:
         if current is not None:
             yield current
             return
+        if self.lock_lost:
+            raise DatabaseError("lost the server lock on this database: not writing (the server is exiting)")
         lock = self._lock if self.dialect == "sqlite" else contextlib.nullcontext()
         with lock, self.engine.connect() as conn:
             conn.execution_options(clef_write=True)
@@ -299,25 +312,83 @@ class Database:
 
     # ---- one server per database
     def acquire_server_lock(self) -> None:
-        """Postgres: hold ``pg_try_advisory_lock`` for the process lifetime (SQLite: nothing to do)."""
+        """Postgres: hold ``pg_try_advisory_lock`` for the process lifetime (SQLite: nothing to do).
+
+        The lock lives on a dedicated connection (its own NullPool engine, TCP keepalives), never on a pooled
+        one that could be recycled or die idle unnoticed; :meth:`start_heartbeat` checks it is still held.
+        """
         if self.dialect != "postgresql" or self._pg_lock is not None:
             return
         try:
-            conn = self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+            lock_engine = create_engine(self.url, poolclass=NullPool, connect_args=dict(_LOCK_KEEPALIVES))
+            conn = lock_engine.connect().execution_options(isolation_level="AUTOCOMMIT")
         except OperationalError as exc:
             raise DatabaseError(f"cannot connect to {self.display_url}: {exc.orig}") from exc
         if not conn.execute(select(func.pg_try_advisory_lock(PG_LOCK_KEY))).scalar():
             conn.close()
+            lock_engine.dispose()
             raise DatabaseError("another clef server holds this database (one server per database)")
         self._pg_lock = conn
 
+    def server_lock_held(self) -> bool:
+        """True on SQLite; on Postgres, whether the lock connection is alive and still holds the lock."""
+        if self.dialect != "postgresql":
+            return True
+        conn = self._pg_lock
+        if conn is None or self.lock_lost:
+            return False
+        try:
+            return conn.exec_driver_sql(_LOCK_HELD).first() is not None
+        except Exception:  # the backend died (pg_terminate_backend, a restart, a network cut): lock gone
+            return False
+
+    def start_heartbeat(self, interval: float = LOCK_HEARTBEAT_S, on_lost: Any = None) -> None:
+        """Postgres: a daemon thread checks the lock every ``interval`` s. When it is gone, a second server
+        may already own the database: log CRITICAL, refuse every write (``tx()``, so no more claims) and call
+        ``on_lost`` (default: exit the process with status 3 at once, without touching the database)."""
+        if self.dialect != "postgresql" or self._pg_lock is None or self._heartbeat is not None:
+            return
+        callback = on_lost or _exit_lock_lost
+
+        def beat() -> None:
+            while not self._closing.wait(interval):
+                if self.server_lock_held():
+                    continue
+                if self._closing.is_set():
+                    return
+                self.lock_lost = True
+                log.critical(
+                    "database: lost the server lock on %s (one server per database): stopping now so a"
+                    " supervisor restarts this server",
+                    self.display_url,
+                )
+                callback()
+                return
+
+        self._heartbeat = threading.Thread(target=beat, name="clef-db-lock", daemon=True)
+        self._heartbeat.start()
+
     def close(self) -> None:
         """Release the server lock and the pool (idempotent; the engine reconnects if used again)."""
+        self._closing.set()
+        if self._heartbeat is not None:
+            self._heartbeat.join(timeout=5)
+            self._heartbeat = None
         if self._pg_lock is not None:
+            lock_engine = self._pg_lock.engine
             with contextlib.suppress(Exception):
                 self._pg_lock.close()
+            lock_engine.dispose()
             self._pg_lock = None
         self.engine.dispose()
+        self._closing = threading.Event()
+
+
+def _exit_lock_lost() -> None:
+    for handler in logging.getLogger().handlers + log.handlers:  # the CRITICAL line must reach the log file
+        with contextlib.suppress(Exception):
+            handler.flush()
+    os._exit(LOCK_LOST_EXIT)  # no shutdown hooks: they would write to a database another server may own
 
 
 # ------------------------------------------------------------------ startup
