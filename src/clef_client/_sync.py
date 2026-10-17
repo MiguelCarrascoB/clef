@@ -208,13 +208,20 @@ class ClefClient:
         webhook: str | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        priority: str | None = None,
+        urgent: bool = False,
+        schedule: dict[str, Any] | None = None,
+        expire_after_s: float | None = None,
     ) -> Job:
         """Queue a job and return at once. ``webhook``: a URL, or ``{"url", "secret", "events"}``.
+
+        ``priority`` ("low" | "normal" | "high"), ``urgent`` (needs the ``urgent`` scope), ``schedule``
+        (``{"window": "20:00-06:00", "tz": "Europe/Madrid"}``) and ``expire_after_s``: see docs/jobs.md.
 
         ``idempotency_key``: submitting again with the same key (same API key) returns the job created the
         first time instead of a duplicate, so a lost response can be retried safely.
         """
-        body = c.job_body(kind, payload, webhook, metadata)
+        body = c.job_body(kind, payload, webhook, metadata, priority, urgent, schedule, expire_after_s)
         return parse_job(
             self._request("POST", "/v1/jobs", json=body, headers=c.idem_headers(idempotency_key))
         )

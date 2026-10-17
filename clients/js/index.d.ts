@@ -101,6 +101,14 @@ export interface JobOptions {
    * network error after the request was sent is not retried (it could create a duplicate job).
    */
   idempotencyKey?: string;
+  /** Strict classes; waiting jobs age upwards. Default `normal`. */
+  priority?: 'low' | 'normal' | 'high';
+  /** Needs the `urgent` scope: top class, ignores the window. */
+  urgent?: boolean;
+  /** Run only inside this window, e.g. { window: '20:00-06:00', tz: 'Europe/Madrid' }. */
+  schedule?: { window: string; tz?: string };
+  /** Cancel (`expired`) this long after the job first could run. */
+  expireAfterS?: number;
 }
 
 export interface ClassifyJobOptions extends JobOptions {
@@ -138,6 +146,12 @@ export interface Job {
   hasErrors: boolean;
   /** e.g. "3 of 100 item(s) failed ...", failed webhook deliveries. */
   warnings: string[];
+  priority: 'low' | 'normal' | 'high' | 'urgent';
+  /** Why a queued / running job is not advancing right now. */
+  waitingReason: 'off_hours' | 'active_limit' | 'turn' | null;
+  nextWindowAt: string | null;
+  /** Cancelled because `expireAfterS` ran out. */
+  expired: boolean;
   raw: Record<string, any>;
 }
 

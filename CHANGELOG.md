@@ -14,6 +14,17 @@
   router and review helpers in the Python and JS clients, and an LLM line in `clef doctor`.
 - Saved classifiers accept `review_threshold` (single-label): interactive runs below it are queued for review. Review
   input text is dropped when resolved and after `CLEF_REVIEW_TTL_DAYS` (30).
+- **Job scheduler (E1)**: up to `CLEF_JOB_ACTIVE` (default 4) jobs run in turns, one chunk in flight across all of
+  them, so interactive requests keep their priority. `POST /v1/jobs` takes `priority` (`low|normal|high`; strict
+  classes, aging with `CLEF_JOB_AGING_S`), `urgent` (new `urgent` scope: top class, ignores the window), `schedule`
+  (`{"window": "20:00-06:00", "tz": ...}` or `CLEF_JOB_WINDOW` / `CLEF_JOB_TZ`; a job that leaves its window stays
+  `running` with `waiting_reason: "off_hours"`) and `expire_after_s` (counted from when the window opens; ends
+  `cancelled` with `error: "expired"`). Turns are shared fairly per key (stride scheduling). Job objects gain
+  `priority`, `urgent`, `schedule`, `waiting_reason`, `next_window_at`, `expired`, `model`, `tokens`;
+  `GET /v1/jobs?priority=`. The daily record quota is reserved at submit (UTC day of the submit, refunded for
+  what a cancelled / failed / expired job did not process); result-cache hits are not charged. Python API:
+  `JobRunner.submit/cancel/get`, `JobHandle.decide`, and the kind key `completed_if_all_failed`. New dependency
+  `tzdata` (server extra).
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
   503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)
   the first SIGTERM / Ctrl-C keeps the server up for N seconds answering `draining` (a second signal stops at once),

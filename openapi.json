@@ -1375,6 +1375,20 @@
       "JobCreate": {
         "additionalProperties": false,
         "properties": {
+          "expire_after_s": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 31536000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "cancel it ('expired') this long after it first could run",
+            "title": "Expire After S"
+          },
           "kind": {
             "description": "classify | score | systemone | any registered kind",
             "title": "Kind",
@@ -1398,6 +1412,34 @@
             "description": "kind-specific; see docs/jobs.md",
             "title": "Payload",
             "type": "object"
+          },
+          "priority": {
+            "default": "normal",
+            "description": "strict between classes; waiting jobs age upwards (CLEF_JOB_AGING_S)",
+            "enum": [
+              "low",
+              "normal",
+              "high"
+            ],
+            "title": "Priority",
+            "type": "string"
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobSchedule"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "run only inside this window (default: CLEF_JOB_WINDOW in CLEF_JOB_TZ)"
+          },
+          "urgent": {
+            "default": false,
+            "description": "needs the `urgent` scope: top class, ignores the window",
+            "title": "Urgent",
+            "type": "boolean"
           },
           "webhook": {
             "anyOf": [
@@ -1475,6 +1517,12 @@
             ],
             "title": "Eta S"
           },
+          "expired": {
+            "default": false,
+            "description": "cancelled because expire_after_s ran out",
+            "title": "Expired",
+            "type": "boolean"
+          },
           "finished_at": {
             "anyOf": [
               {
@@ -1517,6 +1565,41 @@
             ],
             "title": "Metadata"
           },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "model the job was submitted for",
+            "title": "Model"
+          },
+          "next_window_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "when the window opens next (off_hours only)",
+            "title": "Next Window At"
+          },
+          "priority": {
+            "default": "normal",
+            "enum": [
+              "low",
+              "normal",
+              "high",
+              "urgent"
+            ],
+            "title": "Priority",
+            "type": "string"
+          },
           "progress": {
             "$ref": "#/components/schemas/JobProgress"
           },
@@ -1538,6 +1621,19 @@
             "default": 0,
             "title": "Resumes",
             "type": "integer"
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "{window, tz} the job is restricted to",
+            "title": "Schedule"
           },
           "started_at": {
             "anyOf": [
@@ -1561,6 +1657,34 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "tokens": {
+            "default": 0,
+            "description": "sum of input_tokens of the stored rows",
+            "title": "Tokens",
+            "type": "integer"
+          },
+          "urgent": {
+            "default": false,
+            "title": "Urgent",
+            "type": "boolean"
+          },
+          "waiting_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "off_hours",
+                  "active_limit",
+                  "turn"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "why a queued / running job is not advancing right now",
+            "title": "Waiting Reason"
           },
           "warnings": {
             "description": "partial failure: failed items, failed webhook deliveries",
@@ -1730,6 +1854,35 @@
           "items"
         ],
         "title": "JobResultsPage",
+        "type": "object"
+      },
+      "JobSchedule": {
+        "additionalProperties": false,
+        "properties": {
+          "tz": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "IANA zone (default: CLEF_JOB_TZ)",
+            "title": "Tz"
+          },
+          "window": {
+            "description": "'HH:MM-HH:MM'; start > end crosses midnight, equal = 24 h",
+            "pattern": "^([01]\\d|2[0-3]):([0-5]\\d)-([01]\\d|2[0-3]):([0-5]\\d)$",
+            "title": "Window",
+            "type": "string"
+          }
+        },
+        "required": [
+          "window"
+        ],
+        "title": "JobSchedule",
         "type": "object"
       },
       "KeyCreate": {
@@ -7149,6 +7302,28 @@
                 }
               ],
               "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "priority",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "low",
+                    "normal",
+                    "high",
+                    "urgent"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Priority"
             }
           },
           {
