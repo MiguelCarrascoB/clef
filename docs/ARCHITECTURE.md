@@ -337,7 +337,7 @@ appears in `openapi.json`.
 
 ### Auth, rate limit, CORS (`security.py`)
 
-- Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration). When any key exists every `/v1/*` route, and the
+- Keys: `CLEF_API_KEY` and/or `CLEF_API_KEYS` (see Configuration; every env key is a full admin, and startup warns when there is more than one). When any key exists every `/v1/*` route, and the
   Hugging Face routes (`/hf/models/*`, `/models/*`), need `X-API-Key: <key>` or `Authorization: Bearer <key>` (401 +
   `WWW-Authenticate: Bearer` otherwise; the OpenAI and HF routes render that in their own error shape). For SSE
   `/v1/events?key=<key>` is also accepted for plain `EventSource` clients, which cannot set headers (the console

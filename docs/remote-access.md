@@ -63,7 +63,7 @@ IP (`GET /v1/admin/audit`, also in the console). Secrets are never recorded.
    ```
 
    `CLEF_API_KEYS` also accepts the list inline: `ci-bot:KEY1,laptop:KEY2`. `CLEF_API_KEY=KEY` is a single key named
-   `default`. These are env keys (full admin); for scoped keys with quotas use `clef keys create` instead of, or next
+   `default`. These are env keys (full admin: with several of them, each can see and delete every job, edit every classifier and mint keys, and the server warns at startup); for scoped keys with quotas use `clef keys create` instead of, or next
    to, them. Binding a non-loopback host with no key (env or managed) logs a loud warning at startup; do not ignore it.
 
 3. Allow the port through the firewall for your LAN only (below).
