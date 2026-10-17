@@ -9,7 +9,7 @@
 #   0. bench/profile_forward.py --batch 8     kernel/wall at batch 1 and 8: is batched serving GEMM-bound?
 #   1. parity: Engine.decide dumps (bench/parity.py --engine-dump) for flags off (base), a repeat of base
 #      (noise floor), CLEF_MASK_FREE=1 (mask), CLEF_FAST_HEAD=1 (head) and both; each compared with base.
-#      PASS = 0 top-1 flips and max |dp| <= TOL (2e-3), singles and micro-batched.
+#      PASS = 0 top-1 flips (near-ties apart) and max |dp| <= TOL (max(2e-3, 2 x the measured noise)), near-tie flips (ref top-2 margin < 1e-3) reported apart, singles and micro-batched.
 #   2. speed: for each variant a fresh `clef serve --detach` + `clef bench` (single c=1, concurrent c=8,16).
 #   3. TunableOp on vs off: base and both with CLEF_TUNABLEOP=1. A first pass tunes (CSV in the variant's own
 #      state dir, so your real tuned files are untouched); the parity dump and the timed bench use the tuned
@@ -80,10 +80,14 @@ serve_bench() { # serve_bench <variant> <requests> <out txt>
   local v=$1
   if ! vrun "$v" "${CLEF[@]}" serve --detach --timeout 1800; then
     fail "server did not start for $v"
+    vrun "$v" "${CLEF[@]}" stop >/dev/null 2>&1 || true # a half-started server must not keep the GPU
     return 1
   fi
   vrun "$v" "${CLEF[@]}" bench --concurrency "$LEVELS" --requests "$2" 2>&1 | tee "$3"
+  local rc=${PIPESTATUS[0]}
+  [ "$rc" = 0 ] || fail "bench $v exited $rc (see $3)"
   vrun "$v" "${CLEF[@]}" stop
+  return "$rc"
 }
 
 # ---------------------------------------------------------------- step 0
@@ -104,7 +108,16 @@ fi
 variants=${ONLY:-"mask head both"}
 if [ "${SKIP_NOISE:-0}" != 1 ]; then
   note "parity noise floor: base twice (informational)"
-  if dump base "$OUT/dump_base2.json"; then compare noise "$OUT/dump_base.json" "$OUT/dump_base2.json" info; fi
+  if dump base "$OUT/dump_base2.json"; then
+    compare noise "$OUT/dump_base.json" "$OUT/dump_base2.json" info
+    # threshold = max(TOL, 2 x measured noise): the flags are not judged tighter than the run-to-run jitter
+    if line=$("$PY" bench/parity.py --noise "$OUT/dump_base.json" "$OUT/dump_base2.json" --tol "$TOL"); then
+      echo "$line" | tee "$OUT/noise_floor.txt"
+      TOL=$(echo "$line" | awk '{print $4}')
+    else
+      echo "could not compute the noise floor; keeping TOL=$TOL"
+    fi
+  fi
 fi
 for v in $variants; do
   note "parity: $v (${VENV[$v]})"
