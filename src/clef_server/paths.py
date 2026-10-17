@@ -37,7 +37,7 @@ def classifiers_dir(cfg: Any) -> Path:
 
 
 def jobs_db(cfg: Any) -> Path:
-    """The v3.1 SQLite file (jobs only); renamed to clef.db once at startup (db.migrate_legacy_file)."""
+    """The v3.1 SQLite file (jobs only); copied to clef.db once at startup (db.migrate_legacy_file)."""
     return state_dir(cfg) / "jobs.db"
 
 

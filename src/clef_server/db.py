@@ -439,18 +439,15 @@ def migrate_legacy_file(cfg: Any) -> None:
                 dst.execute("PRAGMA journal_mode=DELETE")  # self-contained: no -wal beside the tmp file
             finally:
                 dst.close()
-            fd = os.open(tmp, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            with open(tmp, "rb+") as fh:  # Windows: fsync (FlushFileBuffers) needs a writable handle
+                os.fsync(fh.fileno())
             os.replace(tmp, new)
         except BaseException:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(tmp)
             raise
         _fsync_dir(new.parent)
-    except sqlite3.DatabaseError as exc:
+    except (sqlite3.DatabaseError, OSError) as exc:
         raise DatabaseError(f"cannot copy {old} to {new.name}: {exc}") from exc
     finally:
         src.close()  # the last connection: SQLite checkpoints jobs.db-wal into jobs.db and removes it
@@ -459,11 +456,15 @@ def migrate_legacy_file(cfg: Any) -> None:
     while kept.exists():
         n += 1
         kept = old.with_name(f"{old.name}.migrated.{n}")
-    os.replace(old, kept)
-    with contextlib.suppress(FileNotFoundError):
-        os.replace(f"{old}-wal", f"{kept}-wal")
-    with contextlib.suppress(FileNotFoundError):
-        os.unlink(f"{old}-shm")
+    try:
+        os.replace(old, kept)
+        with contextlib.suppress(FileNotFoundError):
+            os.replace(f"{old}-wal", f"{kept}-wal")
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(f"{old}-shm")
+    except OSError as exc:  # clef.db is complete; a leftover jobs.db only means the both-files WARNING
+        log.warning("database: copied %s to %s but could not rename the original: %s", old, new, exc)
+        return
     log.info("database: copied %s to %s (one-time migration; the original is now %s)", old, new, kept.name)
 
 
