@@ -14,6 +14,10 @@ VERSION = "3.1.0"
 MODEL_REPO = "Cloudflare/clef-flash"
 MODEL_REVISION = "17f0b0ad64efb65d273590632833508766b2aae6"
 
+# E2: the router's LLM defaults to Gemini's OpenAI-compatible endpoint (ollama, LM Studio, OpenAI: set URL).
+DEFAULT_LLM_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+DEFAULT_LLM_MODEL = "gemini-3.8-flash"
+
 DEVICES = ("auto", "cuda", "rocm", "mps", "cpu")
 DTYPES = ("auto", "bfloat16", "float16", "float32")
 QUANTS = ("none", "int8", "nf4")
@@ -225,6 +229,22 @@ class Config:
     mask_free: bool = field(default_factory=lambda: _bool("CLEF_MASK_FREE", False))
     fast_head: bool = field(default_factory=lambda: _bool("CLEF_FAST_HEAD", False))
 
+    # E2: the router's LLM (llm.py) and the review queue (router.py). The router is OFF unless a key is set in
+    # the process environment (GEMINI_API_KEY or CLEF_LLM_API_KEY): the key is the consent to send buffered
+    # inputs. clef reads no .env file itself; docker compose / the systemd EnvironmentFile set the variable.
+    llm_api_key: str | None = field(
+        default_factory=lambda: _env("CLEF_LLM_API_KEY") or _env("GEMINI_API_KEY"), repr=False
+    )
+    llm_base_url: str = field(default_factory=lambda: _str("CLEF_LLM_BASE_URL", DEFAULT_LLM_BASE_URL))
+    llm_model: str = field(default_factory=lambda: _str("CLEF_LLM_MODEL", DEFAULT_LLM_MODEL))
+    llm_timeout_s: float = field(default_factory=lambda: _float("CLEF_LLM_TIMEOUT_S", 60.0))
+    router_batch: int = field(default_factory=lambda: _int("CLEF_ROUTER_BATCH", 20))  # items per LLM call
+    router_cold_batch: int = field(default_factory=lambda: _int("CLEF_ROUTER_COLD_BATCH", 20))
+    router_flush_s: float = field(default_factory=lambda: _float("CLEF_ROUTER_FLUSH_S", 3600.0))
+    router_max_input_chars: int = field(default_factory=lambda: _int("CLEF_ROUTER_MAX_INPUT_CHARS", 500))
+    router_max_new_per_day: int = field(default_factory=lambda: _int("CLEF_ROUTER_MAX_NEW_PER_DAY", 5))
+    review_ttl_days: float = field(default_factory=lambda: _float("CLEF_REVIEW_TTL_DAYS", 30.0))  # 0 = keep
+
     def __post_init__(self) -> None:
         for name, value, allowed in (
             ("CLEF_DEVICE", self.device.split(":")[0], DEVICES),
@@ -251,6 +271,16 @@ class Config:
             raise ValueError("CLEF_CACHE_SIZE must be >= 0 (0 = off)")
         if self.cache_mb < 0:
             raise ValueError("CLEF_CACHE_MB must be >= 0 (0 = off)")
+        if self.llm_timeout_s <= 0:
+            raise ValueError("CLEF_LLM_TIMEOUT_S must be > 0")
+        if not 2 <= self.router_batch <= 100 or not 2 <= self.router_cold_batch <= 100:
+            raise ValueError("CLEF_ROUTER_BATCH and CLEF_ROUTER_COLD_BATCH must be within [2, 100]")
+        if self.router_flush_s < 0 or self.review_ttl_days < 0 or self.router_max_new_per_day < 0:
+            raise ValueError(
+                "CLEF_ROUTER_FLUSH_S, CLEF_REVIEW_TTL_DAYS, CLEF_ROUTER_MAX_NEW_PER_DAY must be >= 0"
+            )
+        if self.router_max_input_chars < 20:
+            raise ValueError("CLEF_ROUTER_MAX_INPUT_CHARS must be >= 20")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
         # C2: CLEF_MODEL syntax and the @rev / CLEF_MODEL_REVISION alias (an unknown id is a load error)
         if self.model:

@@ -47,6 +47,13 @@ def _private_state_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: py
 
 
 @pytest.fixture(autouse=True)
+def _no_llm_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The router's LLM is off unless a test turns it on with a fake: never a live client in tests."""
+    for name in ("GEMINI_API_KEY", "CLEF_LLM_API_KEY", "CLEF_LLM_BASE_URL", "CLEF_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def db_backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     backend = getattr(request, "param", "sqlite")
     if backend == "sqlite":
