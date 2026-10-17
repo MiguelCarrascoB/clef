@@ -50,8 +50,9 @@ from .classify import (
     score_result,
     score_to_systemone,
 )
-from .db import Database
+from .db import Database, audit
 from .engine import EngineNotReady, GpuOutOfMemory
+from .keystore import QuotaExceeded, Reservation
 from .schemas import SystemOneRequest, check_limits, format_errors
 from .webhooks import DEFAULT_EVENTS, WebhookDispatcher, WebhookPolicy, WebhookRefused
 
@@ -142,9 +143,12 @@ class JobStore:
         max_active: int,
         idem_key: str | None = None,
         model: str | None = None,
+        quota_day: str | None = None,
+        quota_reserved: int = 0,
     ) -> dict[str, Any]:
         """Insert a queued job. With ``idem_key``, a job this owner already submitted under it is returned
-        instead (``row["replayed"]`` is True). ``model`` = the model ref served at submit (``jobs.model``)."""
+        instead (``row["replayed"]`` is True). ``model`` = the model ref served at submit (``jobs.model``).
+        ``quota_day`` / ``quota_reserved``: the daily quota reservation made for it (D1)."""
         job_id = "job_" + secrets.token_hex(10)
         try:
             with self.db.tx() as conn:
@@ -170,6 +174,8 @@ class JobStore:
                         created_at=time.time(),
                         idem_key=idem_key or None,
                         model=model,
+                        quota_day=quota_day,
+                        quota_reserved=quota_reserved,
                     )
                 )
                 return self._get(conn, job_id) or {}
@@ -327,6 +333,30 @@ class JobStore:
             if cur.rowcount != 1:
                 return False, None
             return True, self._terminal_event(conn, job_id, status)
+
+    def settle_quota(self, job_id: str | None = None) -> list[tuple[str, str, int]]:
+        """Hand back the unprocessed part of the reservation of failed / cancelled jobs: ``(owner, day, n)``.
+
+        ``n = quota_reserved - done``; the row's ``quota_reserved`` is then set to ``done`` (what was really
+        charged), so a second call refunds nothing. One job, or (``job_id`` None) every finished one: startup
+        uses that for jobs that ended while the process was stopping.
+        """
+        out: list[tuple[str, str, int]] = []
+        with self.db.tx() as conn:
+            q = select(
+                _JOBS.c.id, _JOBS.c.owner, _JOBS.c.quota_day, _JOBS.c.quota_reserved, _JOBS.c.done
+            ).where(
+                _JOBS.c.status.in_(("failed", "cancelled")),
+                _JOBS.c.quota_reserved > _JOBS.c.done,
+                _JOBS.c.quota_day.is_not(None),
+            )
+            if job_id is not None:
+                q = q.where(_JOBS.c.id == job_id)
+            for r in conn.execute(q).all():
+                conn.execute(update(_JOBS).where(_JOBS.c.id == r.id).values(quota_reserved=r.done))
+                if r.owner:
+                    out.append((r.owner, r.quota_day, r.quota_reserved - r.done))
+        return out
 
     def cancel_queued(self, job_id: str) -> tuple[bool, str | None]:
         """queued/interrupted -> cancelled plus its pending event (one transaction); ``(changed, event)``."""
@@ -786,6 +816,7 @@ class JobRunner:
                 job_id,
                 self.ctx.cfg.job_max_resumes,
             )
+        await self.settle()  # jobs that ended failed / cancelled while the server was down
         await asyncio.to_thread(self._purge)
         for job_id, event in await asyncio.to_thread(self.store.pending_deliveries):
             self.dispatcher.enqueue(job_id, event)
@@ -806,6 +837,14 @@ class JobRunner:
     def poke(self) -> None:
         if self.wake is not None:
             self.wake.set()
+
+    async def settle(self, job_id: str | None = None) -> None:
+        """Refund the unprocessed records of a failed / cancelled job (all if ``job_id`` is None)."""
+        quotas = self.ctx.quotas
+        if quotas is None:
+            return
+        for owner, day, n in await asyncio.to_thread(self.store.settle_quota, job_id):
+            quotas.refund(Reservation(owner, day, n), n)
 
     def _purge(self) -> None:
         ttl = self.ctx.cfg.job_ttl_hours
@@ -859,6 +898,7 @@ class JobRunner:
                 event = await asyncio.to_thread(self.store.park, job_id, job_id in self.cancel_ids)
                 if event:
                     self.dispatcher.enqueue(job_id, event)
+                    await self.settle(job_id)
                 if n >= RUNNER_MAX_FAILURES:
                     self._failures.pop(job_id, None)
                     log.error("jobs: job %s failed %d times in the runner; failing it", job_id, n)
@@ -877,6 +917,7 @@ class JobRunner:
         if cancelled:
             if event:
                 self.dispatcher.enqueue(job_id, event)
+            await self.settle(job_id)
         else:
             # Not queued: flag it if running, or cancel it now if a park (clean stop, runner error) got
             # there first. One atomic store call, not gated on a stale read: a racing park cannot drop it.
@@ -886,6 +927,8 @@ class JobRunner:
                 self.cancel_ids.discard(job_id)
             if event:
                 self.dispatcher.enqueue(job_id, event)
+            if status == "cancelled":
+                await self.settle(job_id)
         return await asyncio.to_thread(self.store.get, job_id) or row
 
     def _finish_sync(
@@ -984,6 +1027,8 @@ class JobRunner:
         _, event = await asyncio.to_thread(self._finish_sync, job_id, status, error, result)
         if event:
             self.dispatcher.enqueue(job_id, event)
+        if status in ("failed", "cancelled"):
+            await self.settle(job_id)
 
 
 def _msg(exc: Exception) -> str:
@@ -1071,6 +1116,21 @@ async def run_chunked(
         await job.add_items(rows)
         i = j
         await asyncio.sleep(0)  # let interactive requests reach the engine queue before the next chunk
+
+
+def job_records(spec: dict[str, Any], parsed: Any, payload: dict[str, Any]) -> int:
+    """How many records a job will run, for the daily quota (>= 1).
+
+    A kind may give ``"records": callable(parsed) -> int``; else the length of the parsed ``inputs`` /
+    ``requests`` / ``rows`` (the built-in kinds and ``evaluate``), else of the same payload keys.
+    """
+    if callable(spec.get("records")):
+        return max(1, int(spec["records"](parsed)))
+    for name in ("inputs", "requests", "rows"):
+        for src in (getattr(parsed, name, None), payload.get(name)):
+            if isinstance(src, list):
+                return max(1, len(src))
+    return 1
 
 
 # ------------------------------------------------------------------ built-in kinds
@@ -1434,13 +1494,30 @@ def router(ctx: AppContext) -> APIRouter:
     ctx.on_startup.append(runner.start)
     ctx.on_shutdown.append(runner.stop)
 
-    api = APIRouter(prefix="/v1/jobs", tags=["jobs"], dependencies=ctx.auth, responses=ctx.errors)
+    api = APIRouter(prefix="/v1/jobs", tags=["jobs"], dependencies=ctx.scope("jobs"), responses=ctx.errors)
 
     def caller(request: Request) -> str | None:
         return getattr(request.state, "key_name", None)
 
     def scoped(request: Request) -> bool:
-        return cfg.auth_required
+        """Jobs are private to their owner when auth is on; admins see every principal's jobs."""
+        principal = ctx.principal(request)
+        return ctx.auth_enabled() and not (principal is not None and principal.has("admin"))
+
+    async def audit_job(request: Request, action: str, row: dict[str, Any]) -> None:
+        def write() -> None:
+            with ctx.db.tx() as conn:
+                audit(
+                    conn,
+                    caller(request) or "anonymous",
+                    action,
+                    row["id"],
+                    {"kind": row["kind"], "owner": row["owner"]},
+                    request.client.host if request.client else None,
+                    ctx.request_id(request),
+                )
+
+        await run_in_threadpool(write)
 
     async def load(request: Request, job_id: str) -> dict[str, Any]:
         row = await run_in_threadpool(store.get, job_id)
@@ -1502,6 +1579,15 @@ def router(ctx: AppContext) -> APIRouter:
                 payload = await run_in_threadpool(spec["snapshot"], payload, parsed)
         except (ValueError, ValidationError) as exc:
             raise ApiError(400, f"payload.{_msg(exc)}") from exc
+        principal = ctx.principal(request)
+        try:  # the whole job is charged to the submit day; the unprocessed part comes back when it ends
+            reservation = ctx.quotas.reserve(principal, job_records(spec, parsed, payload))
+        except QuotaExceeded as exc:
+            request.state.quota = (exc.limit, exc.remaining)
+            raise ApiError(
+                429, str(exc), {"Retry-After": str(exc.retry_after)}, code="insufficient_quota"
+            ) from exc
+        request.state.quota = ctx.quotas.remaining(principal)
         try:
             row = await run_in_threadpool(
                 store.create,
@@ -1513,10 +1599,20 @@ def router(ctx: AppContext) -> APIRouter:
                 cfg.max_jobs,
                 idempotency_key,
                 ctx.model_ref(),
+                reservation.day if reservation else None,
+                reservation.n if reservation else 0,
             )
-        except JobsFull as exc:
-            raise ApiError(409, str(exc), {"Retry-After": "30"}) from exc
-        if row.get("replayed"):
+        except BaseException as exc:  # JobsFull, a DB error: nothing was queued, charge nothing
+            if reservation is not None:
+                ctx.quotas.refund(reservation, reservation.n)
+                request.state.quota = ctx.quotas.remaining(principal)
+            if isinstance(exc, JobsFull):
+                raise ApiError(409, str(exc), {"Retry-After": "30"}) from exc
+            raise
+        if row.get("replayed"):  # lost an idempotency race: the other job already holds its reservation
+            if reservation is not None:
+                ctx.quotas.refund(reservation, reservation.n)
+                request.state.quota = ctx.quotas.remaining(principal)
             response.headers["Idempotent-Replay"] = "true"
         else:
             runner.poke()
@@ -1546,7 +1642,9 @@ def router(ctx: AppContext) -> APIRouter:
         row = await load(request, job_id)
         if row["status"] in FINISHED:
             raise ApiError(409, f"job is already {row['status']}")
-        return public_job(await runner.request_cancel(row))
+        out = public_job(await runner.request_cancel(row))
+        await audit_job(request, "job.cancel", row)
+        return out
 
     @api.post(
         "/{job_id}/webhook/redeliver",
@@ -1585,7 +1683,21 @@ def router(ctx: AppContext) -> APIRouter:
         row = await load(request, job_id)
         if row["status"] in ACTIVE:
             raise ApiError(409, f"job is {row['status']}; cancel it first (POST /v1/jobs/{job_id}/cancel)")
-        await run_in_threadpool(store.delete, job_id)
+
+        def remove() -> None:
+            with ctx.db.tx() as conn:  # the delete and its audit row commit together
+                store.delete(job_id)
+                audit(
+                    conn,
+                    caller(request) or "anonymous",
+                    "job.delete",
+                    job_id,
+                    {"kind": row["kind"], "owner": row["owner"]},
+                    request.client.host if request.client else None,
+                    ctx.request_id(request),
+                )
+
+        await run_in_threadpool(remove)
         return {"deleted": job_id}
 
     @api.get(

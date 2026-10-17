@@ -526,8 +526,10 @@ def test_retention_purges_old_finished_jobs_only():
 
 
 def test_ownership_with_api_keys():
-    client, _, _ = make(api_keys_raw="alice:ka,bob:kb")
-    a, b = {"X-API-Key": "ka"}, {"X-API-Key": "kb"}
+    from test_keys import add_key
+
+    client, _, app = make(api_keys_raw="root:kr")  # env keys are admins: they see every job (D1)
+    a, b = {"X-API-Key": add_key(app, "alice")}, {"X-API-Key": add_key(app, "bob")}
     with client:
         assert client.post("/v1/jobs", json={"kind": "classify", "payload": {}}).status_code == 401
         jid = client.post(
@@ -541,6 +543,9 @@ def test_ownership_with_api_keys():
         assert client.get("/v1/jobs", headers=b).json()["total"] == 0
         assert client.get("/v1/jobs", headers=a).json()["total"] == 1
         assert client.get(f"/v1/jobs/{jid}", headers=a).status_code == 200
+        admin = {"X-API-Key": "kr"}
+        assert client.get(f"/v1/jobs/{jid}", headers=admin).status_code == 200
+        assert client.get("/v1/jobs", headers=admin).json()["total"] == 1
         assert client.delete(f"/v1/jobs/{jid}", headers=a).status_code == 200
 
 

@@ -63,11 +63,24 @@ class AppContext:
         """The served model id for a request's ``model``; raises a LookupError (-> 404) for another model."""
         fn = getattr(self.engine, "check_model", None)
         return fn(requested) if callable(fn) else (requested or "clef-flash")
+
     # C2: decide in two steps (tokenize ahead, then queue). prepare(reqs, batch=True, label="batch",
     # cache=True) -> engine.Prepared: limits, the model check (UnknownModel -> 404), media, engine.prepare.
     # decide_prepared(prepared, priority="background") -> results. decide(...) = both; it also takes cache=.
     prepare: Callable[..., Awaitable[Any]] | None = None
     decide_prepared: Callable[..., Awaitable[list[dict[str, Any]]]] | None = None
+
+    # D1: keys and quotas. scope(*names) -> FastAPI dependencies: a valid key with those scopes (no names =
+    # any valid key; "admin" also needs a key with auth off). Every /v1, /hf and /models route carries one.
+    scope: Callable[..., list[Any]] | None = None
+    quotas: Any = None  # keystore.Quotas
+    auth_enabled: Callable[[], bool] = lambda: False  # noqa: E731  (env keys, or a DB principal ever existed)
+    keys: Any = None  # keystore.KeyCache (admin writes call keys.reload())
+    env_key_names: frozenset[str] = frozenset()
+
+    def principal(self, request: Request) -> Any:
+        """The caller's ``keystore.Principal`` (None with auth off)."""
+        return getattr(request.state, "principal", None)
 
 
 __all__ = ["AppContext", "Hook", "SystemOneRequest"]

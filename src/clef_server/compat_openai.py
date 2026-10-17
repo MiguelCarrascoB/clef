@@ -163,7 +163,10 @@ def _sse(obj: Any) -> str:
 
 def router(ctx: AppContext) -> APIRouter:
     r = APIRouter(
-        prefix="/v1", dependencies=ctx.auth, responses=ctx.errors, route_class=route_class(ctx, openai_error)
+        prefix="/v1",
+        dependencies=ctx.scope("classify"),
+        responses=ctx.errors,
+        route_class=route_class(ctx, openai_error),
     )
     created_at = int(time.time())
 
