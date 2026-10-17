@@ -249,7 +249,7 @@ async def test_prepare_then_submit_matches_decide(ready):
     eng, model = ready()
     prepared = await eng.prepare([rec("a b"), rec("c")])
     assert model.calls == []  # prepare never queues
-    assert [e.length for e in prepared.encoded] == [5, 4] and prepared.keys == [None, None]
+    assert [e.length for e in prepared.encoded] == [5, 4] and all(isinstance(k, str) for k in prepared.keys)
     assert all(r["model"] == "clef-flash" for r in prepared.records)
     out = await eng.submit(prepared, priority="background")
     assert [o["answers"]["d"]["probs"] for o in out] == [expected("a b"), expected("c")]

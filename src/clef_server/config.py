@@ -215,6 +215,11 @@ class Config:
     # (or the catalog entry whose repo is CLEF_MODEL_REPO). Resolved by models.registry.resolve_spec.
     model: str | None = field(default_factory=lambda: _env("CLEF_MODEL"))
 
+    # D3: in-memory result cache entries (docs/ARCHITECTURE.md, Result cache); 0 = off.
+    cache_size: int = field(default_factory=lambda: _int("CLEF_CACHE_SIZE", 10000))
+    # Byte budget of the same cache (estimated from the stored JSON); LRU entries go until it fits.
+    cache_mb: int = field(default_factory=lambda: _int("CLEF_CACHE_MB", 256))
+
     def __post_init__(self) -> None:
         for name, value, allowed in (
             ("CLEF_DEVICE", self.device.split(":")[0], DEVICES),
@@ -237,6 +242,10 @@ class Config:
             raise ValueError("CLEF_INTERACTIVE_BURST must be >= 1")
         if self.drain_s < 0:
             raise ValueError("CLEF_DRAIN_S must be >= 0 (0 = no drain)")
+        if self.cache_size < 0:
+            raise ValueError("CLEF_CACHE_SIZE must be >= 0 (0 = off)")
+        if self.cache_mb < 0:
+            raise ValueError("CLEF_CACHE_MB must be >= 0 (0 = off)")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
         # C2: CLEF_MODEL syntax and the @rev / CLEF_MODEL_REVISION alias (an unknown id is a load error)
         if self.model:
