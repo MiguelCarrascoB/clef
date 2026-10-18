@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- **`clef tune`** (ROCm, `CLEF_TUNABLEOP=1`): tunes the GEMM shapes the server served untuned after warmup
+  (recorded in `<state dir>/tunableop/<model>@<rev8>/tunableop_untuned0.csv`) and adds them to the tuned file.
 - **Self-evolving router and Review queue (E2)**: `PUT|GET|DELETE /v1/routers/{name}`, `POST .../route[/batch]`,
   `.../propose`, `.../versions[/{v}/activate]`, `GET /v1/review`, `POST /v1/review/{id}/resolve`. A router buffers
   what its classifier cannot place ("other", or below a threshold that rises with the label count), sends 20 items at
@@ -112,6 +114,15 @@
   owner-less classifiers.
 
 ### Changed
+- **TunableOp tunes in the background** (`CLEF_TUNABLEOP`, now on by default on ROCm). A live request never tunes any
+  more (it used to stall for seconds on every new shape: measured p50 2.7 s, p95 39 s). The server is ready after the
+  normal warmup; it records the GEMMs of every text-batch shape up to 1024 tokens and a separate tuner process
+  (`python -m clef_server.tuner`) tunes them one at a time, paused while requests arrive; the server reloads each
+  result as it lands. About an hour of idle time on the 7900 XTX, once per GPU / driver / ROCm / torch version.
+  Measured gain once tuned: +27-32% req/s on mixed-length traffic, single requests p50 104 vs 137 ms. Progress in
+  `/v1/stats` (`tunableop`). `CLEF_TUNABLEOP=0` turns it off; `CLEF_TUNABLEOP_ONLINE=1` keeps the old behaviour.
+- **`CLEF_MASK_FREE` and `CLEF_FAST_HEAD` default to on with the ROCm backend** (unset = auto; off on CUDA, MPS and
+  CPU until measured there; `0` / `1` forces them). Bench baselines set all three to 0 explicitly.
 - **`model` in requests**: optional everywhere (omit it, or send null, for the served model); responses report the
   served id. A model the server does not serve is now **404** on every route (OpenAI routes:
   `model_not_found`) instead of being ignored; `/v1/chat/completions` no longer lists `model` in `clef.ignored`.

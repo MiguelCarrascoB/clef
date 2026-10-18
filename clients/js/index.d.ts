@@ -148,7 +148,9 @@ export interface Job {
   warnings: string[];
   priority: 'low' | 'normal' | 'high' | 'urgent';
   /** Why a queued / running job is not advancing right now. */
-  waitingReason: 'off_hours' | 'active_limit' | 'turn' | null;
+  waitingReason: 'off_hours' | 'active_limit' | 'turn' | 'behind' | null;
+  /** With `waitingReason: 'behind'`: the older job of the same key that takes the turns first. */
+  waitingBehind: string | null;
   nextWindowAt: string | null;
   /** Cancelled because `expireAfterS` ran out. */
   expired: boolean;

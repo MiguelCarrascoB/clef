@@ -738,3 +738,15 @@ def test_fair_slots_another_key_gets_a_slot_while_one_key_fills_them_all():
             time.sleep(0.02)
         for x in a:
             client.post(f"/v1/jobs/{x}/cancel", headers=ha)
+
+
+def test_inside_one_owner_the_oldest_job_goes_first_and_the_others_are_behind_it():
+    s, _ = sched(active=4, now=NOON)
+    for job_id, owner, seq in (("a1", "alice", 1), ("a2", "alice", 2), ("b1", "bob", 3)):
+        s.register(ent(job_id, owner, seq=seq))
+    s.refresh(NOON)
+    assert s.behind("a2", NOON) == "a1" and s.behind("a1", NOON) is None and s.behind("b1", NOON) is None
+    s.register(ent("a3", "alice", cls=2, seq=4))  # high priority: alice's newer job goes first
+    assert s.behind("a1", NOON) == "a3" and s.behind("a3", NOON) is None
+    s.entries["a3"].pause = "off_hours"  # a paused job takes no turns, so nobody is behind it
+    assert s.behind("a1", NOON) is None and s.behind("a3", NOON) is None

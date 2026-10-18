@@ -76,6 +76,7 @@ def test_redact_url_hides_the_password():
     )
     assert redact_url("sqlite:////tmp/x.db") == "sqlite:////tmp/x.db"
     assert "s3cret" not in redact_url("::not a url s3cret@")
+    pytest.importorskip("psycopg")  # the postgres extra; Database() refuses a Postgres URL without it
     db = Database("postgresql://clef:s3cret@localhost:1/clef")
     assert "s3cret" not in db.display_url and "s3cret" not in str(db.info())
 

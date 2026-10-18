@@ -271,7 +271,7 @@ def run(ad, batch):
 def test_flags_default_off_and_forward_is_the_release_forward():
     model = TinyClef().eval()
     ad = adapter(model)
-    assert (ad._mask_free, ad._fast_head) == (False, False)
+    assert not ad._mask_free and not ad._fast_head  # auto (None) until load() knows the backend
     batch = encoded_batch(ad)
     out = run(ad, batch)
     assert model.calls == 1 and model.text.masks[0] is not None
@@ -351,7 +351,25 @@ _Q = {"d": {"type": "choice", "criteria": {"a": "x", "b": "y"}}}
 
 
 def test_config_reads_env(monkeypatch):
-    assert (Config().mask_free, Config().fast_head) == (False, False)
+    monkeypatch.delenv("CLEF_MASK_FREE", raising=False)
+    monkeypatch.delenv("CLEF_FAST_HEAD", raising=False)
+    assert (Config().mask_free, Config().fast_head) == (None, None)  # auto
     monkeypatch.setenv("CLEF_MASK_FREE", "1")
-    monkeypatch.setenv("CLEF_FAST_HEAD", "1")
-    assert (Config().mask_free, Config().fast_head) == (True, True)
+    monkeypatch.setenv("CLEF_FAST_HEAD", "0")
+    assert (Config().mask_free, Config().fast_head) == (True, False)
+
+
+@pytest.mark.parametrize(
+    ("backend", "flags", "want"),
+    [
+        ("rocm", {}, (True, True)),  # auto: on where measured
+        ("cuda", {}, (False, False)),
+        ("mps", {}, (False, False)),
+        ("rocm", {"mask_free": False}, (False, True)),  # an explicit 0 wins
+        ("cuda", {"mask_free": True, "fast_head": True}, (True, True)),
+    ],
+)
+def test_auto_flags_resolve_per_backend(backend, flags, want):
+    ad = adapter(TinyClef().eval(), **flags)
+    ad._resolve_flags(SimpleNamespace(name=backend))
+    assert (ad._mask_free, ad._fast_head) == want

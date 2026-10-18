@@ -116,6 +116,7 @@ export function parseJob(body) {
     warnings: body.warnings ?? [],
     priority: body.priority ?? 'normal',
     waitingReason: body.waiting_reason ?? null,
+    waitingBehind: body.waiting_behind ?? null,
     nextWindowAt: body.next_window_at ?? null,
     expired: body.expired ?? false,
     raw: body,

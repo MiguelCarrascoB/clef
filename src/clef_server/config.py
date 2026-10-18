@@ -47,6 +47,12 @@ def _bool(name: str, default: bool) -> bool:
     return default if value is None else value.lower() in ("1", "true", "yes", "on")
 
 
+def _bool_or_none(name: str) -> bool | None:
+    """None when unset or empty ("auto": the consumer decides per backend)."""
+    value = _env(name)
+    return None if value is None else value.lower() in ("1", "true", "yes", "on")
+
+
 def _str(name: str, default: str) -> str:
     return _env(name) or default
 
@@ -203,6 +209,12 @@ class Config:
     pad_multiple: int = field(default_factory=lambda: _int("CLEF_PAD_MULTIPLE", 64))
     pad_to_bucket: bool = field(default_factory=lambda: _bool("CLEF_PAD_TO_BUCKET", False))
     warmup: bool = field(default_factory=lambda: _bool("CLEF_WARMUP", True))
+    # With CLEF_TUNABLEOP=1 live forwards never tune: the engine tunes the GEMMs of every text-batch shape up
+    # to 1024 tokens in the background while idle, so no request stalls while TunableOp benchmarks kernels
+    # (seconds per GEMM). 1 = tune on a request's first new shape (the old behaviour).
+    tunableop_online: bool = field(default_factory=lambda: _bool("CLEF_TUNABLEOP_ONLINE", False))
+    # Background tuning starts a step (~5-8 s on the 7900 XTX) only after this many seconds without a request.
+    tunableop_idle_s: float = field(default_factory=lambda: _float("CLEF_TUNABLEOP_IDLE_S", 2.0))
 
     # observability
     log_state: bool = field(default_factory=lambda: _bool("CLEF_LOG_STATE", False))
@@ -223,11 +235,12 @@ class Config:
     cache_size: int = field(default_factory=lambda: _int("CLEF_CACHE_SIZE", 10000))
     # Byte budget of the same cache (estimated from the stored JSON); LRU entries go until it fits.
     cache_mb: int = field(default_factory=lambda: _int("CLEF_CACHE_MB", 256))
-    # D2: opt-in speedups, default OFF until bench/perf_check.sh has measured them (docs/performance.md).
+    # D2 speedups (docs/performance.md). Unset = on with the ROCm backend (measured on the RX 7900 XTX: +5-12%
+    # with TunableOp, 0 top-1 flips), off elsewhere until measured there; 0 / 1 forces them.
     # mask_free: text batches call the backbone with attention_mask=None (right-padded + causal = exact);
     # fast_head: sync-free, batch-vectorised joint head. Both only apply to the clef-release adapter.
-    mask_free: bool = field(default_factory=lambda: _bool("CLEF_MASK_FREE", False))
-    fast_head: bool = field(default_factory=lambda: _bool("CLEF_FAST_HEAD", False))
+    mask_free: bool | None = field(default_factory=lambda: _bool_or_none("CLEF_MASK_FREE"))
+    fast_head: bool | None = field(default_factory=lambda: _bool_or_none("CLEF_FAST_HEAD"))
     # E1: job scheduler (docs/jobs.md). job_window "HH:MM-HH:MM" (in job_tz) is the default for jobs that give
     # no `schedule`; empty = always open.
     job_tz: str = field(default_factory=lambda: os.environ.get("CLEF_JOB_TZ", "UTC").strip() or "UTC")

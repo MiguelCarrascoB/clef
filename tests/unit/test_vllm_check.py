@@ -59,6 +59,7 @@ def run(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str], l
         "PATH": f"{stubs}:{os.environ['PATH']}",
         "HOME": str(tmp_path),
         "STUBLOG": str(log),
+        "READY_TIMEOUT_S": "0",  # the curl stub never answers /readyz
         "PY": str(stubs / "py"),
         "OUT": str(tmp_path / "out"),
         "HF_HOME": str(tmp_path / "hf"),

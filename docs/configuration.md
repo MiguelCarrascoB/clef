@@ -39,8 +39,9 @@ See [Smaller GPUs](memory.md) for which combination fits which card.
 | `CLEF_CLASSIFY_THRESHOLD` | `0.5` | default multi-label threshold (also for array properties in `/v1/chat/completions`) |
 | `CLEF_MAX_BATCH` / `CLEF_MAX_QUESTIONS` | `64` / `64` | records per batch / questions per record |
 | `CLEF_MAX_BODY_MB` | `64` | request body limit |
-| `CLEF_MASK_FREE` | `0` | `1`: text-only batches call the backbone with `attention_mask=None` and the head uses CPU lengths (no device sync). Opt-in until `bench/perf_check.sh` passes on your GPU; see [Performance](performance.md) |
-| `CLEF_FAST_HEAD` | `0` | `1`: use the batch-vectorised, sync-free joint head (`fast_joint_head`) instead of the release's per-record loops. Same maths, opt-in; see [Performance](performance.md) |
+| `CLEF_TUNABLEOP` | on (ROCm) | TunableOp GEMM tuning on ROCm builds of PyTorch: tuned in the background while idle, never on a live request; `0` turns it off. `CLEF_TUNABLEOP_ONLINE=1` tunes on the request instead, `CLEF_TUNABLEOP_IDLE_S` (2) is the quiet time before a tune step; see [Performance](performance.md#tunableop-rocm) |
+| `CLEF_MASK_FREE` | auto | on with the ROCm backend, off elsewhere: text-only batches call the backbone with `attention_mask=None` and the head uses CPU lengths (no device sync). `0` / `1` forces it; measure other GPUs with `bench/perf_check.sh`; see [Performance](performance.md) |
+| `CLEF_FAST_HEAD` | auto | on with the ROCm backend, off elsewhere: the batch-vectorised, sync-free joint head (`fast_joint_head`) instead of the release's per-record loops. Same maths; `0` / `1` forces it; see [Performance](performance.md) |
 | `CLEF_JOB_SORT_WINDOW` | `0` | `N > 0`: a job sorts N items at a time by token length (256-1024 recommended) before sending them to the engine; results are persisted per window in input order. Opt-in until `bench/sort_check.sh` shows a gain over 10% on your GPU; see [Performance](performance.md) |
 | `CLEF_TOKENIZE_AHEAD` | `0` | `1`: the next window of a job is tokenized on CPU threads while the current one is on the GPU. Same opt-in rule as the sort |
 | `CLEF_MAX_TOKENS` | `16384` | input tokens per record |

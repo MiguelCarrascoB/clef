@@ -16,7 +16,7 @@
 #      dirs, never another run's), bench/vllm/vllm_table.py -> summary.md with the D12 decision table
 #
 # Env: PY (venv python, ~/venvs/clef/bin/python), IMAGE (pinned tag below), N (200 records) IMAGES (10)
-# REQUESTS (100 per level) LEVELS (1,8,16,32) TOL (2e-3) OUT, QUICK=1 (N=20 IMAGES=2 REQUESTS=20 LEVELS=1,8),
+# REQUESTS (100 per level) LEVELS (1,8,16,32) TOL (2e-3) TUN_STATE (a tuned clef state dir for the tun line) OUT, QUICK=1 (N=20 IMAGES=2 REQUESTS=20 LEVELS=1,8),
 # MIXED=1 (mixed-length states), VLLM_PORT (8000), VLLM_MAX_SEQS (8, the PR's flag), VLLM_TIMEOUT (2400 s to start),
 # GPU_MEM_UTIL (0.90), IDLE_MAX_GB (4), SKIP_PULL=1, FORCE=1 (ignore a busy or unreadable GPU, low disk), DXG /
 # DXCORE / ROCDXG / DIDS (the WSL files mounted into the container), thresholds: MIN_SPEEDUP LEVEL ...
@@ -61,14 +61,17 @@ EOF
 )
 [ -n "$REV" ] || die "could not read the clef-flash pin from clef_server.models.clef_release"
 
+state_dir() { # state_dir <variant>: TUN_STATE reuses an already tuned state dir for the tun line (no 1 h tune)
+  if [ "$1" = tun ] && [ -n "${TUN_STATE:-}" ]; then echo "$TUN_STATE"; else echo "$RUN_DIR/state-$1"; fi
+}
 # shellcheck disable=SC2317  # called by the EXIT trap, which shellcheck does not follow
 cleanup() { # installed only once preflight passed: a refused run must not touch another run's container / clef
   set +e
   local cid
   cid=$(cat "$RUN_DIR/vllm_container_id.txt" 2>/dev/null)
   [ -n "$cid" ] && docker rm -f "$cid" >/dev/null 2>&1
-  for v in base both; do
-    [ -d "$RUN_DIR/state-$v" ] && env CLEF_STATE_DIR="$RUN_DIR/state-$v" "${CLEF[@]}" stop >/dev/null 2>&1
+  for v in base both tun; do
+    [ -d "$(state_dir "$v")" ] && env CLEF_STATE_DIR="$(state_dir "$v")" "${CLEF[@]}" stop >/dev/null 2>&1
   done
 }
 trap 'exit 130' INT TERM
@@ -77,9 +80,10 @@ vrun() { # vrun <variant> <cmd...>: clef variant environment, its own state dir
   local v=$1; shift
   local extra=""
   [ "$v" = both ] && extra="CLEF_MASK_FREE=1 CLEF_FAST_HEAD=1"
+  [ "$v" = tun ] && extra="CLEF_TUNABLEOP=1"
   # shellcheck disable=SC2086
   env -u CLEF_MASK_FREE -u CLEF_FAST_HEAD -u CLEF_TUNABLEOP -u PYTORCH_TUNABLEOP_ENABLED \
-    CLEF_STATE_DIR="$RUN_DIR/state-$v" CLEF_PORT="$CLEF_PORT_" $extra "$@"
+    CLEF_MASK_FREE=0 CLEF_FAST_HEAD=0 CLEF_TUNABLEOP=0 CLEF_STATE_DIR="$(state_dir "$v")" CLEF_PORT="$CLEF_PORT_" CLEF_CACHE_SIZE=0 $extra "$@"
 }
 
 # ---------------------------------------------------------------- step 0: preflight
@@ -142,6 +146,7 @@ DOCKER_GPU_FLAGS=(
   -v "$ROCDXG:/usr/lib/librocdxg.so"
   -v "$DIDS:/usr/share/rocdxg/dids.conf"
   -e HSA_ENABLE_DXG_DETECTION=1
+  -e ROCPROFILER_REGISTER_ENABLED=0 # the image's torch links rocprofiler-sdk, unsupported on WSL: HSA abort
   --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --ipc=host --shm-size 8G
 )
 
@@ -168,11 +173,20 @@ vrun base "$PY" bench/parity.py --engine-dump "$OUT/dump_clef.json" --n "$N" --i
   || die "clef engine dump failed (weights missing? run: clef download)"
 
 # ---------------------------------------------------------------- step 3: clef speed
-clef_speed() { # clef_speed <base|both>
+wait_ready() { # serve --detach returns while warming; time only a ready server (TunableOp's first start: ~1 h)
+  local left=${READY_TIMEOUT_S:-7200} # 0 = do not wait
+  while [ "$left" -gt 0 ]; do
+    curl -fsS -m 3 "http://127.0.0.1:${CLEF_PORT_}/readyz" >/dev/null 2>&1 && return 0
+    sleep 1
+    left=$((left - 1))
+  done
+  [ "${READY_TIMEOUT_S:-7200}" = 0 ]
+}
+clef_speed() { # clef_speed <base|both|tun>
   local v=$1
   note "step 3: clef speed, $v"
-  if ! vrun "$v" "${CLEF[@]}" serve --detach --timeout 1800; then
-    fail "clef server did not start for $v"; vrun "$v" "${CLEF[@]}" stop >/dev/null 2>&1 || true; return
+  if ! vrun "$v" "${CLEF[@]}" serve --detach --timeout 1800 || ! wait_ready; then
+    fail "clef server did not start (or warm up) for $v"; vrun "$v" "${CLEF[@]}" stop >/dev/null 2>&1 || true; return
   fi
   "$PY" bench/vllm/load.py --url "http://127.0.0.1:${CLEF_PORT_}" --concurrency "$LEVELS" --requests "$REQUESTS" \
     "${MIXED_ARG[@]}" --label "clef_$v" --idle-gb "$IDLE_GB" --vram-json "$OUT/vram_clef_$v.json" \
@@ -181,6 +195,7 @@ clef_speed() { # clef_speed <base|both>
 }
 clef_speed base
 clef_speed both
+clef_speed tun
 
 # ---------------------------------------------------------------- step 4: vLLM
 if [ "$SKIP_VLLM" = 1 ]; then

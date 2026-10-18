@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import clef_server.engine as engine_mod
 from clef_server.backend import BackendError
 from clef_server.config import Config
 from clef_server.engine import (
@@ -470,6 +471,149 @@ def test_warmup_covers_buckets_and_sizes(started):
     eng, model = started(cfg)
     assert eng.warmup_seconds is not None
     assert {(n, length) for n, length, _ in model.calls} == {(n, b) for n in (1, 4) for b in (16, 32, 64)}
+
+
+class FakeTunable:
+    """torch.cuda.tunable as the engine uses it; tune_gemm_in_file tunes the one line of its file."""
+
+    def __init__(self):
+        self.calls = []
+        self.results = [("GemmTunableOp_BFloat16_TN", "tn_done", "Gemm_Rocblas_1", 0.1)]
+        self.loads = 0
+        self.fail = set()
+        self.recording = False
+
+    def tuning_enable(self, val=True):
+        self.calls.append(("tuning", val))
+
+    def record_untuned_enable(self, val=True):
+        self.calls.append(("record", val))
+        self.recording = val
+
+    def get_results(self):
+        self.loads += 1
+        return list(self.results)
+
+    def read_file(self, path):
+        self.calls.append(("read", Path(path).name))
+        return True
+
+    def tune_gemm_in_file(self, path):
+        op, params = Path(path).read_text().strip().split(",")[:2]
+        self.calls.append(("tune", params))
+        if params in self.fail:
+            raise RuntimeError("offline tuning is not supported for this GEMM")
+        if self.recording or params == "tn_silent":  # like torch: records instead of tuning, no error
+            return
+        self.results.append((op, params, "Gemm_Rocblas_2", 0.1))
+
+
+@pytest.fixture
+def tunable(monkeypatch):
+    fake = FakeTunable()
+    monkeypatch.setattr(engine_mod, "_tunable", lambda: fake)
+    monkeypatch.delenv("PYTORCH_TUNABLEOP_UNTUNED_FILENAME", raising=False)
+    return fake
+
+
+def test_tunableop_server_is_ready_after_the_short_warmup_and_runs_the_grid_in_the_background(
+    started, tunable
+):
+    cfg = make_cfg(
+        warmup=True, buckets=(16, 32, 64), max_microbatch=3, pad_to_bucket=False, pad_multiple=32,
+        batch_window_ms=1.0,
+    )  # fmt: skip
+    eng, model = started(cfg)
+    assert tunable.loads >= 1 and tunable.calls[:2] == [
+        ("tuning", False),
+        ("record", True),
+    ]  # before any forward
+    grid = {(n, length) for n in (1, 2, 3) for length in (32, 64)}
+    assert wait_for(lambda: grid <= {(n, length) for n, length, _ in model.calls})  # discovery, after ready
+    eng.shutdown()
+    assert ("tuning", True) not in tunable.calls  # the server never tunes; the tuner process owns the file
+
+
+def test_tunableop_grid_uses_buckets_with_bucket_padding(started, tunable):
+    cfg = make_cfg(warmup=True, buckets=(16, 32, 64), max_microbatch=2, batch_window_ms=1.0)
+    _, model = started(cfg)
+    grid = {(n, b) for n in (1, 2) for b in (16, 32, 64)}
+    assert wait_for(lambda: grid <= {(n, length) for n, length, _ in model.calls})
+
+
+class FakeProc:
+    """subprocess.Popen stand-in for the background tuner."""
+
+    made: list = []
+
+    def __init__(self, args, **kw):
+        self.args, self.pid, self.rc = args, 4242, None
+        FakeProc.made.append(self)
+
+    def poll(self):
+        return self.rc
+
+    def terminate(self):
+        self.rc = -15
+
+    def wait(self, timeout=None):
+        return self.rc
+
+    def kill(self):
+        self.rc = -9
+
+
+@pytest.fixture
+def tuner_env(monkeypatch, tmp_path, tunable):
+    import signal as signal_mod
+    import subprocess
+
+    monkeypatch.setenv("PYTORCH_TUNABLEOP_UNTUNED_FILENAME", str(tmp_path / "tunableop_untuned.csv"))
+    monkeypatch.setenv("PYTORCH_TUNABLEOP_FILENAME", str(tmp_path / "tunableop_%d.csv"))
+    FakeProc.made = []
+    monkeypatch.setattr(subprocess, "Popen", FakeProc)
+    signals = []
+    monkeypatch.setattr(engine_mod.os, "kill", lambda pid, sig: signals.append(sig))
+    return SimpleNamespace(dir=tmp_path, signals=signals, STOP=signal_mod.SIGSTOP, CONT=signal_mod.SIGCONT)
+
+
+@pytest.mark.asyncio
+async def test_tuner_process_starts_when_quiet_pauses_for_requests_and_stops_with_the_engine(
+    started, tuner_env
+):
+    (tuner_env.dir / "tunableop_untuned0.csv").write_text("GemmTunableOp_BFloat16_TN,tn_a\n")
+    eng, _ = started(make_cfg(warmup=False, tunableop_idle_s=0.3, batch_window_ms=1.0))
+    assert wait_for(lambda: len(FakeProc.made) == 1)  # quiet and a recorded GEMM waits: the tuner starts
+    proc = FakeProc.made[0]
+    assert proc.args[1:3] == ["-m", "clef_server.tuner"] and proc.args[3].endswith("tunableop_untuned.csv")
+    assert proc.args[4].endswith("tunableop_0.csv") and proc.args[5].endswith("tunableop_skip.csv")
+    await eng.decide([rec("alpha beta 1")])
+    assert tuner_env.signals[-1] == tuner_env.STOP  # the GPU went to the request
+    assert wait_for(lambda: tuner_env.signals[-1] == tuner_env.CONT)  # quiet again: resumed
+    assert eng.info()["tunableop"]["phase"] == "tuning"
+    eng.shutdown()
+    assert proc.rc == -15 and len(FakeProc.made) == 1
+
+
+def test_no_tuner_when_every_recorded_gemm_is_tuned_and_results_reload(started, tunable, tuner_env):
+    (tuner_env.dir / "tunableop_untuned0.csv").write_text("GemmTunableOp_BFloat16_TN,tn_done\n")
+    (tuner_env.dir / "tunableop_0.csv").write_text("Validator,PT_VERSION,2.11.0\n")  # written by a tuner
+    eng, _ = started(make_cfg(warmup=False, tunableop_idle_s=0.1, batch_window_ms=1.0))
+    assert wait_for(lambda: ("read", "tunableop_0.csv") in tunable.calls)  # the server reloads the results
+    assert wait_for(lambda: eng.tuning is not None and eng.tuning.get("pending") == 0)
+    assert FakeProc.made == [] and eng.tuning["phase"] == "done"
+
+
+def test_tunableop_online_keeps_tuning(started, tunable):
+    eng, _ = started(make_cfg(tunableop_online=True))
+    eng.shutdown()
+    assert tunable.calls == [] and eng.tuning is None
+
+
+def test_tunableop_stops_tuning_without_warmup(started, tunable):
+    """Without a warmup the results file must still load: torch only loads it while tuning is on."""
+    started(make_cfg(warmup=False))
+    assert tunable.loads >= 1 and tunable.calls[:2] == [("tuning", False), ("record", True)]
 
 
 # ---------------------------------------------------------------- serving

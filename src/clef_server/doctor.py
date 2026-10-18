@@ -506,7 +506,8 @@ def run_smoke(r: Report, cfg: Config, timeout: float = 900.0) -> None:
 
     from .engine import Engine
 
-    eng = Engine(dataclasses.replace(cfg, warmup=False), _NullStats())
+    # cache off: the warm probe repeats the first record and must run a forward, not a cache hit
+    eng = Engine(dataclasses.replace(cfg, warmup=False, cache_size=0), _NullStats())
     t0 = time.perf_counter()
     eng.start()
     try:

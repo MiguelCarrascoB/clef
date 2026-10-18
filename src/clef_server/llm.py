@@ -68,6 +68,16 @@ def parse_json_object(text: str) -> dict[str, Any]:
         if isinstance(value, dict):
             return value
     decoder = json.JSONDecoder()
+    body = (text.split("\n", 1)[1] if text.startswith("```") and "\n" in text else text).lstrip()
+    if body.startswith(
+        "{"
+    ):  # the reply opens an object: that one or nothing, never an object nested inside it
+        try:
+            value, _ = decoder.raw_decode(body)  # text after it (a closing fence, "Done.") is ignored
+        except ValueError:
+            raise LLMError("the response is a JSON object that does not parse (cut off?)") from None
+        if isinstance(value, dict):
+            return value
     for m in re.finditer(r"\{", text):  # tolerant parse: prose before / after the object
         try:
             value, _ = decoder.raw_decode(text, m.start())
@@ -198,9 +208,14 @@ class OpenAICompatClient:
         assert resp is not None
         try:
             payload = resp.json()
-            content = payload["choices"][0]["message"]["content"]
+            choice = payload["choices"][0]
+            content = choice["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise LLMError("LLM response has no message content") from exc
+        if (
+            choice.get("finish_reason") == "length"
+        ):  # reasoning models spend max_tokens on hidden thinking too
+            raise LLMError(f"the response was cut off at max_tokens={max_tokens} (finish_reason=length)")
         if not isinstance(content, str):
             raise LLMError("LLM response has no message content")
         data = parse_json_object(content)

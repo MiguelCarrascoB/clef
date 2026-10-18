@@ -986,6 +986,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             k: gpu.get(k) for k in ("vram_allocated_gb", "vram_reserved_gb", "vram_total_gb", "memory_kind")
         }
         body["telemetry"] = meta.get("telemetry")
+        body["tunableop"] = meta.get("tunableop")  # background tuning: {phase, tuned, pending, this_run}
         return body
 
     @v1.get("/stats", summary="Rolling latency / throughput / GPU stats", dependencies=ops_scope)

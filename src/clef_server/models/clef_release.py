@@ -91,9 +91,10 @@ class ClefReleaseAdapter(LocalTensorAdapter):
         self._model: Any = None
         self._processor: Any = None
         self._pad = 0
-        # D2 perf flags (default off; docs/performance.md). Read once: the worker thread is the only caller.
-        self._mask_free = bool(getattr(cfg, "mask_free", False))
-        self._fast_head = bool(getattr(cfg, "fast_head", False))
+        # D2 perf flags (docs/performance.md): None = auto, resolved per backend in load(). Read once: the
+        # worker thread is the only caller; None is falsy, so an adapter that was never loaded runs flags off.
+        self._mask_free = getattr(cfg, "mask_free", None)
+        self._fast_head = getattr(cfg, "fast_head", None)
         self._lock = threading.Lock()  # HF tokenizers are not safe under concurrent use in all versions
 
     @classmethod
@@ -153,11 +154,14 @@ class ClefReleaseAdapter(LocalTensorAdapter):
         )
         model.eval()
         self._model, self._processor = model, processor
+        self._resolve_flags(backend)
         flags = [
             n for n, on in (("CLEF_MASK_FREE", self._mask_free), ("CLEF_FAST_HEAD", self._fast_head)) if on
         ]
         if flags and hasattr(getattr(info, "notes", None), "append"):
-            info.notes.append("perf (opt-in, measure with bench/perf_check.sh): " + ", ".join(flags))
+            info.notes.append(
+                "perf: " + ", ".join(flags) + " (CLEF_MASK_FREE / CLEF_FAST_HEAD=0 turns them off)"
+            )
         pad = getattr(processor.tokenizer, "pad_token_id", None)
         self._pad = 0 if pad is None else int(pad)
         return info
@@ -207,6 +211,12 @@ class ClefReleaseAdapter(LocalTensorAdapter):
             out[key] = batch[key].to(device, non_blocking=True)
         out["media"] = {k: v.to(device, non_blocking=True) for k, v in (batch.get("media") or {}).items()}
         return out
+
+    def _resolve_flags(self, backend: Any) -> None:
+        """Auto (None) perf flags: on with the ROCm backend (measured on the RX 7900 XTX), else off."""
+        rocm = getattr(backend, "name", None) == "rocm"
+        self._mask_free = rocm if self._mask_free is None else bool(self._mask_free)
+        self._fast_head = rocm if self._fast_head is None else bool(self._fast_head)
 
     def forward(self, batch: dict) -> list[list[Any]]:
         if (self._mask_free or self._fast_head) and self._splittable():

@@ -114,7 +114,7 @@ the model is still loading a job waits and retries; it does not fail. Every fail
   "result": null,
   "warnings": ["3 of 12000 item(s) failed; their result rows carry an 'error' field"],
   "metadata": {"batch": "2026-10-03"},
-  "priority": "normal", "urgent": false, "schedule": null, "waiting_reason": "turn", "next_window_at": null,
+  "priority": "normal", "urgent": false, "schedule": null, "waiting_reason": "turn", "waiting_behind": null, "next_window_at": null,
   "expired": false, "model": "clef-flash@abc1234", "tokens": 381204,
   "webhook": {"url": "https://hooks.example.com/clef", "events": ["job.succeeded"], "has_secret": true,
               "failed_deliveries": 0,
@@ -287,7 +287,7 @@ CLEF_WEBHOOK_ALLOW='hooks.example.com,*.corp.example.net,192.168.1.0/24'
 Several jobs can be `running` at once (up to `CLEF_JOB_ACTIVE`, default 4); they take turns at the engine, one
 chunk at a time, so a long job from one key no longer blocks everyone else's. Every job in turns shows
 `running` in `GET /v1/jobs`; `waiting_reason` says why one is not advancing right now: `turn` (waiting for its
-chunk), `active_limit` (no free slot, or it gave its slot to another key's job: see Fair slots), `off_hours`
+chunk), `behind` (an older job of the same key goes first; `waiting_behind` is its id), `active_limit` (no free slot, or it gave its slot to another key's job: see Fair slots), `off_hours`
 (outside its window; `next_window_at` says when it opens).
 
 **Priority.** `"priority": "low" | "normal" (default) | "high"`. Classes are strict: while a `high` job has work,
@@ -295,7 +295,10 @@ chunk), `active_limit` (no free slot, or it gave its slot to another key's job: 
 (never to `urgent`), so nothing starves. `GET /v1/jobs?priority=high` filters.
 
 **Fair share.** Inside a class, turns are shared per key name (the job owner), weighted by records: two keys with
-one huge job each advance at the same speed, and a key with ten jobs does not get ten times the turns. A key
+one huge job each advance at the same speed, and a key with ten jobs does not get ten times the turns. Inside one
+key the oldest job goes first and the key's newer jobs wait (`waiting_reason: "behind"`) until it finishes: the
+first results arrive sooner than if the jobs shared the turns, and the last ones no later. Send `"priority":
+"high"` to let a newer job go first. A key
 that comes back after being idle, or whose jobs were paused (off-hours, or waiting for a slot), starts level with
 the others; it does not collect the turns it missed.
 

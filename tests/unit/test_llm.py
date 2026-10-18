@@ -149,6 +149,12 @@ async def test_missing_usage_is_none():
 
 def test_parse_json_object_and_validate_schema_edges():
     assert parse_json_object(' {"a": 1} ') == {"a": 1}
+    assert parse_json_object('Sure: {"a": 1} done') == {"a": 1}  # prose around one object
+    assert parse_json_object('{"a": 1}\nDone.') == {"a": 1}  # prose after it (ollama, LM Studio)
+    assert parse_json_object('```json\n{"a": 1}\n```\nHope this helps') == {"a": 1}
+    for cut in ('{"proposals": [{"name": "x"}, {"na', '```json\n{"proposals": [{"name": "x"}, {"na'):
+        with pytest.raises(LLMError, match="cut off"):  # never an inner object of a truncated reply
+            parse_json_object(cut)
     with pytest.raises(LLMError):
         validate_schema({"labels": [1]}, SCHEMA)
     with pytest.raises(LLMError):
@@ -184,3 +190,15 @@ def test_key_is_not_logged_on_retry(caplog, monkeypatch):
     with caplog.at_level(logging.DEBUG):
         asyncio.run(call(make(lambda req: answers.pop(0))))
     assert "sk-secret-123" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_reply_cut_off_at_max_tokens_is_an_error():
+    def handler(req):
+        r = reply('{"labels": ["a"')
+        body = json.loads(r.content)
+        body["choices"][0]["finish_reason"] = "length"
+        return httpx.Response(200, json=body)
+
+    with pytest.raises(LLMError, match="max_tokens=2048"):
+        await call(make(handler))

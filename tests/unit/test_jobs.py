@@ -1145,3 +1145,12 @@ def test_cancel_is_not_lost_when_park_wins_the_race(monkeypatch):
         got = client.get(f"/v1/jobs/{jid}").json()
         assert got["status"] == "cancelled" and got["resumes"] == 0
         assert sum(eng.sizes) == 0  # never run
+
+
+def test_public_job_reports_the_job_it_waits_behind():
+    store = open_store(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
+    row = store.create("classify", "alice", {"inputs": ["x"]}, None, None, 1)
+    view = public_job(row, waiting=("behind", None, "job_older"))
+    assert view["waiting_reason"] == "behind" and view["waiting_behind"] == "job_older"
+    assert public_job(row)["waiting_reason"] is None and public_job(row)["waiting_behind"] is None
+    store.close()

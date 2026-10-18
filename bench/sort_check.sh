@@ -65,7 +65,8 @@ vrun() { # vrun <variant> <cmd...>: run with that variant's environment and its 
   shift
   # shellcheck disable=SC2086
   env -u CLEF_JOB_SORT_WINDOW -u CLEF_TOKENIZE_AHEAD -u CLEF_MASK_FREE -u CLEF_FAST_HEAD \
-    CLEF_STATE_DIR="$PWD/$OUT/state-$v" CLEF_CACHE_SIZE=0 CLEF_MAX_MICROBATCH="${MICROBATCH:-8}" \
+    CLEF_MASK_FREE=0 CLEF_FAST_HEAD=0 CLEF_TUNABLEOP=0 CLEF_STATE_DIR="$PWD/$OUT/state-$v" CLEF_CACHE_SIZE=0 \
+    CLEF_MAX_MICROBATCH="${MICROBATCH:-8}" \
     CLEF_MAX_JOB_ITEMS=100000 ${VENV[$v]} "$@"
 }
 

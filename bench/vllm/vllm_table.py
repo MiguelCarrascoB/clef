@@ -3,7 +3,7 @@
     python bench/vllm/vllm_table.py bench/out/vllm [--min-speedup 1.3 --level 16 ...]
 
 Inputs in the directory (missing ones show as "-" and the matching rule can only FAIL/UNKNOWN):
-    bench_clef_base.txt, bench_clef_both.txt, bench_vllm.txt   bench/vllm/load.py output (`clef bench` table)
+    bench_clef_{base,both,tun}.txt, bench_vllm.txt   bench/vllm/load.py output (`clef bench` table)
     vram_<line>.json                                           load.py --vram-json
     parity_vllm.txt/.rc                                        bench/parity.py --compare dump_clef.json dump_vllm.json
 Writes summary.md and summary.json next to them and prints the same. Exit 0 ADOPT, 1 DO NOT ADOPT / INCONCLUSIVE.
@@ -29,6 +29,7 @@ _spec.loader.exec_module(perf_table)
 LINES = [
     ("clef_base", "clef, all flags off"),
     ("clef_both", "clef, CLEF_MASK_FREE=1 CLEF_FAST_HEAD=1"),
+    ("clef_tun", "clef, CLEF_TUNABLEOP=1 (tuned at its first start)"),
     ("vllm", "vLLM nightly (Docker)"),
 ]
 

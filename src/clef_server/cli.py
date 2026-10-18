@@ -546,6 +546,46 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return int(httpbench.main(args.rest))
 
 
+def cmd_tune(args: argparse.Namespace) -> int:
+    """Tune the GEMM shapes a CLEF_TUNABLEOP=1 server recorded as untuned after its warmup (they ran the
+    default kernel) and add them to the model's tuned file, used from the next start. Needs the GPU."""
+    cfg = load_config(serve_env(args))
+    if livez(base_url(cfg)):
+        print(
+            f"clef tune: a clef server answers on {base_url(cfg)}; stop it first (clef stop)", file=sys.stderr
+        )
+        return 1
+    from clef_server import backend
+
+    os.environ["CLEF_TUNABLEOP"] = "1"
+    backend.prepare_environment(os.environ)
+    pattern = os.environ.get("PYTORCH_TUNABLEOP_UNTUNED_FILENAME")
+    if not pattern or os.environ.get("PYTORCH_TUNABLEOP_ENABLED") != "1":
+        print("clef tune: TunableOp needs a ROCm build of torch", file=sys.stderr)
+        return 2
+    base = Path(pattern)  # torch writes <stem><ordinal><suffix>: tunableop_untuned0.csv
+    files = sorted(base.parent.glob(f"{base.stem}*{base.suffix}"))
+    shapes = {
+        line for f in files for line in f.read_text().splitlines() if line.startswith(("Gemm", "ScaledGemm"))
+    }
+    if not shapes:
+        print(f"clef tune: nothing to tune (no untuned GEMMs in {base.parent})")
+        return 0
+    from torch.cuda import tunable
+
+    tunable.enable(True)
+    tunable.tuning_enable(True)
+    tunable.record_untuned_enable(False)
+    print(f"tuning {len(shapes)} GEMM shape(s) from {', '.join(f.name for f in files)} ...", flush=True)
+    t0 = time.perf_counter()
+    for f in files:
+        tunable.tune_gemm_in_file(str(f))
+        f.unlink()
+    results = os.environ["PYTORCH_TUNABLEOP_FILENAME"].replace("%d", "0")
+    print(f"done in {time.perf_counter() - t0:.0f}s -> {results} (written on exit; used from the next start)")
+    return 0
+
+
 def cmd_open(args: argparse.Namespace) -> int:
     import webbrowser
 
@@ -959,6 +999,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("rest", nargs=argparse.REMAINDER)
     sp.set_defaults(func=cmd_bench)
+
+    sp = sub.add_parser("tune", help="TunableOp: tune the GEMM shapes the server ran untuned (stop it first)")
+    sp.set_defaults(func=cmd_tune)
 
     sp = sub.add_parser("open", help="open the console in the browser")
     netflags(sp)

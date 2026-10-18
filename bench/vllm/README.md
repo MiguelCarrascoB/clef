@@ -1,5 +1,11 @@
 # vLLM vs clef benchmark (Wave G)
 
+> **Result on the RX 7900 XTX (2026-10-18):** vLLM 12.2 req/s at concurrency 8-32 vs 10.9-11.1 for tuned clef
+> (+10%), slower single requests (p95 157 vs 108 ms), max |dp| 0.034 → not adopted on this card; keep this check
+> for other GPUs. On WSL the image needs `ROCPROFILER_REGISTER_ENABLED=0` (now in `DOCKER_GPU_FLAGS`; its torch links
+> rocprofiler-sdk, unsupported on WSL) and snap Docker needs the WSL files under `$HOME` (`DXCORE`, `ROCDXG`, `DIDS`).
+> Full table: [docs/hardware-results.md](../../docs/hardware-results.md).
+
 Question (UPGRADES.md D12): does vLLM serve clef-flash enough faster than clef to justify an adapter? vLLM is adopted
 only if this benchmark shows a real gain. Prepared on 2026-10-17 without a GPU; nothing here has been run yet.
 

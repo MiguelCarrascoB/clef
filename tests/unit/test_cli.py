@@ -365,3 +365,30 @@ def test_serve_detach_stops_server_on_error_status(tmp_path, monkeypatch, capsys
     assert killed == [(31337, True)]
     assert not (tmp_path / "server.pid").exists()
     assert "status=error" in capsys.readouterr().err
+
+
+def test_tune_refuses_while_a_server_runs(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "livez", lambda url: True)
+    assert cli.main(["tune"]) == 1
+    assert "stop it first" in capsys.readouterr().err
+
+
+def test_tune_needs_a_rocm_torch(monkeypatch, capsys):
+    from clef_server import backend
+
+    monkeypatch.setattr(cli, "livez", lambda url: False)
+    monkeypatch.setattr(backend, "_installed_torch_version", lambda: "2.11.0+cpu")
+    for name in ("PYTORCH_TUNABLEOP_ENABLED", "PYTORCH_TUNABLEOP_UNTUNED_FILENAME", "CLEF_TUNABLEOP"):
+        monkeypatch.delenv(name, raising=False)
+    assert cli.main(["tune"]) == 2
+    assert "ROCm" in capsys.readouterr().err
+
+
+def test_tune_with_nothing_recorded(monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(cli, "livez", lambda url: False)
+    monkeypatch.setenv("PYTORCH_TUNABLEOP_ENABLED", "1")
+    monkeypatch.setenv("PYTORCH_TUNABLEOP_FILENAME", str(tmp_path / "tunableop_%d.csv"))
+    monkeypatch.setenv("PYTORCH_TUNABLEOP_UNTUNED_FILENAME", str(tmp_path / "tunableop_untuned.csv"))
+    (tmp_path / "tunableop_untuned0.csv").write_text("Validator,PT_VERSION,2.11.0\n")
+    assert cli.main(["tune"]) == 0
+    assert "nothing to tune" in capsys.readouterr().out

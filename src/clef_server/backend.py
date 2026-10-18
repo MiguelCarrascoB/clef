@@ -80,8 +80,14 @@ def prepare_environment(environ: MutableMapping[str, str] = os.environ) -> list[
         wanted["TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL"] = "1"
         if _is_wsl():
             wanted["HSA_ENABLE_DXG_DETECTION"] = "1"
-        if environ.get("CLEF_TUNABLEOP") == "1":
+        # TunableOp is on by default on ROCm (docs/performance.md); CLEF_TUNABLEOP=0 turns it off
+        if (environ.get("CLEF_TUNABLEOP") or "1").strip().lower() not in ("0", "false", "no", "off"):
             wanted["PYTORCH_TUNABLEOP_ENABLED"] = "1"
+            # torch benchmarks every candidate kernel of a GEMM for up to 30 ms / 100 runs by default: the
+            # warmup grid on the 7900 XTX would take an estimated 2.5-3 h; this budget measured 61 min.
+            # Set either variable to override.
+            wanted["PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS"] = "5"
+            wanted["PYTORCH_TUNABLEOP_MAX_TUNING_ITERATIONS"] = "20"
             try:
                 from .config import default_state_dir
                 from .models.registry import model_slug
@@ -90,6 +96,9 @@ def prepare_environment(environ: MutableMapping[str, str] = os.environ) -> list[
                 # the engine creates the directory before the load
                 tdir = default_state_dir() / "tunableop" / model_slug(environ)
                 wanted["PYTORCH_TUNABLEOP_FILENAME"] = str(tdir / "tunableop_%d.csv")
+                # shapes served untuned after warmup (the engine stops tuning then); `clef tune` tunes them.
+                # torch appends the device ordinal itself here (no %d): tunableop_untuned0.csv
+                wanted["PYTORCH_TUNABLEOP_UNTUNED_FILENAME"] = str(tdir / "tunableop_untuned.csv")
             except Exception:  # pragma: no cover - cosmetic
                 pass
     if sys.platform == "darwin":

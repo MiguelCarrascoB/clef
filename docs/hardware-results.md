@@ -152,20 +152,63 @@ A multiple of 8 was about 12% faster at concurrency 8 and 2% faster at concurren
 Only one mode and one record length were measured; the bf16 and mixed-length workloads are untested, so the default is unchanged.
 
 
-## D2 perf flags (pending: run `bench/perf_check.sh` on the 7900 XTX)
+## Speed flags and TunableOp on ROCm (RX 7900 XTX, 2026-10-18)
 
-Nothing below is measured yet. Fill the table from `bench/out/perf/summary.md` (same session for every row; same-day
-drift is ~5%). Parity gate: 0 top-1 flips and max |dp| <= 2e-3 against the flags-off engine, singles and batched.
-Method and flag descriptions: [Performance](performance.md#opt-in-speedups-not-yet-measured-on-a-gpu).
+`bench/perf_check.sh`, one session, result cache off, fixed-length records (`clef bench`). Parity is against the
+flags-off engine (200 records, 10 with images; the flags-off engine run twice differs by 0.0, so the 2e-3 gate is
+the floor). Every top-1 change was a near coin-flip (reference top-2 margin 0.0015-0.017, the lowest 1.5% of the
+399 questions).
 
-| Variant | Parity | c=1 p50 / p95 ms | c=1 req/s | c=8 req/s | c=16 req/s |
+| Variant | Parity: max \|dp\| / top-1 flips | c=1 p50 / p95 ms | c=1 req/s | c=8 req/s | c=16 req/s |
 | --- | --- | --- | --- | --- | --- |
-| flags off (base) | reference | pending | pending | pending | pending |
-| `CLEF_MASK_FREE=1` | pending | pending | pending | pending | pending |
-| `CLEF_FAST_HEAD=1` | pending | pending | pending | pending | pending |
-| both | pending | pending | pending | pending | pending |
-| `CLEF_TUNABLEOP=1` (second run) | pending | pending | pending | pending | pending |
-| both + `CLEF_TUNABLEOP=1` | pending | pending | pending | pending | pending |
+| flags off (base) | reference | 133.8 / 683.7 | 4.5 | 8.5 | 9.1 |
+| `CLEF_MASK_FREE=1` | 0.0235 / 1 | 137.5 / 610.0 | 4.5 | 8.6 | 9.0 |
+| `CLEF_FAST_HEAD=1` | 0.0038 / 0 | 133.3 / 588.8 | 4.6 | 8.6 | 9.5 |
+| both | 0.0235 / 1 | 133.8 / 585.6 | 4.6 | 8.7 | 9.5 |
+| `CLEF_TUNABLEOP=1` (tuned) | 0.0219 / 3 | 104.2 / 502.5 | 5.7 | 10.1 | 10.8 |
+| both + TunableOp (**the ROCm default**) | 0.0273 / 0 | 98.6 / 452.3 | 6.0 | 11.3 | 11.8 |
 
-Step 0 (`profile_forward.py --batch 8`): kernel/wall at batch 1 and 8, GEMM share: pending. Kernel/wall >= 0.9 at
-batch 8 means batched serving is GEMM-bound and only GEMM tuning can help it.
+Step 0 (`profile_forward.py --batch 8`): single record kernel/wall 0.22 (host overhead dominates), batch 8 0.68;
+GEMM 81-84% of kernel time. Accuracy on the 47 labelled tickets: 0.872 with TunableOp off and on.
+
+Mixed-length traffic (`clef bench --mixed`), TunableOp off vs on: c=1 5.9 vs 7.6 req/s (p50/p95/max 151/241/249 vs
+111/199/204 ms), c=8 6.0 vs 7.9, c=16 6.2 vs 7.9 (+27-32%).
+
+**TunableOp cost and design.** On gfx1100 PyTorch already uses rocBLAS; TunableOp's gain is choosing better rocBLAS
+solutions (1054 of 1181 tuned GEMMs are rocBLAS, 66 hipBLASLt; tuned GEMMs ~40% faster than rocBLAS's own pick).
+Tuning costs a fixed ~4-8 s per GEMM whatever the per-candidate budget (30 ms / 100 runs, 5 ms / 20 and 1 ms / 3
+pick equally fast kernels), so the ~535 GEMMs of the serving grid take about an hour. Tuning on the request instead
+(the old behaviour) gave single requests p50 2.7 s, p95 39 s until every shape had been seen. clef now tunes in the
+background while idle (a step only after 2 s without requests), never on a live request.
+
+## vLLM vs clef (RX 7900 XTX, 2026-10-18)
+
+`bench/vllm/vllm_check.sh`, vLLM nightly image `vllm/vllm-openai-rocm:nightly-39983a5e…` (clef-flash natively,
+`max-num-seqs 8`), 100 requests per level, same session. In-container ROCm on WSL needed
+`ROCPROFILER_REGISTER_ENABLED=0` (the image's torch links rocprofiler-sdk, which is unsupported on WSL).
+
+| Line | c=1 p50 / p95 ms, req/s | c=8 req/s | c=16 p50 / p95 ms, req/s | c=32 req/s |
+| --- | --- | --- | --- | --- |
+| clef, flags off | 137 / 145, 7.2 | 8.8 | 1748 / 1797, 9.0 | 9.0 |
+| clef, `MASK_FREE` + `FAST_HEAD` | 134 / 138, 7.4 | 8.8 | 1663 / 1684, 9.6 | 9.5 |
+| clef, TunableOp | 104 / 108, 9.5 | 10.9 | 1434 / 1443, 11.1 | 10.8 |
+| vLLM | 136 / 157, 7.3 | 12.2 | 1304 / 1312, 12.2 | 12.1 |
+
+Parity vLLM vs clef flags off: max |dp| 0.034, 1 flip (near tie). Decision on this card: **not adopted** (1.10x at
+c=16 against a 1.3x bar, 1.45x the p95 at c=1). Re-run the script on other GPUs before deciding there.
+
+## Job feeding (length sort, tokenize ahead) and sharing the GPU (RX 7900 XTX, 2026-10-18)
+
+`bench/sort_check.sh` (2000 long-tailed items x 3 for base and sort; quick run 600 x 2 for all four):
+
+| Variant | Items/s | Gain | Labels | Interactive p95 |
+| --- | --- | --- | --- | --- |
+| base | 9.5-9.7 | - | - | 734-805 ms |
+| `CLEF_JOB_SORT_WINDOW=512` | 10.7-11.0 | +13-14% | 100% | 786 (quick) / 926 (full) ms |
+| `CLEF_TOKENIZE_AHEAD=1` | 9.5 | +0.3% | 100% | 789 ms |
+| both | 10.6 | +12% | 100% | 1005 ms |
+
+Both stay **off**: the window's gain costs interactive latency. Interactive latency during a 3000-item job
+(unique requests, cache off): idle p50 140 ms; one job 622 ms (before the priority lane) vs 627 ms (with it);
+2 keys x 2 jobs 624 ms, about one batch-8 forward.
+

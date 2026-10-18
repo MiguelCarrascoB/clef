@@ -662,11 +662,12 @@ class JobStore:
 
 
 def public_job(
-    row: dict[str, Any], now: float | None = None, waiting: tuple[str | None, float | None] = (None, None)
+    row: dict[str, Any], now: float | None = None, waiting: tuple[Any, ...] = (None, None, None)
 ) -> dict[str, Any]:
     """The JSON a client sees (never the payload, owner or webhook secret).
 
-    ``waiting`` = ``(waiting_reason, next_window_at)`` from :meth:`JobRunner.waiting` (runtime state).
+    ``waiting`` = ``(waiting_reason, next_window_at, waiting_behind)`` from :meth:`JobRunner.waiting`
+    (runtime state).
     """
     now = time.time() if now is None else now
     done, total, status = row["done"], row["total"], row["status"]
@@ -716,6 +717,7 @@ def public_job(
         "schedule": row["schedule"],
         "waiting_reason": waiting[0],
         "next_window_at": _iso(waiting[1]),
+        "waiting_behind": waiting[2],
         "expired": status == "cancelled" and row["error"] == EXPIRED,
         "model": row["model"],
         "tokens": row["tokens"],
@@ -812,8 +814,11 @@ class JobInfo(BaseModel):
     priority: Literal["low", "normal", "high", "urgent"] = "normal"
     urgent: bool = False
     schedule: dict[str, Any] | None = Field(None, description="{window, tz} the job is restricted to")
-    waiting_reason: Literal["off_hours", "active_limit", "turn"] | None = Field(
+    waiting_reason: Literal["off_hours", "active_limit", "turn", "behind"] | None = Field(
         None, description="why a queued / running job is not advancing right now"
+    )
+    waiting_behind: str | None = Field(
+        None, description="the older job of the same key that takes the turns first (waiting_reason behind)"
     )
     next_window_at: str | None = Field(None, description="when the window opens next (off_hours only)")
     expired: bool = Field(False, description="cancelled because expire_after_s ran out")
@@ -1023,6 +1028,16 @@ class Scheduler:
         if e is None:
             return None
         return e.pause or ("turn" if e.waiter is not None and not e.waiter.done() else None)
+
+    def behind(self, job_id: str, now: float) -> str | None:
+        """The same owner's job that takes the turns while ``job_id`` waits, or None. Inside one owner the
+        turn key differs only by class, interrupted and ``seq``: its oldest best-class job goes first."""
+        e = self.entries.get(job_id)
+        if e is None or e.pause is not None:
+            return None
+        mine = [x for x in self.entries.values() if x.owner == e.owner and x.pause is None]
+        first = min(mine, key=lambda x: self.key(x, now))
+        return None if first.id == e.id else first.id
 
     def next_edge(self, now: float) -> float | None:
         """The next moment (after ``now``) a window opens / closes or a job expires, for the idle timer."""
@@ -1569,27 +1584,28 @@ class JobRunner:
         row = self.store.get(job_id)
         return None if row is None else public_job(row, waiting=self.waiting(row))
 
-    def waiting(self, row: dict[str, Any]) -> tuple[str | None, float | None]:
-        """``(waiting_reason, next_window_at)`` of a job row: why it is not advancing right now."""
+    def waiting(self, row: dict[str, Any]) -> tuple[str | None, float | None, str | None]:
+        """``(waiting_reason, next_window_at, waiting_behind)`` of a job row: why it is not advancing now."""
         status = row["status"]
         if status not in ACTIVE:
-            return None, None
+            return None, None, None
         now = self.clock()
         e = self.sched.entries.get(row["id"])
         if e is not None:
             reason = self.sched.waiting(row["id"])
             nxt = e.window.next_start(now) if e.window is not None and reason == "off_hours" else None
-            return reason, nxt
+            ahead = self.sched.behind(row["id"], now) if reason == "turn" else None
+            return ("behind" if ahead else reason), nxt, ahead
         if status != "running" and row["priority"] < PRIORITY_URGENT and row["schedule"]:
             try:
                 window = parse_window(row["schedule"]["window"], row["schedule"]["tz"])
             except (ValueError, KeyError):
                 window = None
             if window is not None and not window.contains(now):
-                return "off_hours", window.next_start(now)
+                return "off_hours", window.next_start(now), None
         if status != "running" and not self.sched.has_slot() and row["priority"] < PRIORITY_URGENT:
-            return "active_limit", None
-        return None, None
+            return "active_limit", None, None
+        return None, None, None
 
     async def cancel(self, job_id: str) -> dict[str, Any]:
         """Cancel a queued or running job (KeyError: no such job); returns its public view."""

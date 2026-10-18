@@ -58,7 +58,8 @@ def test_prepare_environment_rocm_on_wsl(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     env: dict = {}
     set_names = bk.prepare_environment(env)
-    assert env == {"TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL": "1", "HSA_ENABLE_DXG_DETECTION": "1"}
+    rocm = {"TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL": "1", "HSA_ENABLE_DXG_DETECTION": "1"}
+    assert rocm.items() <= env.items() and env["PYTORCH_TUNABLEOP_ENABLED"] == "1"  # TunableOp: default on
     assert set(set_names) == set(env)
 
 
@@ -68,7 +69,12 @@ def test_prepare_environment_rocm_native_linux_has_no_dxg(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     env: dict = {}
     bk.prepare_environment(env)
-    assert "HSA_ENABLE_DXG_DETECTION" not in env and "PYTORCH_TUNABLEOP_ENABLED" not in env
+    assert (
+        "HSA_ENABLE_DXG_DETECTION" not in env and env["PYTORCH_TUNABLEOP_ENABLED"] == "1"
+    )  # default on ROCm
+    off = {"CLEF_TUNABLEOP": "0"}
+    bk.prepare_environment(off)
+    assert "PYTORCH_TUNABLEOP_ENABLED" not in off
 
 
 def test_prepare_environment_tunableop_opt_in(monkeypatch):
@@ -79,6 +85,20 @@ def test_prepare_environment_tunableop_opt_in(monkeypatch):
     assert env["PYTORCH_TUNABLEOP_ENABLED"] == "1" and env["PYTORCH_TUNABLEOP_FILENAME"].endswith(
         "tunableop_%d.csv"
     )
+    untuned = env["PYTORCH_TUNABLEOP_UNTUNED_FILENAME"]
+    assert untuned.endswith("tunableop_untuned.csv")  # torch appends the ordinal: tunableop_untuned0.csv
+    assert Path(untuned).parent == Path(env["PYTORCH_TUNABLEOP_FILENAME"]).parent
+    assert "PYTORCH_TUNABLEOP_TUNING" not in env  # it would override the engine's tuning_enable(False)
+    assert env["PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS"] == "5"
+    assert env["PYTORCH_TUNABLEOP_MAX_TUNING_ITERATIONS"] == "20"
+
+
+def test_prepare_environment_keeps_a_user_tuning_budget(monkeypatch):
+    monkeypatch.setattr(bk, "_installed_torch_version", lambda: "2.11.0+rocm7.2")
+    monkeypatch.setattr(bk, "_is_wsl", lambda: False)
+    env = {"CLEF_TUNABLEOP": "1", "PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS": "30"}
+    bk.prepare_environment(env)
+    assert env["PYTORCH_TUNABLEOP_MAX_TUNING_DURATION_MS"] == "30"
 
 
 @pytest.mark.parametrize("version", ["2.11.0+cu128", "2.11.0", "2.11.0+cpu", None])

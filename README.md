@@ -37,10 +37,11 @@ ClefClient().classify("Checkout is down", ["billing", "technical"])
 - 🖼️ **Multimodal input:** text, JSON, images and video in the same request.
 - 🔌 **Works with existing clients:** the official OpenAI SDK (structured outputs) and Hugging Face zero-shot clients run against your own machine.
 - 📏 **Measures quality on your data:** accuracy, F1, a confusion matrix and calibration (ECE, Brier), plus a coverage-vs-accuracy curve for choosing an auto-route threshold.
-- ⏱️ **Async jobs and webhooks:** up to 100,000 rows per job, persisted in SQLite (or Postgres) and resumable after a restart, with signed callbacks guarded against SSRF.
+- ⏱️ **Async jobs, batches and webhooks:** up to 100,000 rows per job, persisted in SQLite (or Postgres) and resumable after a restart, fair turns between API keys, the OpenAI Batch API (`/v1/files`, `/v1/batches`), and signed callbacks guarded against SSRF.
+- 🌱 **A label set that grows:** a router keeps the texts its classifier cannot place, asks an LLM (Gemini, or any OpenAI-compatible server) for new labels, and only shows you the ones clef itself confirms, in a **Review** queue.
 - 💻 **Runs on the hardware you have:** NVIDIA, AMD (ROCm, also under WSL2), Apple Silicon and CPU. A 24 GB card runs it as is. **16, 12 and 8 GB GPUs** work through CPU layer streaming or int8, and the cost of each option is measured.
 - 🧰 **Comes with tooling:** a `clef` CLI (`serve`, `doctor`, `download`, `bench`), typed sync and async Python clients, a JS/TS client with no dependencies, an OpenAPI schema, Docker images and service files.
-- 🔒 **Local by default:** binds to loopback only, with named API keys, per-key rate limits, SSRF guards and input caps for LAN use.
+- 🔒 **Local by default:** binds to loopback only, with hashed API keys (scopes, daily quotas, a console **Keys** tab and an audit log), per-key rate limits, SSRF guards and input caps for LAN use.
 
 > [!NOTE]
 > clef is an independent project. It is not affiliated with or endorsed by Cloudflare; it runs their openly released clef-flash model.
@@ -60,6 +61,9 @@ clef serve       # then open http://127.0.0.1:8910/
 Swap the `cuda` extra for `rocm`, `mps` or `cpu`. clef is not on PyPI yet; [Installation](#installation) covers each platform.
 
 ## Usage
+
+> [!TIP]
+> New here? [`examples/quickstart.ipynb`](examples/quickstart.ipynb) walks through everything below in a notebook: classify, score, saved classifiers, jobs, the OpenAI Batch API, evaluation, the router and Review queue, API keys and the performance settings.
 
 ### Classify, score, save a classifier
 
@@ -118,7 +122,18 @@ with ClefClient() as clef:
     clef.save_job_results(job.id, "results.csv", format="csv")
 ```
 
-Jobs survive restarts and share the GPU fairly with interactive calls. Results can be paged or streamed as JSON, NDJSON or CSV. Webhooks are off until `CLEF_WEBHOOK_ALLOW` lists the receivers.
+Jobs survive restarts and share the GPU fairly with interactive calls: jobs of different API keys take turns, and inside one key the oldest job goes first (the others show `waiting_reason: "behind"`). Results can be paged or streamed as JSON, NDJSON or CSV. Webhooks are off until `CLEF_WEBHOOK_ALLOW` lists the receivers. The OpenAI SDK's `files.create` + `batches.create` work too ([guide](docs/openai-compat.md)).
+
+### Grow the label set with a router
+
+```python
+c.put_router("tickets", seeds={"billing": "money, invoices", "technical": "bugs and outages"}, mode="review")
+c.route("tickets", "I can't add a teammate to our workspace")   # reason: "other" -> kept for the LLM
+c.propose("tickets")                                             # or wait: every 20 kept texts
+c.list_review(router="tickets", kind="proposal")                 # e.g. "account_management", confirmed by clef
+```
+
+Set `GEMINI_API_KEY` (or `CLEF_LLM_BASE_URL` for ollama, LM Studio or OpenAI) in `.env`; buffered texts are sent to that host. Approve, edit or reject proposals in the console's **Review** tab ([guide](docs/router.md)).
 
 <details>
 <summary><b>All endpoints</b></summary>
@@ -132,6 +147,9 @@ Jobs survive restarts and share the GPU fairly with interactive calls. Results c
 | `POST /hf/models/{id}` | Hugging Face zero-shot |
 | `POST /v1/evaluate`, `/v1/evaluate/metrics` | evaluation metrics |
 | `/v1/jobs…` | async jobs (create, list, get, results, cancel, delete) |
+| `POST /v1/files`, `/v1/batches…` | the OpenAI Batch API (JSONL in, JSONL out) |
+| `/v1/routers…`, `/v1/review…` | routers that grow a label set, and the Review queue |
+| `/v1/admin/keys…`, `GET /v1/admin/audit` | API keys with scopes and quotas, the audit log |
 | `GET /health`, `/livez`, `/readyz` | status, liveness, readiness (open, no key) |
 | `GET /v1/stats`, `/v1/log`, `/v1/events` | observability (SSE) |
 
@@ -181,16 +199,21 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/performance.md](
 
 ## Performance
 
-Measured on an AMD RX 7900 XTX (ROCm 7.2, WSL2, bf16). This is the only GPU the project has run on so far. Records are about 330 tokens; 100 requests per level with `clef bench` ([details](docs/hardware-results.md)).
+Measured on an AMD RX 7900 XTX (ROCm 7.2, WSL2, bf16), 2026-10-18. This is the only GPU the project has fully benchmarked so far. Records are about 330 tokens; 100 requests per level with `clef bench` ([details](docs/hardware-results.md)).
 
-| | v3 |
-| --- | --- |
-| Single record p50 / p95 | 149.0 / 159.2 ms |
-| Throughput, concurrency 1 | 6.6-6.7 req/s |
-| Throughput, concurrency 16 (micro-batching) | 8.8-8.9 req/s |
-| Peak VRAM | ~19.5 GB |
+| | flags off | ROCm defaults (TunableOp + `MASK_FREE` + `FAST_HEAD`) |
+| --- | --- | --- |
+| Single record p50 / p95 | 137 / 145 ms | **104 / 108 ms** |
+| Throughput, concurrency 1 | 7.2 req/s | **9.5 req/s** |
+| Throughput, concurrency 16 (micro-batching) | 9.0 req/s | **11.1-11.8 req/s** |
+| Mixed-length traffic (`clef bench --mixed`) | 5.9-6.2 req/s | **7.6-7.9 req/s (+27-32%)** |
+| Peak VRAM | ~21.7 GB | ~21.0 GB |
 
-Profiling shows the model is **compute-bound**: GEMMs take about 83% of GPU kernel time, and roughly half of a single-record forward is host overhead. NVIDIA, Apple Silicon and CPU numbers are still pending.
+On ROCm, clef tunes its matrix multiplies for your exact GPU (PyTorch TunableOp): the server is ready in seconds and tunes in the background while idle, about an hour of idle time once per GPU / driver / ROCm / PyTorch version, kept in the state dir. Probabilities move by up to ~0.03 with these settings; top answers only change on near coin-flip questions. `CLEF_TUNABLEOP=0`, `CLEF_MASK_FREE=0` and `CLEF_FAST_HEAD=0` turn them off ([Performance](docs/performance.md)).
+
+**vLLM** (nightly, which serves clef-flash natively) was measured on the same card: +10% at concurrency 8-32, slower for single requests (p95 157 against 108 ms). It is not adopted for now; `bench/vllm/vllm_check.sh` re-runs the comparison on other GPUs, where the result may differ.
+
+Profiling shows the model is **compute-bound**: GEMMs take about 81% of GPU kernel time at batch 8, and most of a single-record forward is host overhead. NVIDIA, Apple Silicon and CPU numbers are still pending.
 
 ### Hardware requirements
 

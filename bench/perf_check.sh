@@ -65,7 +65,8 @@ vrun() { # vrun <variant> <cmd...>: run with that variant's environment and its 
   shift
   # shellcheck disable=SC2086
   env -u CLEF_MASK_FREE -u CLEF_FAST_HEAD -u CLEF_TUNABLEOP -u PYTORCH_TUNABLEOP_ENABLED \
-    -u PYTORCH_TUNABLEOP_FILENAME CLEF_STATE_DIR="$PWD/$OUT/state-$v" ${VENV[$v]} "$@"
+    -u PYTORCH_TUNABLEOP_FILENAME CLEF_MASK_FREE=0 CLEF_FAST_HEAD=0 CLEF_TUNABLEOP=0 CLEF_STATE_DIR="$PWD/$OUT/state-$v" CLEF_CACHE_SIZE=0 \
+    ${VENV[$v]} "$@"
 }
 dump() { # dump <variant> <out json>
   vrun "$1" "$PY" bench/parity.py --engine-dump "$2" --n "$N" --images "$IMAGES"
@@ -76,10 +77,19 @@ compare() { # compare <name> <ref json> <new json> [informational]
   echo "$rc" >"$OUT/parity_$1.rc"
   if [ "$rc" != 0 ] && [ -z "${4:-}" ]; then fail "parity $1 (see $OUT/parity_$1.txt)"; fi
 }
+wait_ready() { # serve --detach returns while warming; time only a ready server (TunableOp's first start: ~1 h)
+  local left=${READY_TIMEOUT_S:-7200} # 0 = do not wait
+  while [ "$left" -gt 0 ]; do
+    curl -fsS -m 3 "http://127.0.0.1:${PORT}/readyz" >/dev/null 2>&1 && return 0
+    sleep 1
+    left=$((left - 1))
+  done
+  [ "${READY_TIMEOUT_S:-7200}" = 0 ]
+}
 serve_bench() { # serve_bench <variant> <requests> <out txt>
   local v=$1
-  if ! vrun "$v" "${CLEF[@]}" serve --detach --timeout 1800; then
-    fail "server did not start for $v"
+  if ! vrun "$v" "${CLEF[@]}" serve --detach --timeout 1800 || ! wait_ready; then
+    fail "server did not start (or warm up) for $v"
     vrun "$v" "${CLEF[@]}" stop >/dev/null 2>&1 || true # a half-started server must not keep the GPU
     return 1
   fi

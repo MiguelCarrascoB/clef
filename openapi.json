@@ -2301,13 +2301,26 @@
             "title": "Urgent",
             "type": "boolean"
           },
+          "waiting_behind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the older job of the same key that takes the turns first (waiting_reason behind)",
+            "title": "Waiting Behind"
+          },
           "waiting_reason": {
             "anyOf": [
               {
                 "enum": [
                   "off_hours",
                   "active_limit",
-                  "turn"
+                  "turn",
+                  "behind"
                 ],
                 "type": "string"
               },

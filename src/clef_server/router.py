@@ -777,7 +777,8 @@ class RouterService:
                 user=user,
                 schema=proposal_schema(),
                 name=purpose,
-                max_tokens=3072 if cold else 2048,
+                # Gemini 3 Flash spends ~2-3k of these on hidden reasoning before the JSON (measured)
+                max_tokens=8192 if cold else 4096,
             )
         except LLMError as exc:
             self._backoff[name] = self.now() + BACKOFF_S

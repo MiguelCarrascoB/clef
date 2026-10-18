@@ -10,6 +10,7 @@
 | `clef doctor [--no-gpu] [--smoke] [--json]` | environment checks per backend; `--smoke` loads the model and runs one record |
 | `clef download [--revision SHA] [--dir DIR] [--yes]` | pinned, resumable download of the weights with a disk-space check |
 | `clef bench [args]` | HTTP load test against the running server |
+| `clef tune` | TunableOp (ROCm, `CLEF_TUNABLEOP=1`): tune the GEMM shapes the server ran untuned after warmup; stop the server first ([Performance](performance.md#tunableop-rocm)) |
 | `clef open` | open the console in the browser |
 | `clef version` | print the version |
 
