@@ -87,7 +87,7 @@ See [Jobs & webhooks](jobs.md).
 
 ## Router and review
 
-The router is off unless a key is set in the process environment ([Router and Review](router.md)).
+The router is off unless a key is set in the environment or an [env file](#env-files) ([Router and Review](router.md)).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -117,11 +117,17 @@ CLEF_API_KEYS=~/.config/clef/keys
 ```
 
 - A variable that is already set (in the shell, by a flag, by systemd) always wins over both files; `./.env` wins
-  over `~/.config/clef/env`.
+  over `~/.config/clef/env`. A variable set to an empty value counts as unset, so the file value is used.
+- Only `CLEF_*` names and `GEMINI_API_KEY` are read from these files. Anything else (`PATH`, `HF_HOME`,
+  `LD_PRELOAD`...) is ignored, with one warning that names the ignored variables (never their values); set those
+  in the real environment.
 - Blank lines and `#` comments are ignored. `export KEY=value` works. Values may be `'single'` (literal) or
   `"double"` quoted (`\n`, `\"`, `\\` escapes); an unquoted value ends at ` #`.
-- `CLEF_ENV_FILE=/path/to/file` loads only that file. `CLEF_ENV_FILE=` (empty) loads none.
-- clef never logs values. `clef doctor` lists the files it loaded, by name.
+- `CLEF_ENV_FILE=/path/to/file` loads only that file. `CLEF_ENV_FILE=` (empty) loads none. It is read from the real
+  environment only, once per process: a `CLEF_ENV_FILE` line inside an env file is ignored.
+- clef never logs values. `clef serve` logs one line at startup naming the env files it loaded (`env files loaded:
+  ~/work/.env`, or `env files: none loaded`), so a `./.env` picked up from an unexpected directory is visible;
+  `clef doctor` lists them too.
 
 ## Example
 

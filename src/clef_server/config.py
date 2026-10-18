@@ -235,9 +235,9 @@ class Config:
     job_active: int = field(default_factory=lambda: _int("CLEF_JOB_ACTIVE", 4))  # jobs taking turns at once
     job_aging_s: float = field(default_factory=lambda: _float("CLEF_JOB_AGING_S", 3600.0))  # 0 = no aging
 
-    # E2: the router's LLM (llm.py) and the review queue (router.py). The router is OFF unless a key is set in
-    # the process environment (GEMINI_API_KEY or CLEF_LLM_API_KEY): the key is the consent to send buffered
-    # inputs. clef reads no .env file itself; docker compose / the systemd EnvironmentFile set the variable.
+    # E2: the router's LLM (llm.py) and the review queue (router.py). The router is OFF unless a key is set
+    # (GEMINI_API_KEY or CLEF_LLM_API_KEY): the key is the consent to send buffered inputs. It comes from the
+    # process environment or an env file (dotenv.py: ./.env, ~/.config/clef/env), loaded by config.load().
     llm_api_key: str | None = field(
         default_factory=lambda: _env("CLEF_LLM_API_KEY") or _env("GEMINI_API_KEY"), repr=False
     )

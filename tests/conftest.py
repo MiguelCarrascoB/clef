@@ -47,9 +47,16 @@ def _private_state_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: py
 
 
 @pytest.fixture(autouse=True)
-def _no_env_files(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Never read a real ``./.env`` or ``~/.config/clef/env`` (CLEF_ENV_FILE= disables loading)."""
+def _no_env_files(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Never read a real ``./.env`` or ``~/.config/clef/env`` (CLEF_ENV_FILE= disables loading). The dotenv
+    module keeps per-process state (the CLEF_ENV_FILE snapshot, the files loaded): reset it around every test,
+    or the first test's value would hold for the whole run."""
+    from clef_server import dotenv
+
     monkeypatch.setenv("CLEF_ENV_FILE", "")
+    dotenv.reset()
+    yield
+    dotenv.reset()
 
 
 @pytest.fixture(autouse=True)

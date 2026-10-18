@@ -27,9 +27,11 @@
   `JobRunner.submit/cancel/get`, `JobHandle.decide`, and the kind keys `completed_if_all_failed` (a run where every
   item failed still ends `succeeded`) and `records` (quota size). New dependency `tzdata` (server extra).
 - **`.env` files**: clef loads `KEY=VALUE` lines from `./.env` and then `~/.config/clef/env` before reading its
-  settings, so `GEMINI_API_KEY=...` can live in a file next to where you run `clef serve`. A variable already set in the
-  environment always wins; `CLEF_ENV_FILE=<path>` loads only that file and `CLEF_ENV_FILE=` loads none. Values are
-  never logged; `clef doctor` names the files it loaded. See docs/configuration.md.
+  settings, so `GEMINI_API_KEY=...` can live in a file next to where you run `clef serve`. A variable already set (non-empty) in the
+  environment always wins; `CLEF_ENV_FILE=<path>` loads only that file and `CLEF_ENV_FILE=` loads none (read from the
+  real environment only, never from a file). Only `CLEF_*` and `GEMINI_API_KEY` are taken from files; other names are
+  ignored with a warning. Values are never logged; the server logs the loaded file names at startup and
+  `clef doctor` lists them. See docs/configuration.md.
 - **Job throughput flags (F2, off by default)**: `CLEF_JOB_SORT_WINDOW=N` sorts each window of N job items by
   token length before they reach the engine, and `CLEF_TOKENIZE_AHEAD=1` encodes the next window on CPU threads
   while the current one is on the GPU. Results stay in input order, rows stay gap-free and a resume recomputes at

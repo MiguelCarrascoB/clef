@@ -36,6 +36,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config as config_mod
+from . import dotenv
 from .appctx import AppContext
 from .classifiers import ClassifierStore, ClassifierVersions, InvalidName, TooManyClassifiers, validate_name
 from .classify import (
@@ -327,6 +328,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
         install_access_filter()  # after uvicorn's dictConfig; covers launchers other than run()
         log.info("starting clef server %s (model load runs in background)", VERSION)
+        log.info("%s", dotenv.startup_line())  # a ./.env picked up from an unexpected cwd shows here
         for line in (bind_warning(cfg, auth.enabled) or "").splitlines():  # needs the DB: DB keys count
             log.warning(line)
         app_.state.draining = False

@@ -12,7 +12,7 @@ tests. Change it first, then the code.
 | `clef_server/__init__.py` | `__version__`; calls `backend.prepare_environment()` once (torch-free, before any torch import) |
 | `clef_server/config.py` | `Config` dataclass from `CLEF_*` env vars, `VERSION`, `MODEL_REPO`/`MODEL_REVISION`, `parse_api_keys` |
 | `clef_server/paths.py` | state dir, log/pid files, classifiers dir, `resolve_model_path(cfg)` (never downloads) |
-| `clef_server/dotenv.py` | optional `.env` loading: `./.env` then `~/.config/clef/env` fill `os.environ` before `Config` is built (set variables win; `CLEF_ENV_FILE` overrides, empty disables); called by `config.load()`, `cli.main` and `doctor` |
+| `clef_server/dotenv.py` | optional `.env` loading: `./.env` then `~/.config/clef/env` fill `os.environ` before `Config` is built (non-empty set variables win, empty counts as unset; only `CLEF_*` and `GEMINI_API_KEY` are taken, other names are ignored with a warning naming them; `CLEF_ENV_FILE` overrides, empty disables, and is read from the real environment once per process, so a file cannot redirect loading); called by `config.load()`, `cli.main` and `doctor`; the server logs the loaded file names (never values) at startup |
 | `clef_server/backend.py` | **the only place with device-specific code**: detection, dtype, sync, OOM, memory, telemetry, preflight, quantization config (bitsandbytes / torchao), device memory cap, pinned host copies (`HostCopier`) |
 | `clef_server/offload.py` | CPU offload: `plan_layers` (which decoder layers stay on the host) and `LayerStreamer` (async copy-in per forward); pure logic plus a `copier` supplied by `backend.py` |
 | `clef_server/engine.py` | background model load (`load_model`: standard, quantized or offloaded), single GPU worker thread, micro-batching, length bucketing, warmup |
@@ -1470,8 +1470,9 @@ class OpenAICompatClient:                   # POST {base_url}chat/completions, A
         #        JSON object in the text) before LLMError
 
 def client_from_config(cfg: Config) -> LLMClient | None
-    # None (router LLM off) unless CLEF_LLM_API_KEY or GEMINI_API_KEY is set in the process env (clef does not
-    # read .env files: the systemd EnvironmentFile / compose .env put it there). Every call is logged to llm_calls.
+    # None (router LLM off) unless CLEF_LLM_API_KEY or GEMINI_API_KEY is set: in the process env, or in an env
+    # file that dotenv.py loads before Config is built (./.env, ~/.config/clef/env; see the dotenv row of the
+    # module table). Every call is logged to llm_calls.
 ```
 
 Tables (created by C1 in `0002`):
