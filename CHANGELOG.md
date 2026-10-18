@@ -19,7 +19,7 @@
   them, so interactive requests keep their priority. `POST /v1/jobs` takes `priority` (`low|normal|high`; strict
   classes, aging with `CLEF_JOB_AGING_S`), `urgent` (new `urgent` scope: top class, ignores the window), `schedule`
   (`{"window": "20:00-06:00", "tz": ...}` or `CLEF_JOB_WINDOW` / `CLEF_JOB_TZ`; a job that leaves its window stays
-  `running` with `waiting_reason: "off_hours"`) and `expire_after_s` (counted from when the window opens; ends
+  `running` with `waiting_reason: "off_hours"`; a window that lies entirely in a daylight-saving gap does not open that day) and `expire_after_s` (counted from when the window opens; ends
   `cancelled` with `error: "expired"`). Turns are shared fairly per key (stride scheduling; a key whose jobs sat out a window or waited for a slot starts level with the others when they resume, it does not bank the missed turns), and so are slots: when another key waits, a key holding more than `ceil(CLEF_JOB_ACTIVE / keys wanting a slot)` lets its newest job wait (`running`, `active_limit`) after its current chunk. Job objects gain
   `priority`, `urgent`, `schedule`, `waiting_reason`, `next_window_at`, `expired`, `model`, `tokens`;
   `GET /v1/jobs?priority=`. The daily record quota is reserved at submit (UTC day of the submit, refunded for
@@ -52,7 +52,8 @@
   to parse is an `invalid_json_line`, not a 500. See docs/openai-compat.md.
 - `bench/vllm/` (Wave G, not yet run on a GPU): `vllm_check.sh` benchmarks a pinned vLLM ROCm nightly container against
   clef (flags off, and MASK_FREE + FAST_HEAD) with a parity run, load at concurrency 1/8/16/32 and an adopt / do-not-adopt table;
-  `vllm_client.py` maps clef records to vLLM's `/v1/systemone` and fails loudly on a shape mismatch. `clef bench`'s load
+  A refused run touches nothing, and cleanup removes only the container id and clef state dirs of its own run
+  (`bench/out/vllm/run-*`); an unreadable GPU needs `FORCE=1`. `vllm_client.py` maps clef records to vLLM's `/v1/systemone` and fails loudly on a shape mismatch. `clef bench`'s load
   generator takes an optional response check.
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
   503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)

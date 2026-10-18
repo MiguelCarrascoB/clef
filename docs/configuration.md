@@ -66,7 +66,7 @@ See [Jobs & webhooks](jobs.md).
 | `CLEF_MAX_JOBS` | `100` | queued + running jobs; more is `409` with `Retry-After` |
 | `CLEF_JOB_TTL_HOURS` | `168` | finished jobs and their rows are purged this long after they finish; `0` keeps them forever |
 | `CLEF_JOB_ENGINE_WAIT_S` | `600` | how long a job waits for an unavailable engine before failing |
-| `CLEF_JOB_ACTIVE` | `4` | jobs that take turns at the engine at once (`>= 1`; `1` = strictly one after another) |
+| `CLEF_JOB_ACTIVE` | `4` | jobs that take turns at the engine at once (`>= 1`; `1` = strictly one after another). Shared fairly: when another key waits, a key holding more than its share lets its newest job wait ([jobs](jobs.md#scheduling)) |
 | `CLEF_JOB_AGING_S` | `3600` | a waiting job rises one priority class per this many seconds without a turn (never to `urgent`); `0` = no aging |
 | `CLEF_JOB_TZ` | `UTC` | IANA zone of job windows that give no `tz`, and of `CLEF_JOB_WINDOW` |
 | `CLEF_JOB_WINDOW` | empty | default off-hours window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |

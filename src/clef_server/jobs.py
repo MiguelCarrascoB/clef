@@ -1421,6 +1421,8 @@ class JobRunner:
             victim = self.sched.slot_victim(e, self.clock())
             if victim is not None:
                 victim.pause = "active_limit"
+            else:  # the waiter lost its claim to a slot meanwhile: it is running, but waits for one
+                e.pause = "active_limit"
         self.sched.register(e)
         task = asyncio.create_task(self._run(row), name=f"clef-job-{e.id}")
         self.tasks[e.id] = task
