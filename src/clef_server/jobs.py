@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import csv
 import io
 import json
@@ -62,6 +63,13 @@ from .schemas import SystemOneRequest, check_limits, format_errors
 from .webhooks import DEFAULT_EVENTS, WebhookDispatcher, WebhookPolicy, WebhookRefused
 
 log = logging.getLogger("clef")
+
+# The owner a job is being submitted for, as ``(owner,)`` (None inside = auth off), while JobRunner.submit
+# runs the kind's ``validate`` / ``snapshot``; None outside a submit. The batch kind's snapshot reads it: it
+# only scans an input file of the submitting owner, so the scan cannot describe another key's file.
+SUBMIT_OWNER: contextvars.ContextVar[tuple[str | None] | None] = contextvars.ContextVar(
+    "clef_submit_owner", default=None
+)
 
 STATUSES = ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")
 ACTIVE = ("queued", "running", "interrupted")
@@ -1493,12 +1501,15 @@ class JobRunner:
         spec = kinds[kind]
         for requested in payload_models(payload):  # a model this server does not serve: 404 before anything
             ctx.check_model(requested)  # LookupError
+        submitting = SUBMIT_OWNER.set((owner,))  # asyncio.to_thread copies the context into the worker
         try:
             parsed = await asyncio.to_thread(spec["validate"], payload)
             if spec.get("snapshot"):  # saved classifiers are copied into the payload now (see docs/jobs.md)
                 payload = await asyncio.to_thread(spec["snapshot"], payload, parsed)
         except (ValueError, ValidationError) as exc:
             raise ValueError(f"payload.{_msg(exc)}") from exc
+        finally:
+            SUBMIT_OWNER.reset(submitting)
         now = self.clock()
         eligible = now
         if window is not None and cls < PRIORITY_URGENT and not window.contains(now):

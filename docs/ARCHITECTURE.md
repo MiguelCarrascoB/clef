@@ -1884,6 +1884,12 @@ As built (F1; clarifications and deviations from the text above, nothing else ch
   file the caller uploaded (404 otherwise). The `batch` job re-checks that the file's owner is the job's owner when
   it runs, so `POST /v1/jobs {"kind": "batch"}` cannot read another key's file. The job's quota reservation is the
   file row's `lines`, never the payload's.
+- A line nested too deeply for the JSON parser (`RecursionError`) is an `invalid_json_line` like any other bad
+  JSON (and an error row if it is met at run time), never a 500.
+- `POST /v1/jobs {"kind": "batch"}` gets the same structural scan at submit, through the kind's `snapshot` hook
+  (submit only, not on every run or resume): a structural problem is a 400 naming the first bad line. It scans only
+  a file owned by the submitter (`jobs.SUBMIT_OWNER`), so it never describes another key's file; `POST /v1/batches`
+  marks the file it scanned itself (a context variable), so a batch is not scanned twice.
 - The seam to the scheduler is `batches.submit_batch_job`, a call to `JobRunner.submit` with the caller's
   principal, `clef.priority`, `clef.urgent`, `clef.schedule` and `expire_after_s = 86400`. It maps `ValueError` to 400
   (a bad option), `PermissionError` to 403 (`urgent` without the scope), a model not served to 404, `JobsFull` to 409

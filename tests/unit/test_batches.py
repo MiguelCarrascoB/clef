@@ -344,6 +344,45 @@ def test_structural_problems_fail_the_batch_with_line_numbers(api):
     assert sql(app, "SELECT COUNT(*) FROM jobs WHERE status = 'queued'")[0][0] == 0
 
 
+DEEP = (
+    b'{"custom_id":"deep","method":"POST","url":"/v1/chat/completions","body":'
+    + b"[" * 200_000
+    + b"]" * 200_000
+    + b"}"
+)
+
+
+def test_a_deeply_nested_line_is_a_line_error_not_a_500(api, tmp_path):
+    """Review E/F #6: json.loads raises RecursionError on deep nesting: an invalid_json_line like bad
+    JSON, for POST /v1/batches, POST /v1/jobs kind=batch (scanned at submit) and re-reading custom ids."""
+    client, _, _ = api
+    fid = upload(client, jsonl(line("a"), DEEP)).json()["id"]
+    r = new_batch(client, fid)
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["status"] == "failed" and [(e["line"], e["code"]) for e in b["errors"]["data"]] == [
+        (2, "invalid_json_line")
+    ]
+    job = client.post("/v1/jobs", json={"kind": "batch", "payload": {"input_file_id": fid, "endpoint": CHAT}})
+    assert job.status_code == 400 and "line 2" in job.json()["detail"], job.text
+    path = tmp_path / "in.jsonl"
+    path.write_bytes(jsonl(line("a"), DEEP))
+    assert list(batches.input_custom_ids(path, 0)) == [(0, "a"), (1, None)]
+
+
+def test_the_submit_scan_never_describes_another_keys_file():
+    """kind=batch over another key's file is not scanned at submit (no line details); it fails at run."""
+    client, _, app = make(Eng(), api_key="root")
+    with client:
+        alice, bob = hdr(add_key(app, "alice", "jobs")), hdr(add_key(app, "bob", "jobs"))
+        fid = upload(client, jsonl(line("a"), b"{broken"), headers=alice).json()["id"]
+        body = {"kind": "batch", "payload": {"input_file_id": fid, "endpoint": CHAT}}
+        mine = client.post("/v1/jobs", json=body, headers=alice)
+        assert mine.status_code == 400 and "line 2" in mine.json()["detail"]
+        theirs = client.post("/v1/jobs", json=body, headers=bob)
+        assert theirs.status_code == 202 and "line" not in theirs.text
+
+
 def test_empty_and_oversized_inputs():  # no `api` fixture: a second app on one Postgres database is refused
     small, _, _ = make(Eng(), max_batch_lines=2)
     with small:

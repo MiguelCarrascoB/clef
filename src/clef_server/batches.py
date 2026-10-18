@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -56,6 +57,7 @@ from .jobs import (
     ACTIVE,
     FINISHED,
     STREAM_BATCH,
+    SUBMIT_OWNER,
     JobAborted,
     JobHandle,
     JobsFull,
@@ -297,7 +299,7 @@ def scan_input(path: Path, endpoint: str, max_lines: int) -> tuple[int, list[dic
 def _check_line(raw: bytes, endpoint: str, seen: set[str]) -> tuple[str, str, str | None] | None:
     try:
         obj = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: nested too deeply for the parser
         return "invalid_json_line", "the line is not valid JSON", None
     if not isinstance(obj, dict):
         return "invalid_request", "the line must be a JSON object", None
@@ -342,7 +344,7 @@ def input_custom_ids(path: Path, start: int) -> Iterator[tuple[int, str | None]]
                 continue
             try:
                 cid = json.loads(raw).get("custom_id")
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, RecursionError):
                 cid = None
             yield k, cid if isinstance(cid, str) else None
 
@@ -471,7 +473,33 @@ def _engine_error(message: str) -> _LineError:
     return _LineError(400, message, "invalid_request")
 
 
+# Set by POST /v1/batches around its submit: that route already scanned (input_file_id, endpoint) itself.
+_SCANNED: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "clef_batch_scanned", default=None
+)
+
+
 def batch_kind(ctx: AppContext, store: BatchStore) -> dict[str, Any]:
+    def scan_at_submit(payload: dict[str, Any], p: _Parsed) -> dict[str, Any]:
+        """``snapshot`` hook (submit only, not on every run): POST /v1/jobs kind=batch gets the
+        structural scan of POST /v1/batches, as a 400 naming the first bad line. Only for the submitter's
+        own file (another key's file is refused when the job runs, and the scan must not describe it)."""
+        if _SCANNED.get() == (p.input_file_id, p.endpoint):
+            return payload  # POST /v1/batches scanned it already
+        submitter, frow = SUBMIT_OWNER.get(), store.file(p.input_file_id)
+        if submitter is None or frow is None or (frow["owner"] or None) != (submitter[0] or None):
+            return payload
+        limit = min(ctx.cfg.max_batch_lines, ctx.cfg.max_job_items)
+        try:
+            _, errors = scan_input(store.path(p.input_file_id), p.endpoint, limit)
+        except OSError as exc:
+            raise ValueError(f"input_file_id: file {p.input_file_id} not found") from exc
+        if errors:
+            e = errors[0]
+            more = f" (and {len(errors) - 1} more)" if len(errors) > 1 else ""
+            raise ValueError(f"input file failed validation: line {e['line']}: {e['message']}{more}")
+        return payload
+
     def validate(payload: dict[str, Any]) -> _Parsed:
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
@@ -509,7 +537,7 @@ def batch_kind(ctx: AppContext, store: BatchStore) -> dict[str, Any]:
             raw = fh.readline()
             try:
                 obj = json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 obj = None
             try:
                 req = translate_line(ctx_, p.endpoint, obj, request_id)
@@ -557,6 +585,7 @@ def batch_kind(ctx: AppContext, store: BatchStore) -> dict[str, Any]:
 
     return {
         "validate": validate,
+        "snapshot": scan_at_submit,
         "run": run,
         "resumable": True,
         "completed_if_all_failed": True,  # OpenAI: a batch where every request failed is still `completed`
@@ -1251,7 +1280,11 @@ def router(ctx: AppContext) -> APIRouter:
             await run_in_threadpool(store.create_failed_batch, job_row, batch_row, out_row, err_row)
             return await view(batch_row)
         payload = {"input_file_id": frow["id"], "endpoint": body.endpoint, "lines": lines}
-        job = await submit_batch_job(ctx, request, payload, options)
+        scanned = _SCANNED.set((frow["id"], body.endpoint))  # scanned above: the kind need not scan it again
+        try:
+            job = await submit_batch_job(ctx, request, payload, options)
+        finally:
+            _SCANNED.reset(scanned)
         # The job is queued already, but cannot finish before the batch row exists: its payload is complete
         # and the runner is only poked below. A failure here stops the job instead of leaving it orphaned.
         batch_row, out_row, err_row = rows_for(job["id"])
