@@ -652,6 +652,36 @@ def test_settle_quota_refunds_once_and_only_for_failed_or_cancelled_jobs(db):
     assert store.settle_quota(jobs["cancelled"]) == []
 
 
+@pytest.mark.postgres
+def test_cache_hit_refunds_are_persisted_so_a_cancel_after_a_restart_refunds_exactly(db):
+    """Review E/F #7: the hits already handed back live on the job row (jobs.hits), not in runner memory:
+    a restart then a cancel refunds total - charged exactly; credited hits never exceed the reservation."""
+    from clef_server.jobs import JobStore
+
+    day = "2026-10-17"
+    store = JobStore(db)
+    jid = store.create("classify", "ci", {}, None, None, 0, None, None, day, 10)["id"]
+    done, credited = store.add_items(jid, [{"index": i} for i in range(4)], 0, 3)  # 3 of 4 were cache hits
+    assert (done, credited) == (4, 3)
+    restarted = JobStore(db)  # a new process: nothing in memory
+    with db.tx() as conn:
+        conn.execute(text("UPDATE jobs SET status = 'cancelled' WHERE id = :i"), {"i": jid})
+    # charged so far: 10 reserved - 3 hits handed back = 7; really used: 4 rows - 3 hits = 1; refund 6
+    assert restarted.settle_quota(jid) == [("ci", day, 6)]
+    assert restarted.settle_quota(jid) == []  # once
+    small = store.create("classify", "ci", {}, None, None, 0, None, None, day, 2)["id"]
+    assert store.add_items(small, [{"index": i} for i in range(5)], 0, 5) == (
+        5,
+        2,
+    )  # capped at the reservation
+    with db.tx() as conn:
+        row = conn.execute(text("SELECT quota_reserved, hits FROM jobs WHERE id = :i"), {"i": small}).one()
+    assert (row.quota_reserved, row.hits) == (0, 2)
+    store.reset_items(small)  # a non-resumable job restarts from 0: its old hits no longer count
+    with db.tx() as conn:
+        assert conn.execute(text("SELECT hits FROM jobs WHERE id = :i"), {"i": small}).scalar() == 0
+
+
 def test_job_quota_is_refunded_when_the_job_cannot_be_created():
     client, _, app = make(SlowEngine(delay=0.5), api_key="root", max_jobs=1)
     secret = add_key(app, "ci", "classify,jobs", daily_quota=50)

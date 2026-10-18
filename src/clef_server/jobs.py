@@ -329,13 +329,16 @@ class JobStore:
         with self.db.tx() as conn:
             conn.execute(update(_JOBS).where(_JOBS.c.id == job_id).values(total=int(total)))
 
-    def add_items(self, job_id: str, items: list[dict[str, Any]], tokens: int = 0, hits: int = 0) -> int:
-        """Append rows after the last persisted one (one transaction); returns the new ``done``.
+    def add_items(
+        self, job_id: str, items: list[dict[str, Any]], tokens: int = 0, hits: int = 0
+    ) -> tuple[int, int]:
+        """Append rows after the last persisted one (one transaction); returns ``(done, hits credited)``.
 
         ``done`` is read inside the transaction, so a chunk is stored whole at the right offset or not at
         all: whatever interrupts the job, the rows stay gap-free and a resume recomputes only what is missing.
-        ``tokens`` adds to ``jobs.tokens``; ``hits`` (cache hits among these rows) lowers ``quota_reserved``
-        in the same transaction (the caller hands them back to the quota once this returns).
+        ``tokens`` adds to ``jobs.tokens``; ``hits`` (cache hits among these rows), capped at what is still
+        reserved (0 for a job without a reservation), moves from ``quota_reserved`` to ``jobs.hits`` in the
+        same transaction; the caller hands exactly the credited number back to the quota once this returns.
         """
         with self.db.tx() as conn:
             cur = conn.execute(
@@ -370,9 +373,10 @@ class JobStore:
                     failed=_JOBS.c.failed + failed,
                     tokens=_JOBS.c.tokens + max(0, int(tokens)),
                     quota_reserved=_JOBS.c.quota_reserved - hits,
+                    hits=_JOBS.c.hits + hits,
                 )
             )
-        return start + len(items)
+        return start + len(items), hits
 
     def _terminal_event(self, conn: Connection, job_id: str, status: str) -> str | None:
         """Inside a transaction: mark ``job.<status>`` pending (if subscribed) so a restart retries it.
@@ -411,35 +415,34 @@ class JobStore:
                 return False, None
             return True, self._terminal_event(conn, job_id, status)
 
-    def settle_quota(
-        self, job_id: str | None = None, hits: dict[str, int] | None = None
-    ) -> list[tuple[str, str, int]]:
+    def settle_quota(self, job_id: str | None = None) -> list[tuple[str, str, int]]:
         """Hand back the unprocessed part of the reservation of failed / cancelled jobs: ``(owner, day, n)``.
 
         ``n = quota_reserved - done + hits``; ``quota_reserved`` is then set to ``done - hits`` (what was
-        really charged), so a second call refunds nothing. ``hits`` = per job, the cache hits already
-        handed back (they lowered ``quota_reserved`` but are part of ``done``); empty after a restart, which
-        can only make the refund short. One job, or (``job_id`` None) every finished one: startup uses that
-        for jobs that ended while the process was stopping.
+        really charged), so a second call refunds nothing. ``jobs.hits`` = the cache hits already handed back
+        (they lowered ``quota_reserved`` but are part of ``done``); it is on the row, so the refund is exact
+        after a restart too. One job, or (``job_id`` None) every finished one: startup uses that for jobs
+        that ended while the process was stopping.
         """
         out: list[tuple[str, str, int]] = []
         with self.db.tx() as conn:
             q = select(
-                _JOBS.c.id, _JOBS.c.owner, _JOBS.c.quota_day, _JOBS.c.quota_reserved, _JOBS.c.done
+                _JOBS.c.id, _JOBS.c.owner, _JOBS.c.quota_day, _JOBS.c.quota_reserved, _JOBS.c.done,
+                _JOBS.c.hits,
             ).where(
                 _JOBS.c.status.in_(("failed", "cancelled")),
                 _JOBS.c.quota_day.is_not(None),
-                or_(_JOBS.c.quota_reserved > _JOBS.c.done, _JOBS.c.id.in_(list(hits or ()))),
-            )
+                _JOBS.c.quota_reserved + _JOBS.c.hits > _JOBS.c.done,
+            )  # fmt: skip
             if job_id is not None:
                 q = q.where(_JOBS.c.id == job_id)
             for r in conn.execute(q).all():
-                h = (hits or {}).get(r.id, 0)
+                n = r.quota_reserved - r.done + r.hits
                 conn.execute(
-                    update(_JOBS).where(_JOBS.c.id == r.id).values(quota_reserved=max(0, r.done - h))
+                    update(_JOBS).where(_JOBS.c.id == r.id).values(quota_reserved=max(0, r.done - r.hits))
                 )
-                if r.owner and r.quota_reserved - r.done + h > 0:
-                    out.append((r.owner, r.quota_day, r.quota_reserved - r.done + h))
+                if r.owner and n > 0:
+                    out.append((r.owner, r.quota_day, n))
         return out
 
     def cancel_queued(self, job_id: str, error: str | None = None) -> tuple[bool, str | None]:
@@ -572,7 +575,7 @@ class JobStore:
             conn.execute(
                 update(_JOBS)
                 .where(_JOBS.c.id == job_id)
-                .values(done=0, failed=0, total=None, run_base_done=0)
+                .values(done=0, failed=0, total=None, run_base_done=0, hits=0)  # old hits: rows are gone
             )
 
     def delete(self, job_id: str) -> bool:
@@ -1168,9 +1171,11 @@ class JobHandle:
         if not items:
             return
         hits, self._hits = self._hits, 0
-        self.done = await asyncio.to_thread(self._runner.store.add_items, self.id, list(items), tokens, hits)
-        if hits:
-            self._runner.credit_hits(self.id, hits)
+        self.done, credited = await asyncio.to_thread(
+            self._runner.store.add_items, self.id, list(items), tokens, hits
+        )
+        if credited:
+            self._runner.credit_hits(self.id, credited)
         self._runner.notify_progress(self.id)
         self._trip_breaker(items)
 
@@ -1252,7 +1257,6 @@ class JobRunner:
         self._purge_task: asyncio.Task[None] | None = None
         self.tasks: dict[str, asyncio.Task[None]] = {}  # job id -> its task (every active job)
         self._failures: dict[str, int] = {}  # job id -> consecutive runner-level failures
-        self._hits: dict[str, int] = {}  # job id -> cache hits already handed back to the quota
         self._rows: dict[str, dict[str, Any]] = {}  # job id -> its claimed row (owner, quota day)
         self.current: set[str] = set()  # jobs running a kind right now
 
@@ -1303,16 +1307,21 @@ class JobRunner:
         quotas = self.ctx.quotas
         if quotas is None:
             return
-        hits = {job_id: self._hits.pop(job_id, 0)} if job_id is not None else None
-        for owner, day, n in await asyncio.to_thread(self.store.settle_quota, job_id, hits):
+        for owner, day, n in await asyncio.to_thread(self.store.settle_quota, job_id):
             quotas.refund(Reservation(owner, day, n), n)
 
     def credit_hits(self, job_id: str, n: int) -> None:
-        """``n`` cache hits of a stored chunk are not charged: hand them back to the job's reservation."""
+        """``n`` cache hits of a stored chunk (already capped and recorded in ``jobs.hits`` by
+        ``JobStore.add_items``) are not charged: hand them back to the job's reservation."""
         row = self._rows.get(job_id)
-        if row is None or self.ctx.quotas is None or not row.get("quota_day") or not row.get("owner"):
+        if (
+            n <= 0
+            or row is None
+            or self.ctx.quotas is None
+            or not row.get("quota_day")
+            or not row.get("owner")
+        ):
             return
-        self._hits[job_id] = self._hits.get(job_id, 0) + n
         self.ctx.quotas.refund(Reservation(row["owner"], row["quota_day"], n), n)
 
     def _purge(self) -> None:

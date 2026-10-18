@@ -23,7 +23,8 @@
   `cancelled` with `error: "expired"`). Turns are shared fairly per key (stride scheduling; a key whose jobs sat out a window or waited for a slot starts level with the others when they resume, it does not bank the missed turns), and so are slots: when another key waits, a key holding more than `ceil(CLEF_JOB_ACTIVE / keys wanting a slot)` lets its newest job wait (`running`, `active_limit`) after its current chunk. Job objects gain
   `priority`, `urgent`, `schedule`, `waiting_reason`, `next_window_at`, `expired`, `model`, `tokens`;
   `GET /v1/jobs?priority=`. The daily record quota is reserved at submit (UTC day of the submit, refunded for
-  what a cancelled / failed / expired job did not process); result-cache hits are not charged. Python API:
+  what a cancelled / failed / expired job did not process); result-cache hits are not charged (counted in the new
+  `jobs.hits` column, migration `0003`, so the refund is exact after a restart). Python API:
   `JobRunner.submit/cancel/get`, `JobHandle.decide`, and the kind keys `completed_if_all_failed` (a run where every
   item failed still ends `succeeded`) and `records` (quota size). New dependency `tzdata` (server extra).
 - **`.env` files**: clef loads `KEY=VALUE` lines from `./.env` and then `~/.config/clef/env` before reading its

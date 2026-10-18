@@ -768,6 +768,7 @@ Alembic layout (`src/clef_server/migrations/`, shipped in the wheel; no `alembic
 | --- | --- | --- |
 | `0001_baseline` | `jobs`, `items`, `jobs_status`, `jobs_idem` exactly as today | C1 |
 | `0002_v32` | `clef_meta`, `classifiers`, `classifier_versions`, `audit_log`, the new `jobs` columns, `api_principals`, `api_keys`, `api_usage`, `routers`, `router_label_sets`, `review`, `llm_calls`, `files`, `batches` | C1 |
+| `0003_job_hits` | `jobs.hits BIGINT NOT NULL DEFAULT 0`: the result-cache hits already handed back to the job's quota reservation (E1; review fix: the refund was in memory only) | E1 |
 
 - Legacy DB (a `jobs` table, no `alembic_version`): run today's `idem_key` ALTER if the column is missing,
   `stamp 0001`, then `upgrade heads`.
@@ -798,6 +799,7 @@ ALTER TABLE jobs ADD COLUMN eligible_at DOUBLE PRECISION;             -- E1: fir
 ALTER TABLE jobs ADD COLUMN quota_day TEXT;                           -- E1: UTC day the reservation was charged to
 ALTER TABLE jobs ADD COLUMN quota_reserved BIGINT NOT NULL DEFAULT 0; -- E1: records reserved at submit
 ALTER TABLE jobs ADD COLUMN tokens BIGINT NOT NULL DEFAULT 0;         -- E1: sum of input_tokens of the stored rows
+ALTER TABLE jobs ADD COLUMN hits BIGINT NOT NULL DEFAULT 0;           -- 0003: cache hits handed back to the quota
 
 CREATE TABLE classifiers (
     name           TEXT PRIMARY KEY,             -- NAME_RE
@@ -1697,8 +1699,10 @@ Policy:
   Env principals and auth off: no reservation.
   Cache hits are not charged (D23 #3): each chunk's hits (`Prepared.hits` from `ctx.prepare`) are handed back to
   the reservation once the chunk's rows are stored, and `quota_reserved` drops by the same number in that
-  transaction. The hit count is kept in memory only to make the final refund exact; after a restart the
-  refund of a cancelled job can be short by the hits counted before it (never over).
+  transaction, which also adds them to `jobs.hits` (migration `0003`). Credited hits are capped at what is still
+  reserved, and exactly the credited number goes back to the quota. The final refund of a cancelled / failed job
+  is `quota_reserved - done + hits`, read from the row, so it is exact after a restart too; a non-resumable job
+  that restarts from 0 resets `hits` with its rows.
 
 Python API (for E2-free kinds and F1, so they never edit `jobs.py`):
 ```python
