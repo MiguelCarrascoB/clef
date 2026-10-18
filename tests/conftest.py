@@ -39,6 +39,18 @@ def _pg_admin():  # psycopg is only needed when the Postgres runs are enabled
 
 
 @pytest.fixture(autouse=True)
+def _restore_environ() -> Iterator[None]:
+    """Put ``os.environ`` back as it was after every test. Code under test may write it directly, outside
+    monkeypatch: ``cli.load_config`` applies ``clef serve``'s flags (CLEF_PORT, CLEF_DEVICE...) and
+    ``dotenv.load_env`` fills in file values, and either would otherwise leak into every later test."""
+    saved = dict(os.environ)
+    yield
+    if dict(os.environ) != saved:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
 def _private_state_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """A test that builds ``Config()`` without ``state_dir`` must never open (or migrate) the developer's real
     state dir: its clef.db, its v3.1 jobs.db or its classifier files."""
