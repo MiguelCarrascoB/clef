@@ -14,6 +14,10 @@ VERSION = "3.1.0"
 MODEL_REPO = "Cloudflare/clef-flash"
 MODEL_REVISION = "17f0b0ad64efb65d273590632833508766b2aae6"
 
+# E2: the router's LLM defaults to Gemini's OpenAI-compatible endpoint (ollama, LM Studio, OpenAI: set URL).
+DEFAULT_LLM_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+DEFAULT_LLM_MODEL = "gemini-3.8-flash"
+
 DEVICES = ("auto", "cuda", "rocm", "mps", "cpu")
 DTYPES = ("auto", "bfloat16", "float16", "float32")
 QUANTS = ("none", "int8", "nf4")
@@ -41,6 +45,12 @@ def _float(name: str, default: float) -> float:
 def _bool(name: str, default: bool) -> bool:
     value = _env(name)
     return default if value is None else value.lower() in ("1", "true", "yes", "on")
+
+
+def _bool_or_none(name: str) -> bool | None:
+    """None when unset or empty ("auto": the consumer decides per backend)."""
+    value = _env(name)
+    return None if value is None else value.lower() in ("1", "true", "yes", "on")
 
 
 def _str(name: str, default: str) -> str:
@@ -199,6 +209,12 @@ class Config:
     pad_multiple: int = field(default_factory=lambda: _int("CLEF_PAD_MULTIPLE", 64))
     pad_to_bucket: bool = field(default_factory=lambda: _bool("CLEF_PAD_TO_BUCKET", False))
     warmup: bool = field(default_factory=lambda: _bool("CLEF_WARMUP", True))
+    # With CLEF_TUNABLEOP=1 live forwards never tune: the engine tunes the GEMMs of every text-batch shape up
+    # to 1024 tokens in the background while idle, so no request stalls while TunableOp benchmarks kernels
+    # (seconds per GEMM). 1 = tune on a request's first new shape (the old behaviour).
+    tunableop_online: bool = field(default_factory=lambda: _bool("CLEF_TUNABLEOP_ONLINE", False))
+    # Background tuning starts a step (~5-8 s on the 7900 XTX) only after this many seconds without a request.
+    tunableop_idle_s: float = field(default_factory=lambda: _float("CLEF_TUNABLEOP_IDLE_S", 2.0))
 
     # observability
     log_state: bool = field(default_factory=lambda: _bool("CLEF_LOG_STATE", False))
@@ -219,11 +235,49 @@ class Config:
     cache_size: int = field(default_factory=lambda: _int("CLEF_CACHE_SIZE", 10000))
     # Byte budget of the same cache (estimated from the stored JSON); LRU entries go until it fits.
     cache_mb: int = field(default_factory=lambda: _int("CLEF_CACHE_MB", 256))
-    # D2: opt-in speedups, default OFF until bench/perf_check.sh has measured them (docs/performance.md).
+    # D2 speedups (docs/performance.md). Unset = on with the ROCm backend (measured on the RX 7900 XTX: +5-12%
+    # with TunableOp, 0 top-1 flips), off elsewhere until measured there; 0 / 1 forces them.
     # mask_free: text batches call the backbone with attention_mask=None (right-padded + causal = exact);
     # fast_head: sync-free, batch-vectorised joint head. Both only apply to the clef-release adapter.
-    mask_free: bool = field(default_factory=lambda: _bool("CLEF_MASK_FREE", False))
-    fast_head: bool = field(default_factory=lambda: _bool("CLEF_FAST_HEAD", False))
+    mask_free: bool | None = field(default_factory=lambda: _bool_or_none("CLEF_MASK_FREE"))
+    fast_head: bool | None = field(default_factory=lambda: _bool_or_none("CLEF_FAST_HEAD"))
+    # E1: job scheduler (docs/jobs.md). job_window "HH:MM-HH:MM" (in job_tz) is the default for jobs that give
+    # no `schedule`; empty = always open.
+    job_tz: str = field(default_factory=lambda: os.environ.get("CLEF_JOB_TZ", "UTC").strip() or "UTC")
+    job_window: str = field(default_factory=lambda: os.environ.get("CLEF_JOB_WINDOW", "").strip())
+    job_active: int = field(default_factory=lambda: _int("CLEF_JOB_ACTIVE", 4))  # jobs taking turns at once
+    job_aging_s: float = field(default_factory=lambda: _float("CLEF_JOB_AGING_S", 3600.0))  # 0 = no aging
+
+    # E2: the router's LLM (llm.py) and the review queue (router.py). The router is OFF unless a key is set
+    # (GEMINI_API_KEY or CLEF_LLM_API_KEY): the key is the consent to send buffered inputs. It comes from the
+    # process environment or an env file (dotenv.py: ./.env, ~/.config/clef/env), loaded by config.load().
+    llm_api_key: str | None = field(
+        default_factory=lambda: _env("CLEF_LLM_API_KEY") or _env("GEMINI_API_KEY"), repr=False
+    )
+    llm_base_url: str = field(default_factory=lambda: _str("CLEF_LLM_BASE_URL", DEFAULT_LLM_BASE_URL))
+    llm_model: str = field(default_factory=lambda: _str("CLEF_LLM_MODEL", DEFAULT_LLM_MODEL))
+    llm_timeout_s: float = field(default_factory=lambda: _float("CLEF_LLM_TIMEOUT_S", 60.0))
+    router_batch: int = field(default_factory=lambda: _int("CLEF_ROUTER_BATCH", 20))  # items per LLM call
+    router_cold_batch: int = field(default_factory=lambda: _int("CLEF_ROUTER_COLD_BATCH", 20))
+    router_mode: str = field(
+        default_factory=lambda: _str("CLEF_ROUTER_MODE", "review").lower()
+    )  # review|auto
+    router_flush_s: float = field(default_factory=lambda: _float("CLEF_ROUTER_FLUSH_S", 600.0))
+    router_max_input_chars: int = field(default_factory=lambda: _int("CLEF_ROUTER_MAX_INPUT_CHARS", 500))
+    router_max_new_per_day: int = field(default_factory=lambda: _int("CLEF_ROUTER_MAX_NEW_PER_DAY", 10))
+    review_ttl_days: float = field(default_factory=lambda: _float("CLEF_REVIEW_TTL_DAYS", 30.0))  # 0 = keep
+
+    # F2: job throughput, default OFF until bench/sort_check.sh shows a gain over 10% (docs/performance.md).
+    # job_sort_window: jobs sort N items at a time by token length (0 = off; 256-1024 recommended);
+    # tokenize_ahead: the next window is encoded on CPU threads while the current one is on the GPU.
+    job_sort_window: int = field(default_factory=lambda: _int("CLEF_JOB_SORT_WINDOW", 0))
+    tokenize_ahead: bool = field(default_factory=lambda: _bool("CLEF_TOKENIZE_AHEAD", False))
+
+    # F1: OpenAI Files + Batches (docs/openai-compat.md). max_file_mb is the body limit of POST /v1/files only
+    # (OpenAI's is 200 MB; max_body_mb stays the limit of every other route).
+    max_file_mb: int = field(default_factory=lambda: _int("CLEF_MAX_FILE_MB", 200))
+    max_batch_lines: int = field(default_factory=lambda: _int("CLEF_MAX_BATCH_LINES", 50_000))
+    file_ttl_hours: float = field(default_factory=lambda: _float("CLEF_FILE_TTL_HOURS", 720.0))  # 0 = forever
 
     def __post_init__(self) -> None:
         for name, value, allowed in (
@@ -251,6 +305,37 @@ class Config:
             raise ValueError("CLEF_CACHE_SIZE must be >= 0 (0 = off)")
         if self.cache_mb < 0:
             raise ValueError("CLEF_CACHE_MB must be >= 0 (0 = off)")
+        if self.router_mode not in ("review", "auto"):
+            raise ValueError("CLEF_ROUTER_MODE must be review or auto")
+        if self.llm_timeout_s <= 0:
+            raise ValueError("CLEF_LLM_TIMEOUT_S must be > 0")
+        if not 2 <= self.router_batch <= 100 or not 2 <= self.router_cold_batch <= 100:
+            raise ValueError("CLEF_ROUTER_BATCH and CLEF_ROUTER_COLD_BATCH must be within [2, 100]")
+        if self.router_flush_s < 0 or self.review_ttl_days < 0 or self.router_max_new_per_day < 0:
+            raise ValueError(
+                "CLEF_ROUTER_FLUSH_S, CLEF_REVIEW_TTL_DAYS, CLEF_ROUTER_MAX_NEW_PER_DAY must be >= 0"
+            )
+        if self.router_max_input_chars < 20:
+            raise ValueError("CLEF_ROUTER_MAX_INPUT_CHARS must be >= 20")
+        # E1: the scheduler's settings (a bad zone or window is a startup error, not a failed job)
+        if self.job_active < 1:
+            raise ValueError("CLEF_JOB_ACTIVE must be >= 1")
+        if self.job_aging_s < 0:
+            raise ValueError("CLEF_JOB_AGING_S must be >= 0 (0 = no aging)")
+        from .schedule import parse_window
+
+        try:
+            parse_window(self.job_window or None, self.job_tz)
+        except ValueError as exc:
+            raise ValueError(f"CLEF_JOB_WINDOW / CLEF_JOB_TZ: {exc}") from exc
+        if self.job_sort_window < 0:
+            raise ValueError("CLEF_JOB_SORT_WINDOW must be >= 0 (0 = off; 256-1024 recommended)")
+        if self.max_file_mb < 1:
+            raise ValueError("CLEF_MAX_FILE_MB must be >= 1")
+        if self.max_batch_lines < 1:
+            raise ValueError("CLEF_MAX_BATCH_LINES must be >= 1")
+        if self.file_ttl_hours < 0:
+            raise ValueError("CLEF_FILE_TTL_HOURS must be >= 0 (0 = keep forever)")
         self.api_keys()  # fail fast on a malformed CLEF_API_KEYS
         # C2: CLEF_MODEL syntax and the @rev / CLEF_MODEL_REVISION alias (an unknown id is a load error)
         if self.model:
@@ -290,6 +375,8 @@ class Config:
             "classify_threshold": self.classify_threshold,
             "allow_url_fetch": self.allow_url_fetch,
             "max_job_items": self.max_job_items,
+            "max_file_mb": self.max_file_mb,
+            "max_batch_lines": self.max_batch_lines,
             "webhooks_enabled": bool(self.webhook_allow),
             "auth_required": self.auth_required,
             "rate_limit_per_min": self.rate_limit,
@@ -297,4 +384,7 @@ class Config:
 
 
 def load() -> Config:
+    from .dotenv import load_env
+
+    load_env()  # ./.env and ~/.config/clef/env fill in what the environment leaves unset
     return Config()

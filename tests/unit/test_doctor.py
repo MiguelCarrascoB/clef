@@ -266,3 +266,15 @@ def test_doctor_warns_on_lossy_quant_combo(monkeypatch):
     doctor.check_backend(r, Config(device="rocm", quant="nf4"), server_up=True)
     q = next(i for i in r.items if i["name"] == "quantization")
     assert q["level"] == doctor.WARN and "lossy" in q["detail"]
+
+
+def test_router_llm_check_reports_the_host_and_never_the_key(monkeypatch):
+    r = doctor.Report(echo=False)
+    doctor.check_router_llm(r, Config())
+    assert r.items[-1]["level"] == doctor.SKIP and "GEMINI_API_KEY" in r.items[-1]["detail"]
+    monkeypatch.setenv("GEMINI_API_KEY", "g-secret-key")
+    r = doctor.Report(echo=False)
+    doctor.check_router_llm(r, Config())
+    item = r.items[-1]
+    assert item["level"] == doctor.OK and "generativelanguage.googleapis.com" in item["detail"]
+    assert "g-secret-key" not in item["detail"]

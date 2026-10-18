@@ -3,8 +3,10 @@
 Feature module (``main.FEATURES``): ``router(ctx)`` registers ``/v1/jobs*``, the background runner and the
 webhook dispatcher. See docs/jobs.md for the contract.
 
-* One runner, jobs FIFO, one at a time. A job feeds the engine in chunks of ``max_microbatch`` records and
-  keeps ONE chunk in flight, so interactive requests queue behind at most one chunk.
+* Up to ``CLEF_JOB_ACTIVE`` jobs run as asyncio tasks, but a :class:`Scheduler` hands out turns: strict
+  classes (urgent > high > normal > low, with aging), stride fair share per owner, optional off-hours
+  windows. A job feeds the engine in chunks of ``max_microbatch`` records and ONE chunk is in flight across
+  all jobs, so interactive requests queue behind at most one chunk.
 * The database (``ctx.db``: SQLite ``<state_dir>/clef.db`` or ``CLEF_DATABASE_URL``) holds jobs and result
   rows. Rows are persisted per chunk, so a job interrupted by a restart is resumed from the last persisted row
   (kinds that do not declare themselves ``resumable`` restart from scratch).
@@ -16,16 +18,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import csv
 import io
 import json
 import logging
+import math
 import re
 import secrets
 import time
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -37,7 +42,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
-from . import dbschema
+from . import dbschema, jobsort
 from .appctx import AppContext
 from .classify import (
     Labels,
@@ -53,14 +58,23 @@ from .classify import (
 from .db import Database, audit
 from .engine import EngineNotReady, GpuOutOfMemory
 from .keystore import QuotaExceeded, Reservation
+from .schedule import WINDOW_RE, Window, parse_window
 from .schemas import SystemOneRequest, check_limits, format_errors
 from .webhooks import DEFAULT_EVENTS, WebhookDispatcher, WebhookPolicy, WebhookRefused
 
 log = logging.getLogger("clef")
 
+# The owner a job is being submitted for, as ``(owner,)`` (None inside = auth off), while JobRunner.submit
+# runs the kind's ``validate`` / ``snapshot``; None outside a submit. The batch kind's snapshot reads it: it
+# only scans an input file of the submitting owner, so the scan cannot describe another key's file.
+SUBMIT_OWNER: contextvars.ContextVar[tuple[str | None] | None] = contextvars.ContextVar(
+    "clef_submit_owner", default=None
+)
+
 STATUSES = ("queued", "running", "succeeded", "failed", "cancelled", "interrupted")
 ACTIVE = ("queued", "running", "interrupted")
 FINISHED = ("succeeded", "failed", "cancelled")
+EXPIRED = "expired"  # jobs.error of a job that ran out of expire_after_s
 KIND_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 MAX_METADATA_BYTES = 16 * 1024
 PAGE_MAX = 1000
@@ -74,6 +88,9 @@ BREAKER_MIN_ITEMS = 16  # ... every one of the first N items of a run failed
 BREAKER_SAME_MIN = 50  # ... or, from N items on, this share failed with one and the same message
 BREAKER_SAME_SHARE = 0.9
 IDEMPOTENCY_KEY_RE = re.compile(r"^[!-~]{1,128}$")
+PRIORITY_LOW, PRIORITY_NORMAL, PRIORITY_HIGH, PRIORITY_URGENT = range(4)
+PRIORITY_NAMES = ("low", "normal", "high", "urgent")  # jobs.priority is the index
+SCHEDULER_MAX_SLEEP_S = 600.0
 
 
 class JobsFull(RuntimeError):
@@ -86,6 +103,10 @@ class JobAborted(Exception):
 
 class JobCancelled(Exception):
     """Raised inside a kind's runner to stop early (equivalent to returning after ``job.cancelled``)."""
+
+
+class JobExpired(JobCancelled):
+    """``expire_after_s`` ran out: the job stops between chunks, ends ``cancelled`` with error "expired"."""
 
 
 def _iso(ts: float | None) -> str | None:
@@ -124,7 +145,7 @@ class JobStore:
         if row is None:
             return None
         d = dict(row._mapping)
-        for k in ("metadata", "webhook", "deliveries", "result"):
+        for k in ("metadata", "webhook", "deliveries", "result", "schedule"):
             d[k] = _loads(d[k])
         d["cancel_requested"] = bool(d["cancel_requested"])
         return d
@@ -145,10 +166,15 @@ class JobStore:
         model: str | None = None,
         quota_day: str | None = None,
         quota_reserved: int = 0,
+        priority: int = PRIORITY_NORMAL,
+        schedule: dict[str, Any] | None = None,
+        expire_after_s: float | None = None,
+        eligible_at: float | None = None,
     ) -> dict[str, Any]:
         """Insert a queued job. With ``idem_key``, a job this owner already submitted under it is returned
         instead (``row["replayed"]`` is True). ``model`` = the model ref served at submit (``jobs.model``).
-        ``quota_day`` / ``quota_reserved``: the daily quota reservation made for it (D1)."""
+        ``quota_day`` / ``quota_reserved``: the daily quota reservation made for it (D1). ``priority`` (0..3),
+        ``schedule``, ``expire_after_s`` and ``eligible_at`` are the scheduler's (E1)."""
         job_id = "job_" + secrets.token_hex(10)
         try:
             with self.db.tx() as conn:
@@ -176,6 +202,10 @@ class JobStore:
                         model=model,
                         quota_day=quota_day,
                         quota_reserved=quota_reserved,
+                        priority=priority,
+                        schedule=None if schedule is None else json.dumps(schedule),
+                        expire_after_s=expire_after_s,
+                        eligible_at=eligible_at,
                     )
                 )
                 return self._get(conn, job_id) or {}
@@ -204,7 +234,14 @@ class JobStore:
             return self._get(conn, job_id)
 
     def list(
-        self, owner: str | None, scoped: bool, status: str | None, kind: str | None, limit: int, offset: int
+        self,
+        owner: str | None,
+        scoped: bool,
+        status: str | None,
+        kind: str | None,
+        limit: int,
+        offset: int,
+        priority: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         where = []
         if scoped:
@@ -213,6 +250,8 @@ class JobStore:
             where.append(_JOBS.c.status == status)
         if kind:
             where.append(_JOBS.c.kind == kind)
+        if priority is not None:
+            where.append(_JOBS.c.priority == priority)
         with self.db.read() as conn:
             total = conn.execute(select(func.count()).select_from(_JOBS).where(*where)).scalar_one()
             rows = conn.execute(
@@ -257,10 +296,29 @@ class JobStore:
             claimed = self._get(conn, row.id)
             return None if claimed is None else {**claimed, "claimed_from": row.status}
 
-    def claim(self, job_id: str) -> bool:
-        """queued/interrupted -> running for one id (the caller picked it). False when it was not runnable."""
+    def claim(self, job_id: str) -> dict[str, Any] | None:
+        """queued/interrupted -> running for one id (the scheduler picked it): the running row plus
+        ``claimed_from``, or None when it was not runnable. Raises once the Postgres server lock is lost."""
         with self.db.tx() as conn:
-            return self._claim(conn, job_id, time.time())
+            before = conn.execute(
+                select(_JOBS.c.status).where(_JOBS.c.id == job_id).with_for_update()
+            ).scalar()
+            if before is None or not self._claim(conn, job_id, time.time()):
+                return None
+            claimed = self._get(conn, job_id)
+            return None if claimed is None else {**claimed, "claimed_from": before}
+
+    def runnable(self) -> list[dict[str, Any]]:
+        """Light rows (no payload) of the jobs waiting for a slot, for the scheduler to order."""
+        cols = (
+            _JOBS.c.id, _JOBS.c.owner, _JOBS.c.status, _JOBS.c.priority, _JOBS.c.schedule, _JOBS.c.seq,
+            _JOBS.c.created_at, _JOBS.c.eligible_at, _JOBS.c.expire_after_s,
+        )  # fmt: skip
+        with self.db.read() as conn:
+            rows = conn.execute(
+                select(*cols).where(_JOBS.c.status.in_(_RUNNABLE)).order_by(_JOBS.c.seq)
+            ).all()
+        return [{**r._mapping, "schedule": _loads(r.schedule)} for r in rows]
 
     def payload(self, job_id: str) -> str:
         with self.db.read() as conn:
@@ -271,16 +329,27 @@ class JobStore:
         with self.db.tx() as conn:
             conn.execute(update(_JOBS).where(_JOBS.c.id == job_id).values(total=int(total)))
 
-    def add_items(self, job_id: str, items: list[dict[str, Any]]) -> int:
-        """Append rows after the last persisted one (one transaction); returns the new ``done``.
+    def add_items(
+        self, job_id: str, items: list[dict[str, Any]], tokens: int = 0, hits: int = 0
+    ) -> tuple[int, int]:
+        """Append rows after the last persisted one (one transaction); returns ``(done, hits credited)``.
 
         ``done`` is read inside the transaction, so a chunk is stored whole at the right offset or not at
         all: whatever interrupts the job, the rows stay gap-free and a resume recomputes only what is missing.
+        ``tokens`` adds to ``jobs.tokens``; ``hits`` (cache hits among these rows), capped at what is still
+        reserved (0 for a job without a reservation), moves from ``quota_reserved`` to ``jobs.hits`` in the
+        same transaction; the caller hands exactly the credited number back to the quota once this returns.
         """
         with self.db.tx() as conn:
-            start = conn.execute(select(_JOBS.c.done).where(_JOBS.c.id == job_id).with_for_update()).scalar()
-            if start is None:
+            cur = conn.execute(
+                select(_JOBS.c.done, _JOBS.c.quota_reserved, _JOBS.c.quota_day)
+                .where(_JOBS.c.id == job_id)
+                .with_for_update()
+            ).first()
+            if cur is None:
                 raise KeyError(job_id)
+            start = cur.done
+            hits = min(hits, cur.quota_reserved) if cur.quota_day is not None else 0
             conn.execute(
                 insert(dbschema.items),
                 [
@@ -293,12 +362,21 @@ class JobStore:
                 ],
             )
             failed = sum(1 for it in items if isinstance(it, dict) and "error" in it)
+            # an explicit count wins; otherwise jobs.tokens sums the rows' input_tokens (batch usage)
+            if not tokens:
+                tokens = sum(int(it.get("input_tokens") or 0) for it in items if isinstance(it, dict))
             conn.execute(
                 update(_JOBS)
                 .where(_JOBS.c.id == job_id)
-                .values(done=_JOBS.c.done + len(items), failed=_JOBS.c.failed + failed)
+                .values(
+                    done=_JOBS.c.done + len(items),
+                    failed=_JOBS.c.failed + failed,
+                    tokens=_JOBS.c.tokens + max(0, int(tokens)),
+                    quota_reserved=_JOBS.c.quota_reserved - hits,
+                    hits=_JOBS.c.hits + hits,
+                )
             )
-        return start + len(items)
+        return start + len(items), hits
 
     def _terminal_event(self, conn: Connection, job_id: str, status: str) -> str | None:
         """Inside a transaction: mark ``job.<status>`` pending (if subscribed) so a restart retries it.
@@ -340,35 +418,43 @@ class JobStore:
     def settle_quota(self, job_id: str | None = None) -> list[tuple[str, str, int]]:
         """Hand back the unprocessed part of the reservation of failed / cancelled jobs: ``(owner, day, n)``.
 
-        ``n = quota_reserved - done``; the row's ``quota_reserved`` is then set to ``done`` (what was really
-        charged), so a second call refunds nothing. One job, or (``job_id`` None) every finished one: startup
-        uses that for jobs that ended while the process was stopping.
+        ``n = quota_reserved - done + hits``; ``quota_reserved`` is then set to ``done - hits`` (what was
+        really charged), so a second call refunds nothing. ``jobs.hits`` = the cache hits already handed back
+        (they lowered ``quota_reserved`` but are part of ``done``); it is on the row, so the refund is exact
+        after a restart too. One job, or (``job_id`` None) every finished one: startup uses that for jobs
+        that ended while the process was stopping.
         """
         out: list[tuple[str, str, int]] = []
         with self.db.tx() as conn:
             q = select(
-                _JOBS.c.id, _JOBS.c.owner, _JOBS.c.quota_day, _JOBS.c.quota_reserved, _JOBS.c.done
+                _JOBS.c.id, _JOBS.c.owner, _JOBS.c.quota_day, _JOBS.c.quota_reserved, _JOBS.c.done,
+                _JOBS.c.hits,
             ).where(
                 _JOBS.c.status.in_(("failed", "cancelled")),
-                _JOBS.c.quota_reserved > _JOBS.c.done,
                 _JOBS.c.quota_day.is_not(None),
-            )
+                _JOBS.c.quota_reserved + _JOBS.c.hits > _JOBS.c.done,
+            )  # fmt: skip
             if job_id is not None:
                 q = q.where(_JOBS.c.id == job_id)
             for r in conn.execute(q).all():
-                conn.execute(update(_JOBS).where(_JOBS.c.id == r.id).values(quota_reserved=r.done))
-                if r.owner:
-                    out.append((r.owner, r.quota_day, r.quota_reserved - r.done))
+                n = r.quota_reserved - r.done + r.hits
+                conn.execute(
+                    update(_JOBS).where(_JOBS.c.id == r.id).values(quota_reserved=max(0, r.done - r.hits))
+                )
+                if r.owner and n > 0:
+                    out.append((r.owner, r.quota_day, n))
         return out
 
-    def cancel_queued(self, job_id: str) -> tuple[bool, str | None]:
-        """queued/interrupted -> cancelled plus its pending event (one transaction); ``(changed, event)``."""
+    def cancel_queued(self, job_id: str, error: str | None = None) -> tuple[bool, str | None]:
+        """queued/interrupted -> cancelled plus its pending event (one transaction); ``(changed, event)``.
+        ``error="expired"`` for a job that ran out of ``expire_after_s`` before it could start."""
         with self.db.tx() as conn:
             cur = conn.execute(
                 update(_JOBS)
                 .where(_JOBS.c.id == job_id, _JOBS.c.status.in_(_RUNNABLE))
                 .values(
                     status="cancelled",
+                    error=error,
                     finished_at=time.time(),
                     total=func.coalesce(_JOBS.c.total, _JOBS.c.done),
                 )
@@ -489,7 +575,7 @@ class JobStore:
             conn.execute(
                 update(_JOBS)
                 .where(_JOBS.c.id == job_id)
-                .values(done=0, failed=0, total=None, run_base_done=0)
+                .values(done=0, failed=0, total=None, run_base_done=0, hits=0)  # old hits: rows are gone
             )
 
     def delete(self, job_id: str) -> bool:
@@ -575,8 +661,14 @@ class JobStore:
 # ------------------------------------------------------------------ public views
 
 
-def public_job(row: dict[str, Any], now: float | None = None) -> dict[str, Any]:
-    """The JSON a client sees (never the payload, owner or webhook secret)."""
+def public_job(
+    row: dict[str, Any], now: float | None = None, waiting: tuple[Any, ...] = (None, None, None)
+) -> dict[str, Any]:
+    """The JSON a client sees (never the payload, owner or webhook secret).
+
+    ``waiting`` = ``(waiting_reason, next_window_at, waiting_behind)`` from :meth:`JobRunner.waiting`
+    (runtime state).
+    """
     now = time.time() if now is None else now
     done, total, status = row["done"], row["total"], row["status"]
     eta = rate = None
@@ -620,6 +712,15 @@ def public_job(row: dict[str, Any], now: float | None = None) -> dict[str, Any]:
         "resumes": row["resumes"],
         "error": row["error"],
         "result": row["result"],
+        "priority": PRIORITY_NAMES[min(max(row["priority"], 0), PRIORITY_URGENT)],
+        "urgent": row["priority"] >= PRIORITY_URGENT,
+        "schedule": row["schedule"],
+        "waiting_reason": waiting[0],
+        "next_window_at": _iso(waiting[1]),
+        "waiting_behind": waiting[2],
+        "expired": status == "cancelled" and row["error"] == EXPIRED,
+        "model": row["model"],
+        "tokens": row["tokens"],
         "warnings": warnings,
         "metadata": row["metadata"],
         "webhook": None
@@ -657,11 +758,28 @@ class WebhookSpec(_Base):
         return None if v is None else list(dict.fromkeys(v))
 
 
+class JobSchedule(_Base):
+    window: str = Field(
+        pattern=WINDOW_RE.pattern, description="'HH:MM-HH:MM'; start > end crosses midnight, equal = 24 h"
+    )
+    tz: str | None = Field(None, max_length=64, description="IANA zone (default: CLEF_JOB_TZ)")
+
+
 class JobCreate(_Base):
     kind: str = Field(description="classify | score | systemone | any registered kind")
     payload: dict[str, Any] = Field(description="kind-specific; see docs/jobs.md")
     webhook: WebhookSpec | None = None
     metadata: dict[str, Any] | None = Field(None, description="free-form JSON echoed back (<= 16 KB)")
+    priority: Literal["low", "normal", "high"] = Field(
+        "normal", description="strict between classes; waiting jobs age upwards (CLEF_JOB_AGING_S)"
+    )
+    urgent: bool = Field(False, description="needs the `urgent` scope: top class, ignores the window")
+    schedule: JobSchedule | None = Field(
+        None, description="run only inside this window (default: CLEF_JOB_WINDOW in CLEF_JOB_TZ)"
+    )
+    expire_after_s: float | None = Field(
+        None, gt=0, le=31_536_000, description="cancel it ('expired') this long after it first could run"
+    )
 
 
 class JobProgress(BaseModel):
@@ -693,6 +811,19 @@ class JobInfo(BaseModel):
     )
     metadata: dict[str, Any] | None = None
     webhook: dict[str, Any] | None = None
+    priority: Literal["low", "normal", "high", "urgent"] = "normal"
+    urgent: bool = False
+    schedule: dict[str, Any] | None = Field(None, description="{window, tz} the job is restricted to")
+    waiting_reason: Literal["off_hours", "active_limit", "turn", "behind"] | None = Field(
+        None, description="why a queued / running job is not advancing right now"
+    )
+    waiting_behind: str | None = Field(
+        None, description="the older job of the same key that takes the turns first (waiting_reason behind)"
+    )
+    next_window_at: str | None = Field(None, description="when the window opens next (off_hours only)")
+    expired: bool = Field(False, description="cancelled because expire_after_s ran out")
+    model: str | None = Field(None, description="model the job was submitted for")
+    tokens: int = Field(0, description="sum of input_tokens of the stored rows")
 
 
 class JobList(BaseModel):
@@ -717,11 +848,264 @@ class JobDeleted(BaseModel):
     deleted: str
 
 
+# ------------------------------------------------------------------ scheduler
+
+
+@dataclass
+class Entry:
+    """One job as the scheduler sees it (in memory only; rebuilt from the database after a restart)."""
+
+    id: str
+    owner: str  # "" = owner-less (auth off)
+    cls: int  # PRIORITY_*
+    seq: int
+    interrupted: bool
+    window: Window | None  # None = always open (also for urgent)
+    deadline: float | None  # eligible_at + expire_after_s
+    ref: float  # aging reference: when the job last had a turn (or became eligible)
+    pause: str | None = None  # "off_hours" | "active_limit": holds no slot and gets no turns
+    waiter: asyncio.Future[None] | None = None  # set while the job waits for its turn
+
+
+class Scheduler:
+    """Who may use the engine next. Pure policy plus the turn gate; all state is in memory.
+
+    * Classes are strict (urgent > high > normal > low). A waiting job's class rises one level per
+      ``aging_s`` without a turn, never to urgent.
+    * Inside a class, stride scheduling per owner: ``pass += cost`` per turn (weight 1 for everyone), the
+      lowest pass goes next, an owner that comes back starts at the current minimum. Then the owner with fewer
+      jobs in the scheduler, higher base class, interrupted, ``seq``.
+    * ``turn`` / ``done`` bracket every engine call of a job; only one call is in flight across all jobs.
+    * Slots: ``active`` jobs may take turns at once. A job outside its window frees its slot and gets no turns
+      (it stays ``running``); urgent jobs ignore the window and the slot limit.
+
+    All methods run on the event loop; ``clock`` returns unix seconds (a fake one in tests).
+    """
+
+    def __init__(self, active: int, aging_s: float, clock: Callable[[], float] = time.time):
+        self.active, self.aging_s, self.clock = max(1, active), aging_s, clock
+        self.entries: dict[str, Entry] = {}
+        self.passes: dict[str, float] = {}
+        self.vtime = 0.0  # the pass of the owner served last: where a returning owner starts
+        self.inflight: str | None = None
+        self.queued_owners: set[str] = set()  # owners of in-window queued jobs (set by the runner's tick)
+
+    # ---- ordering
+    def eff_class(self, e: Entry, now: float) -> int:
+        if e.cls >= PRIORITY_URGENT or self.aging_s <= 0:
+            return e.cls
+        return min(e.cls + int(max(0.0, now - e.ref) // self.aging_s), max(e.cls, PRIORITY_HIGH))
+
+    def running_of(self, owner: str) -> int:
+        return sum(1 for x in self.entries.values() if x.owner == owner)
+
+    def key(self, e: Entry, now: float) -> tuple[Any, ...]:
+        return (
+            -self.eff_class(e, now), self.passes.get(e.owner, 0.0), self.running_of(e.owner),
+            -e.cls, not e.interrupted, e.seq,
+        )  # fmt: skip
+
+    # ---- membership and slots
+    def slots_used(self) -> int:
+        return sum(1 for e in self.entries.values() if e.pause is None)
+
+    def has_slot(self) -> bool:
+        return self.slots_used() < self.active
+
+    # ---- fair slots: an owner over its share yields a slot to another owner that waits for one
+    def held(self) -> Counter[str]:
+        """Slots held per owner (urgent jobs hold none: they ignore the slot limit)."""
+        return Counter(e.owner for e in self.entries.values() if e.pause is None and e.cls < PRIORITY_URGENT)
+
+    def share(self, held: Counter[str], also: str | None = None) -> int:
+        """Slots each owner that wants one may keep while others wait: ceil(active / owners wanting slots)."""
+        wanting = set(held) | self.queued_owners | ({also} if also is not None else set())
+        wanting |= {e.owner for e in self.entries.values() if e.pause == "active_limit"}
+        return max(1, math.ceil(self.active / max(1, len(wanting))))
+
+    def slot_victim(self, waiter: Entry, now: float) -> Entry | None:
+        """The running job that gives its slot to ``waiter`` when none is free, or None.
+
+        Only an owner holding more than its share yields, never to an owner already at its share, never a job
+        of a higher (effective) class than the waiter, never an urgent job. The victim is the over-share owner
+        with the most slots, then its youngest job (highest ``seq``): deterministic, so no ping-pong.
+        """
+        if waiter.cls >= PRIORITY_URGENT:
+            return None  # urgent does not wait for a slot at all
+        held = self.held()
+        share = self.share(held, waiter.owner)
+        if held[waiter.owner] >= share:
+            return None
+        cls = self.eff_class(waiter, now)
+        cands = [
+            e
+            for e in self.entries.values()
+            if e.pause is None and e.cls < PRIORITY_URGENT and e.owner != waiter.owner
+            and held[e.owner] > share and self.eff_class(e, now) <= cls
+        ]  # fmt: skip
+        return max(cands, key=lambda e: (held[e.owner], e.seq), default=None)
+
+    def _rebalance(self, now: float) -> None:
+        """Registered jobs waiting for a slot (``active_limit``) take one from an owner over its share."""
+        while not self.has_slot():
+            waiting = (x for x in self.entries.values() if x.pause == "active_limit")
+            for w in sorted(waiting, key=lambda x: self.key(x, now)):
+                victim = self.slot_victim(w, now)
+                if victim is not None:
+                    victim.pause = "active_limit"  # finishes its chunk in flight, then waits (still running)
+                    w.pause, w.ref = None, now
+                    break
+            else:
+                return
+
+    def runnable_owners(self) -> set[str]:
+        """Owners with at least one entry that may take turns (not paused)."""
+        return {x.owner for x in self.entries.values() if x.pause is None}
+
+    def _lift(self, owner: str, runnable: set[str]) -> None:
+        """An owner that becomes runnable again starts level with the owners in ``runnable`` (the lowest of
+        their passes, or ``vtime`` when nobody else runs): it does not collect the turns it missed."""
+        others = [self.passes.get(o, 0.0) for o in runnable if o != owner]
+        self.passes[owner] = max(self.passes.get(owner, 0.0), min(others) if others else self.vtime)
+
+    def register(self, e: Entry) -> None:
+        runnable = self.runnable_owners()
+        if e.pause is None and e.owner not in runnable:  # new, or all its other jobs are paused
+            self._lift(e.owner, runnable)
+        self.entries[e.id] = e
+
+    def unregister(self, job_id: str) -> None:
+        e = self.entries.pop(job_id, None)
+        if e is not None and e.waiter is not None and not e.waiter.done():
+            e.waiter.cancel()
+        if self.inflight == job_id:
+            self.inflight = None
+        self.dispatch()
+
+    def interrupt(self, job_id: str, exc: BaseException) -> None:
+        """Wake a job that waits for a turn with ``exc`` (cancel, expiry): it must not wait for its window."""
+        e = self.entries.get(job_id)
+        if e is not None and e.waiter is not None and not e.waiter.done():
+            e.waiter.set_exception(exc)
+
+    # ---- windows, slots, expiry
+    def refresh(self, now: float) -> None:
+        """Pause jobs that left their window, give free slots to those back in, expire the late ones.
+
+        An owner that goes from no runnable job back to runnable (its window reopened, a slot came free) is
+        lifted like a new owner in ``register``, so a pause never banks turns; a job that leaves a pause also
+        restarts its aging clock (it was not waiting for a turn while paused).
+        """
+        before = self.runnable_owners()
+        for e in self.entries.values():
+            if e.deadline is not None and now >= e.deadline:
+                self.interrupt(e.id, JobExpired(EXPIRED))
+            if e.window is not None and not e.window.contains(now):
+                e.pause = "off_hours"
+            elif e.pause == "off_hours":
+                e.pause = "active_limit"
+        held = self.held()
+        for e in sorted(  # a free slot goes first to the owner holding the fewest
+            (x for x in self.entries.values() if x.pause == "active_limit"),
+            key=lambda x: (held[x.owner], self.key(x, now)),
+        ):
+            if self.has_slot():
+                e.pause = None
+                e.ref = now
+                held[e.owner] += 1
+        self._rebalance(now)
+        self._lift_returning(before)
+
+    def _lift_returning(self, before: set[str]) -> None:
+        after = self.runnable_owners()
+        still = before & after
+        for owner in sorted(after - before):
+            self._lift(owner, still)
+
+    def waiting(self, job_id: str) -> str | None:
+        """``waiting_reason`` of a job that is in the scheduler."""
+        e = self.entries.get(job_id)
+        if e is None:
+            return None
+        return e.pause or ("turn" if e.waiter is not None and not e.waiter.done() else None)
+
+    def behind(self, job_id: str, now: float) -> str | None:
+        """The same owner's job that takes the turns while ``job_id`` waits, or None. Inside one owner the
+        turn key differs only by class, interrupted and ``seq``: its oldest best-class job goes first."""
+        e = self.entries.get(job_id)
+        if e is None or e.pause is not None:
+            return None
+        mine = [x for x in self.entries.values() if x.owner == e.owner and x.pause is None]
+        first = min(mine, key=lambda x: self.key(x, now))
+        return None if first.id == e.id else first.id
+
+    def next_edge(self, now: float) -> float | None:
+        """The next moment (after ``now``) a window opens / closes or a job expires, for the idle timer."""
+        edges = []
+        for e in self.entries.values():
+            if e.deadline is not None and e.deadline > now:
+                edges.append(e.deadline)
+            if e.window is not None:
+                edges.append((e.window.next_start(now) if e.pause else e.window.next_end(now)) or now)
+        return min((x for x in edges if x > now), default=None)
+
+    # ---- the turn gate
+    def dispatch(self) -> None:
+        if self.inflight is not None:
+            return
+        now = self.clock()
+        ready = [
+            e
+            for e in self.entries.values()
+            if e.pause is None and e.waiter is not None and not e.waiter.done()
+        ]
+        if not ready:
+            return
+        e = min(ready, key=lambda x: self.key(x, now))
+        self.inflight = e.id
+        self.vtime = max(self.vtime, self.passes.get(e.owner, 0.0))
+        assert e.waiter is not None
+        e.waiter.set_result(None)
+
+    async def turn(self, job_id: str) -> None:
+        """Wait until this job may make one engine call (a job the scheduler does not know passes at once)."""
+        e = self.entries.get(job_id)
+        if e is None:
+            return
+        now = self.clock()
+        if e.deadline is not None and now >= e.deadline:
+            raise JobExpired(EXPIRED)
+        self.refresh(now)
+        e.waiter = asyncio.get_running_loop().create_future()
+        self.dispatch()
+        try:
+            await e.waiter
+        except BaseException:
+            if self.inflight == job_id:  # granted, but the job was cancelled before it used the turn
+                self.inflight = None
+                self.dispatch()
+            raise
+        finally:
+            e.waiter = None
+
+    def done(self, job_id: str, cost: int) -> None:
+        """The engine call is over: charge ``cost`` records to the owner and give the next turn."""
+        e = self.entries.get(job_id)
+        if e is None:
+            return
+        if self.inflight == job_id:
+            self.inflight = None
+        self.passes[e.owner] = self.passes.get(e.owner, 0.0) + max(1, cost)
+        e.ref = self.clock()
+        self.refresh(e.ref)
+        self.dispatch()
+
+
 # ------------------------------------------------------------------ job handle given to kinds
 
 
 class JobHandle:
-    """Handle given to ``run_fn``; ``set_total``, ``add_items`` and ``cancelled`` are the contract."""
+    """Handle given to ``run_fn``; ``set_total``, ``add_items``, ``decide``, ``cancelled`` are its API."""
 
     def __init__(self, runner: JobRunner, row: dict[str, Any]):
         self._runner = runner
@@ -731,6 +1115,10 @@ class JobHandle:
         self.done: int = row["done"]  # rows already persisted (non-zero when resuming a resumable kind)
         self.resumed: bool = row["done"] > 0
         self.first_error: str | None = None  # first failed row's message in this run
+        self.expired = False  # expire_after_s ran out (set when `cancelled` first notices)
+        eligible, ttl = row.get("eligible_at"), row.get("expire_after_s")
+        self._deadline: float | None = None if eligible is None or ttl is None else eligible + ttl
+        self._hits = 0  # cache hits among the chunk being decided (not charged: see add_items)
         self._seen = 0  # rows added in this run (circuit breaker)
         self._bad = 0
         self._errors: Counter[str] = Counter()
@@ -741,16 +1129,68 @@ class JobHandle:
 
     @property
     def cancelled(self) -> bool:
-        return self.id in self._runner.cancel_ids
+        if self.id in self._runner.cancel_ids:
+            return True
+        if self._deadline is not None and self._runner.clock() >= self._deadline:
+            self.expired = True
+        return self.expired
 
     def set_total(self, n: int) -> None:
         self._runner.store.set_total(self.id, int(n))
 
-    async def add_items(self, items: list[dict[str, Any]]) -> None:
-        """Persist rows in order; progress advances by ``len(items)``; a row with "error" counts as failed."""
+    async def decide(self, reqs: list[SystemOneRequest]) -> list[Any]:
+        """``decide_resilient`` with the scheduler's turn gate: kinds call this, never ``ctx.decide``."""
+        return await decide_resilient(self._runner.ctx, self, reqs)
+
+    async def engine(self, part: list[SystemOneRequest]) -> list[Any]:
+        """ONE engine call, inside this job's turn. Cache hits are counted (they are not charged)."""
+        ctx, sched = self._runner.ctx, self._runner.sched
+        try:
+            await sched.turn(self.id)
+        except JobExpired:
+            self.expired = True
+            raise
+        try:
+            if ctx.prepare is not None and ctx.decide_prepared is not None:
+                prepared = await ctx.prepare(part, batch=len(part) > 1, label="items")
+                out = await ctx.decide_prepared(prepared)
+                self._hits += len(prepared.hits)
+                return out
+            return await ctx.decide(part, batch=len(part) > 1, label="items")
+        finally:
+            sched.done(self.id, len(part))
+
+    async def engine_prepared(self, prepared: Any) -> list[Any]:
+        """ONE engine call for records already encoded (F2's window sorter), inside this job's turn."""
+        ctx, sched = self._runner.ctx, self._runner.sched
+        try:
+            await sched.turn(self.id)
+        except JobExpired:
+            self.expired = True
+            raise
+        try:
+            return await ctx.decide_prepared(prepared, priority="background")
+        finally:
+            sched.done(self.id, len(prepared.records))
+
+    def note_hits(self, n: int) -> None:
+        """Cache hits served outside ``engine`` (a sorted window's): not charged, like ``engine``'s own."""
+        self._hits += n
+
+    async def add_items(self, items: list[dict[str, Any]], tokens: int = 0) -> None:
+        """Persist rows in order; progress advances by ``len(items)``; a row with "error" counts as failed.
+
+        ``tokens`` adds to ``jobs.tokens``. Cache hits found while deciding these rows are handed back to
+        the daily quota once the rows are stored.
+        """
         if not items:
             return
-        self.done = await asyncio.to_thread(self._runner.store.add_items, self.id, list(items))
+        hits, self._hits = self._hits, 0
+        self.done, credited = await asyncio.to_thread(
+            self._runner.store.add_items, self.id, list(items), tokens, hits
+        )
+        if credited:
+            self._runner.credit_hits(self.id, credited)
         self._runner.notify_progress(self.id)
         self._trip_breaker(items)
 
@@ -759,7 +1199,9 @@ class JobHandle:
         BREAKER_MIN_ITEMS items failed, or >= BREAKER_SAME_SHARE of >= BREAKER_SAME_MIN failed alike."""
         for it in items:
             self._seen += 1
-            if isinstance(it, dict) and "error" in it:
+            if isinstance(it, dict) and "error" in it and not 400 <= (it.get("status_code") or 0) < 500:
+                # F1: a row that carries a 4xx status_code is the client's mistake (a bad batch line), not a
+                # systemic failure; it still counts as failed in the job, but never trips the breaker.
                 msg = str(it["error"])[:200]
                 self._bad += 1
                 self._errors[msg] += 1
@@ -788,16 +1230,50 @@ class JobHandle:
 # ------------------------------------------------------------------ runner
 
 
+def _entry(row: dict[str, Any], scheduler: Scheduler) -> Entry:
+    """The scheduler's view of a job row (``JobStore.runnable`` or a claimed row)."""
+    sched, cls = row.get("schedule"), int(row["priority"])
+    window = None
+    if sched and cls < PRIORITY_URGENT:  # urgent ignores the window
+        try:
+            window = parse_window(sched["window"], sched["tz"])
+        except (ValueError, KeyError):  # a zone that vanished from tzdata: run rather than never run
+            log.warning("jobs: job %s has an unusable schedule %r; ignoring the window", row["id"], sched)
+    ttl, eligible = row.get("expire_after_s"), row.get("eligible_at")
+    return Entry(
+        id=row["id"],
+        owner=row["owner"] or "",
+        cls=cls,
+        seq=row["seq"],
+        interrupted=row["status"] == "interrupted",
+        window=window,
+        deadline=None if ttl is None or eligible is None else eligible + ttl,
+        ref=eligible if eligible is not None else row["created_at"],
+    )
+
+
 class JobRunner:
-    def __init__(self, ctx: AppContext, store: JobStore, dispatcher: WebhookDispatcher):
+    def __init__(
+        self,
+        ctx: AppContext,
+        store: JobStore,
+        dispatcher: WebhookDispatcher,
+        clock: Callable[[], float] = time.time,
+    ):
         self.ctx, self.store, self.dispatcher = ctx, store, dispatcher
+        self.clock = clock  # unix seconds; tests pass a fake one (windows, aging, expiry)
+        self.policy: WebhookPolicy = dispatcher.policy
+        cfg = ctx.cfg
+        self.sched = Scheduler(cfg.job_active, cfg.job_aging_s, lambda: self.clock())
         self.cancel_ids: set[str] = set()
         self.wake: asyncio.Event | None = None  # created on start (needs the running loop)
-        self._wants_progress = False
+        self._progress_ids: set[str] = set()  # running jobs whose webhook wants job.progress
         self._task: asyncio.Task[None] | None = None
         self._purge_task: asyncio.Task[None] | None = None
+        self.tasks: dict[str, asyncio.Task[None]] = {}  # job id -> its task (every active job)
         self._failures: dict[str, int] = {}  # job id -> consecutive runner-level failures
-        self.current: str | None = None
+        self._rows: dict[str, dict[str, Any]] = {}  # job id -> its claimed row (owner, quota day)
+        self.current: set[str] = set()  # jobs running a kind right now
 
     def kinds(self) -> dict[str, Any]:
         return self.ctx.extra.setdefault("job_kinds", {})
@@ -827,11 +1303,11 @@ class JobRunner:
         self._purge_task = asyncio.create_task(self._purge_loop(), name="clef-jobs-purge")
 
     async def stop(self) -> None:
-        tasks = [t for t in (self._task, self._purge_task) if t]
+        tasks = [t for t in (self._task, self._purge_task, *self.tasks.values()) if t]
         for t in tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        # Safety net for a clean stop that landed outside the kind (e.g. right after claim_next): park the
+        await asyncio.gather(*tasks, return_exceptions=True)  # each job task parks its own job
+        # Safety net for a clean stop that landed outside the kind (e.g. right after claim): park the
         # job without counting a resume. A store call still in a worker thread holds the lock: this waits.
         with contextlib.suppress(Exception):
             await asyncio.to_thread(self.store.park_running)
@@ -848,6 +1324,20 @@ class JobRunner:
             return
         for owner, day, n in await asyncio.to_thread(self.store.settle_quota, job_id):
             quotas.refund(Reservation(owner, day, n), n)
+
+    def credit_hits(self, job_id: str, n: int) -> None:
+        """``n`` cache hits of a stored chunk (already capped and recorded in ``jobs.hits`` by
+        ``JobStore.add_items``) are not charged: hand them back to the job's reservation."""
+        row = self._rows.get(job_id)
+        if (
+            n <= 0
+            or row is None
+            or self.ctx.quotas is None
+            or not row.get("quota_day")
+            or not row.get("owner")
+        ):
+            return
+        self.ctx.quotas.refund(Reservation(row["owner"], row["quota_day"], n), n)
 
     def _purge(self) -> None:
         ttl = self.ctx.cfg.job_ttl_hours
@@ -867,51 +1357,262 @@ class JobRunner:
             except Exception:
                 log.exception("job purge failed")
 
+    # ---- scheduling
     async def _loop(self) -> None:
         assert self.wake is not None
         while True:
-            row = None
+            self.wake.clear()  # a poke that lands during the tick makes the next wait return at once
+            wait_s = RUNNER_RETRY_PAUSE_S
             try:
-                row = await asyncio.to_thread(self.store.claim_next)  # the job is 'running' from here
-                if row is None:
-                    with contextlib.suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(self.wake.wait(), timeout=PURGE_INTERVAL_S)
-                    self.wake.clear()
-                    continue
-                await self._execute(row)
-                self._failures.pop(row["id"], None)
+                wait_s = await self._tick()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                await self._runner_failed(row)
+                log.exception("job scheduler error")
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.wake.wait(), timeout=wait_s)
 
-    async def _runner_failed(self, row: dict[str, Any] | None) -> None:
+    async def _tick(self) -> float:
+        """Apply windows / expiry to the active jobs, admit waiting ones into free slots; seconds to sleep."""
+        now = self.clock()
+        self.sched.refresh(now)
+        self.sched.dispatch()
+        rows = [r for r in await asyncio.to_thread(self.store.runnable) if r["id"] not in self.tasks]
+        edges: list[float] = []
+        ready: list[Entry] = []
+        for row in rows:
+            e = _entry(row, self.sched)
+            if e.deadline is not None:
+                if now >= e.deadline:
+                    await self._expire_queued(e.id)
+                    continue
+                edges.append(e.deadline)
+            if e.window is None or e.window.contains(now):
+                ready.append(e)
+            else:
+                edges.append(e.window.next_start(now) or now)
+        self.sched.queued_owners = {e.owner for e in ready if e.cls < PRIORITY_URGENT}
+        while ready:
+            e = min(ready, key=lambda x: self.sched.key(x, now))
+            yields = False
+            if not self.sched.has_slot() and e.cls < PRIORITY_URGENT:
+                # Fair slots: an owner over its share gives up its youngest job at its next chunk boundary.
+                if self.sched.slot_victim(e, now) is None:
+                    break  # ordered by class first: nothing behind it may jump the queue either
+                yields = True
+            ready.remove(e)
+            await self._admit(e, yields)
+            self.sched.queued_owners = {x.owner for x in ready if x.cls < PRIORITY_URGENT}
+        nxt = self.sched.next_edge(now)
+        if nxt is not None:
+            edges.append(nxt)
+        return max(0.05, min([SCHEDULER_MAX_SLEEP_S, *(x - now for x in edges)]))
+
+    async def _expire_queued(self, job_id: str) -> None:
+        changed, event = await asyncio.to_thread(self.store.cancel_queued, job_id, EXPIRED)
+        if changed:
+            log.info("jobs: job %s expired before it could finish", job_id)
+            if event:
+                self.dispatcher.enqueue(job_id, event)
+            await self.settle(job_id)
+
+    async def _admit(self, e: Entry, yields: bool = False) -> None:
+        """Claim and start ``e``. ``yields``: no slot was free, so a job of an owner over its share is paused
+        (``active_limit``) once the claim succeeded, in the same step as the register (no await between)."""
+        try:
+            row = await asyncio.to_thread(self.store.claim, e.id)  # the job is 'running' from here
+        except BaseException:
+            # The claim may have committed before it raised: put the job back (only this id; the other
+            # active jobs are running and must not be parked).
+            if e.id not in self.tasks:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self.store.park, e.id)
+            raise
+        if row is None:
+            return  # cancelled or taken meanwhile
+        self._rows[e.id] = row
+        e.interrupted = row["claimed_from"] == "interrupted"
+        if yields and not self.sched.has_slot():  # a slot may have come free during the claim
+            victim = self.sched.slot_victim(e, self.clock())
+            if victim is not None:
+                victim.pause = "active_limit"
+            else:  # the waiter lost its claim to a slot meanwhile: it is running, but waits for one
+                e.pause = "active_limit"
+        self.sched.register(e)
+        task = asyncio.create_task(self._run(row), name=f"clef-job-{e.id}")
+        self.tasks[e.id] = task
+        task.add_done_callback(lambda _t, job_id=e.id: self._ended(job_id))
+
+    def _ended(self, job_id: str) -> None:
+        self.tasks.pop(job_id, None)
+        self._rows.pop(job_id, None)
+        self.poke()
+
+    async def _run(self, row: dict[str, Any]) -> None:
+        job_id = row["id"]
+        try:
+            await self._execute(row)
+            self._failures.pop(job_id, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self._runner_failed(row)
+        finally:
+            self.sched.unregister(job_id)
+            self.current.discard(job_id)
+            self._progress_ids.discard(job_id)
+
+    async def _runner_failed(self, row: dict[str, Any]) -> None:
         """The runner itself (not the kind) raised: retry a few times, then fail the job (poison pill)."""
         log.exception("job runner error")
-        if row is None:
-            # claim_next itself failed, possibly after its commit: park whatever is left 'running' (there is
-            # one runner and nothing is executing now), so the job is picked up again without a resume.
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(self.store.park_running)
-        else:
-            job_id = row["id"]
-            n = self._failures[job_id] = self._failures.get(job_id, 0) + 1
-            try:
-                # Left 'running'? Park it again (not a crash: RUNNER_MAX_FAILURES is the budget here).
-                event = await asyncio.to_thread(self.store.park, job_id, job_id in self.cancel_ids)
-                if event:
-                    self.dispatcher.enqueue(job_id, event)
-                    await self.settle(job_id)
-                if n >= RUNNER_MAX_FAILURES:
-                    self._failures.pop(job_id, None)
-                    log.error("jobs: job %s failed %d times in the runner; failing it", job_id, n)
-                    await self._finish(job_id, "failed", error="internal error: the job could not be run")
-                    return
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("job runner error while failing job %s", job_id)
+        job_id = row["id"]
+        n = self._failures[job_id] = self._failures.get(job_id, 0) + 1
+        try:
+            # Left 'running'? Park it again (not a crash: RUNNER_MAX_FAILURES is the budget here).
+            event = await asyncio.to_thread(self.store.park, job_id, job_id in self.cancel_ids)
+            if event:
+                self.dispatcher.enqueue(job_id, event)
+                await self.settle(job_id)
+            if n >= RUNNER_MAX_FAILURES:
+                self._failures.pop(job_id, None)
+                log.error("jobs: job %s failed %d times in the runner; failing it", job_id, n)
+                await self._finish(job_id, "failed", error="internal error: the job could not be run")
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("job runner error while failing job %s", job_id)
         await asyncio.sleep(RUNNER_RETRY_PAUSE_S)
+
+    # ---- submit / cancel / get (the Python API; POST /v1/jobs and F1 use it)
+    async def submit_ex(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        principal: Any = None,
+        metadata: dict[str, Any] | None = None,
+        webhook: dict[str, Any] | None = None,
+        priority: str = "normal",
+        urgent: bool = False,
+        schedule: dict[str, Any] | None = None,
+        expire_after_s: float | None = None,
+        idem_key: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Validate, reserve the daily quota, queue: ``(public job, replayed)``. See :meth:`submit`."""
+        ctx, cfg = self.ctx, self.ctx.cfg
+        owner = principal.name if principal is not None else None
+        if idem_key is not None:
+            if not IDEMPOTENCY_KEY_RE.match(idem_key):
+                raise ValueError("Idempotency-Key: 1-128 printable ASCII characters")
+            known = await asyncio.to_thread(self.store.find_idem, owner, idem_key)
+            if known:  # a replay returns the first job and is not charged again
+                return public_job(known, waiting=self.waiting(known)), True
+        kinds = self.kinds()
+        if not KIND_RE.match(kind) or kind not in kinds:
+            raise ValueError(f"kind: unknown job kind {kind[:64]!r} (available: {', '.join(sorted(kinds))})")
+        if metadata is not None and len(json.dumps(metadata)) > MAX_METADATA_BYTES:
+            raise ValueError(f"metadata: too large (max {MAX_METADATA_BYTES // 1024} KB)")
+        if priority not in PRIORITY_NAMES[:3]:
+            raise ValueError(f"priority: {priority!r} is not one of low, normal, high")
+        if urgent and principal is not None and not principal.has("urgent"):
+            raise PermissionError(f"key {principal.name!r} lacks scope 'urgent'")
+        cls = PRIORITY_URGENT if urgent else PRIORITY_NAMES.index(priority)
+        stored, window = self._schedule(schedule)
+        if webhook is not None:
+            try:
+                self.policy.check_url(webhook["url"])
+            except WebhookRefused as exc:
+                raise ValueError(f"webhook.url: {exc}") from exc
+        spec = kinds[kind]
+        for requested in payload_models(payload):  # a model this server does not serve: 404 before anything
+            ctx.check_model(requested)  # LookupError
+        submitting = SUBMIT_OWNER.set((owner,))  # asyncio.to_thread copies the context into the worker
+        try:
+            parsed = await asyncio.to_thread(spec["validate"], payload)
+            if spec.get("snapshot"):  # saved classifiers are copied into the payload now (see docs/jobs.md)
+                payload = await asyncio.to_thread(spec["snapshot"], payload, parsed)
+        except (ValueError, ValidationError) as exc:
+            raise ValueError(f"payload.{_msg(exc)}") from exc
+        finally:
+            SUBMIT_OWNER.reset(submitting)
+        now = self.clock()
+        eligible = now
+        if window is not None and cls < PRIORITY_URGENT and not window.contains(now):
+            eligible = window.next_start(now) or now  # expiry counts from when it could first run
+        reservation = ctx.quotas.reserve(principal, job_records(spec, parsed, payload))  # QuotaExceeded
+        day, reserved = (reservation.day, reservation.n) if reservation else (None, 0)
+        try:  # the whole job is charged to the submit day; the unprocessed part comes back when it ends
+            row = await asyncio.to_thread(
+                self.store.create, kind, owner, payload, metadata, webhook, cfg.max_jobs, idem_key,
+                ctx.model_ref(), day, reserved, cls, stored, expire_after_s, eligible,
+            )  # fmt: skip
+        except BaseException:  # JobsFull, a DB error: nothing was queued, charge nothing
+            if reservation is not None:
+                ctx.quotas.refund(reservation, reservation.n)
+            raise
+        replayed = bool(row.get("replayed"))
+        if replayed:  # lost an idempotency race: the other job already holds its reservation
+            if reservation is not None:
+                ctx.quotas.refund(reservation, reservation.n)
+        else:
+            self.poke()
+        return public_job(row, waiting=self.waiting(row)), replayed
+
+    async def submit(self, kind: str, payload: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        """Queue a job and return its public view.
+
+        Keyword arguments: ``principal`` (owner and scopes; None = auth off), ``metadata``, ``webhook``,
+        ``priority`` (low | normal | high), ``urgent``, ``schedule`` (``{"window", "tz"?}``),
+        ``expire_after_s``, ``idem_key``. Raises ValueError (400), PermissionError (403, urgent without the
+        scope), QuotaExceeded (429), JobsFull (409), LookupError (404, a model this server does not serve).
+        """
+        return (await self.submit_ex(kind, payload, **kw))[0]
+
+    def _schedule(self, schedule: dict[str, Any] | None) -> tuple[dict[str, str] | None, Window | None]:
+        """The window a new job gets (its own, else ``CLEF_JOB_WINDOW``), as stored and parsed."""
+        cfg = self.ctx.cfg
+        spec = (schedule or {}).get("window") or cfg.job_window or None
+        tz = (schedule or {}).get("tz") or cfg.job_tz
+        try:
+            window = parse_window(spec, tz)
+        except ValueError as exc:
+            raise ValueError(f"schedule: {exc}") from exc
+        return (None if window is None else {"window": spec, "tz": tz}), window  # type: ignore[dict-item]
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        row = self.store.get(job_id)
+        return None if row is None else public_job(row, waiting=self.waiting(row))
+
+    def waiting(self, row: dict[str, Any]) -> tuple[str | None, float | None, str | None]:
+        """``(waiting_reason, next_window_at, waiting_behind)`` of a job row: why it is not advancing now."""
+        status = row["status"]
+        if status not in ACTIVE:
+            return None, None, None
+        now = self.clock()
+        e = self.sched.entries.get(row["id"])
+        if e is not None:
+            reason = self.sched.waiting(row["id"])
+            nxt = e.window.next_start(now) if e.window is not None and reason == "off_hours" else None
+            ahead = self.sched.behind(row["id"], now) if reason == "turn" else None
+            return ("behind" if ahead else reason), nxt, ahead
+        if status != "running" and row["priority"] < PRIORITY_URGENT and row["schedule"]:
+            try:
+                window = parse_window(row["schedule"]["window"], row["schedule"]["tz"])
+            except (ValueError, KeyError):
+                window = None
+            if window is not None and not window.contains(now):
+                return "off_hours", window.next_start(now), None
+        if status != "running" and not self.sched.has_slot() and row["priority"] < PRIORITY_URGENT:
+            return "active_limit", None, None
+        return None, None, None
+
+    async def cancel(self, job_id: str) -> dict[str, Any]:
+        """Cancel a queued or running job (KeyError: no such job); returns its public view."""
+        row = await asyncio.to_thread(self.store.get, job_id)
+        if row is None:
+            raise KeyError(job_id)
+        return public_job(await self.request_cancel(row), waiting=self.waiting(row))
 
     # ---- cancel / webhooks
     async def request_cancel(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -928,6 +1629,10 @@ class JobRunner:
             status, event = await asyncio.to_thread(self.store.flag_cancel, job_id)
             if status != "running":
                 self.cancel_ids.discard(job_id)
+            else:
+                self.sched.interrupt(
+                    job_id, JobCancelled()
+                )  # a job paused off-hours must not wait for its window
             if event:
                 self.dispatcher.enqueue(job_id, event)
             if status == "cancelled":
@@ -945,7 +1650,7 @@ class JobRunner:
         return self.store.cancel_queued(job_id)
 
     def notify_progress(self, job_id: str) -> None:
-        if self._wants_progress:
+        if job_id in self._progress_ids:
             self.dispatcher.progress(job_id, True)
 
     async def redeliver(self, job_id: str, event: str) -> bool:
@@ -957,7 +1662,7 @@ class JobRunner:
 
     # ---- execution
     async def _execute(self, row: dict[str, Any]) -> None:
-        """Run a job ``claim_next`` already set 'running' (a cancel may target it from that moment on)."""
+        """Run a job ``claim`` already set 'running' (a cancel may target it from that moment on)."""
         job_id = row["id"]
         # Never discard cancel_ids here: a cancel that arrived right after the claim is already in it (and in
         # the row). Stale ids cannot exist: park / finish end a job whose cancel was requested.
@@ -983,8 +1688,9 @@ class JobRunner:
         except (ValueError, ValidationError, LookupError) as exc:
             await self._finish(job_id, "failed", error=f"payload is no longer valid: {_msg(exc)}")
             return
-        self.current = job_id
-        self._wants_progress = "job.progress" in ((row["webhook"] or {}).get("events") or ())
+        self.current.add(job_id)
+        if "job.progress" in ((row["webhook"] or {}).get("events") or ()):
+            self._progress_ids.add(job_id)
         handle = JobHandle(self, {**row, "done": done})
         t0 = time.monotonic()
         try:
@@ -1004,11 +1710,13 @@ class JobRunner:
             await self._finish(job_id, "failed", error=detail)
             return
         finally:
-            self.current = None
+            self.current.discard(job_id)
         cancelled = job_id in self.cancel_ids
         self.cancel_ids.discard(job_id)
-        status, error = ("cancelled" if cancelled else "succeeded"), None
-        if not cancelled:
+        expired = handle.expired and not cancelled  # the user's cancel wins over the clock
+        status, error = ("cancelled" if cancelled or expired else "succeeded"), (EXPIRED if expired else None)
+        if status == "succeeded" and not spec.get("completed_if_all_failed"):
+            # A kind with "completed_if_all_failed" (batch, OpenAI semantics) skips this check.
             now = await asyncio.to_thread(self.store.get, job_id)
             if now and now["done"] > 0 and now["failed"] >= now["done"]:  # nothing worked: not a success
                 status = "failed"
@@ -1049,7 +1757,10 @@ class ItemError:
 
 
 async def decide_resilient(ctx: AppContext, job: JobHandle, reqs: list[SystemOneRequest]) -> list[Any]:
-    """Results for ``reqs`` (one engine call when everything is fine).
+    """Results for ``reqs`` (one engine call when everything is fine). Kinds call ``job.decide(reqs)``.
+
+    Each engine call takes a turn from the scheduler (``JobHandle.engine``); none is held while a call
+    waits for an unavailable engine or pauses after an OOM.
 
     A record the engine / limits reject (ValueError, e.g. too long) or that hits a GPU OOM is isolated by
     bisecting the chunk and becomes an ``ItemError``; the rest of the chunk is unaffected. Engine not ready
@@ -1063,7 +1774,7 @@ async def decide_resilient(ctx: AppContext, job: JobHandle, reqs: list[SystemOne
             if job.cancelled:
                 raise JobCancelled
             try:
-                return await ctx.decide(part, batch=len(part) > 1, label="items")
+                return await job.engine(part)  # waits for the job's turn; one engine call
             except EngineNotReady as exc:
                 if waited >= wait_s:
                     raise JobAborted(f"engine not available for {wait_s:g}s: {exc}") from exc
@@ -1096,7 +1807,8 @@ async def run_chunked(
 ) -> None:
     """Feed items ``job.resume_from .. n`` through the engine, ONE chunk in flight, persisting after each."""
     job.set_total(n)
-    size = max(1, int(ctx.cfg.max_microbatch))
+    sorter = jobsort.windowed(ctx, n, build, decide_resilient)  # F2: None unless a flag is on
+    size = sorter.step if sorter else max(1, int(ctx.cfg.max_microbatch))
     i = job.resume_from
     while i < n:
         if job.cancelled:
@@ -1109,7 +1821,9 @@ async def run_chunked(
             except (ValueError, ValidationError) as exc:
                 built.append((k, ItemError(_msg(exc))))
         good = [r for _, r in built if not isinstance(r, ItemError)]
-        results = iter(await decide_resilient(ctx, job, good) if good else [])
+        results = iter([])
+        if good:
+            results = iter(await (sorter.decide(job, i, good) if sorter else job.decide(good)))
         rows = []
         for k, r in built:
             out = r if isinstance(r, ItemError) else next(results)
@@ -1546,106 +2260,76 @@ def router(ctx: AppContext) -> APIRouter:
             description="same key again (same API key) returns the job created the first time",
         ),
     ) -> dict[str, Any]:
-        if idempotency_key is not None:
-            if not IDEMPOTENCY_KEY_RE.match(idempotency_key):
-                raise ApiError(400, "Idempotency-Key: 1-128 printable ASCII characters")
-            known = await run_in_threadpool(store.find_idem, caller(request), idempotency_key)
-            if known:
-                response.headers["Location"] = f"/v1/jobs/{known['id']}"
-                response.headers["Idempotent-Replay"] = "true"
-                return public_job(known)
-        if not KIND_RE.match(body.kind) or body.kind not in kinds:
-            raise ApiError(
-                400, f"kind: unknown job kind {body.kind[:64]!r} (available: {', '.join(sorted(kinds))})"
-            )
-        if body.metadata is not None and len(json.dumps(body.metadata)) > MAX_METADATA_BYTES:
-            raise ApiError(400, f"metadata: too large (max {MAX_METADATA_BYTES // 1024} KB)")
-        hook = None
-        if body.webhook is not None:
-            try:
-                policy.check_url(body.webhook.url)
-            except WebhookRefused as exc:
-                raise ApiError(400, f"webhook.url: {exc}") from exc
-            hook = body.webhook.model_dump(exclude_none=True)
-        spec = kinds[body.kind]
-        payload = body.payload
-        for requested in payload_models(payload):  # a model this server does not serve: 404 before anything
-            try:
-                ctx.check_model(requested)
-            except LookupError as exc:
-                if isinstance(exc, (KeyError, IndexError)):
-                    raise
-                raise ApiError(404, str(exc)) from exc
-        try:
-            parsed = await run_in_threadpool(spec["validate"], payload)
-            if spec.get("snapshot"):  # saved classifiers are copied into the payload now (see docs/jobs.md)
-                payload = await run_in_threadpool(spec["snapshot"], payload, parsed)
-        except (ValueError, ValidationError) as exc:
-            raise ApiError(400, f"payload.{_msg(exc)}") from exc
         principal = ctx.principal(request)
-        try:  # the whole job is charged to the submit day; the unprocessed part comes back when it ends
-            reservation = ctx.quotas.reserve(principal, job_records(spec, parsed, payload))
+        try:
+            info, replayed = await runner.submit_ex(
+                body.kind,
+                body.payload,
+                principal=principal,
+                metadata=body.metadata,
+                webhook=None if body.webhook is None else body.webhook.model_dump(exclude_none=True),
+                priority=body.priority,
+                urgent=body.urgent,
+                schedule=None if body.schedule is None else body.schedule.model_dump(exclude_none=True),
+                expire_after_s=body.expire_after_s,
+                idem_key=idempotency_key,
+            )
         except QuotaExceeded as exc:
             request.state.quota = (exc.limit, exc.remaining)
             raise ApiError(
                 429, str(exc), {"Retry-After": str(exc.retry_after)}, code="insufficient_quota"
             ) from exc
-        request.state.quota = ctx.quotas.remaining(principal)
-        try:
-            row = await run_in_threadpool(
-                store.create,
-                body.kind,
-                caller(request),
-                payload,
-                body.metadata,
-                hook,
-                cfg.max_jobs,
-                idempotency_key,
-                ctx.model_ref(),
-                reservation.day if reservation else None,
-                reservation.n if reservation else 0,
-            )
-        except BaseException as exc:  # JobsFull, a DB error: nothing was queued, charge nothing
-            if reservation is not None:
-                ctx.quotas.refund(reservation, reservation.n)
-                request.state.quota = ctx.quotas.remaining(principal)
-            if isinstance(exc, JobsFull):
-                raise ApiError(409, str(exc), {"Retry-After": "30"}) from exc
+        except PermissionError as exc:
+            raise ApiError(403, str(exc)) from exc
+        except JobsFull as exc:
+            raise ApiError(409, str(exc), {"Retry-After": "30"}) from exc
+        except (KeyError, IndexError):
             raise
-        if row.get("replayed"):  # lost an idempotency race: the other job already holds its reservation
-            if reservation is not None:
-                ctx.quotas.refund(reservation, reservation.n)
-                request.state.quota = ctx.quotas.remaining(principal)
+        except LookupError as exc:  # a model this server does not serve
+            raise ApiError(404, str(exc)) from exc
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+        request.state.quota = ctx.quotas.remaining(principal)
+        if replayed:
             response.headers["Idempotent-Replay"] = "true"
-        else:
-            runner.poke()
-        response.headers["Location"] = f"/v1/jobs/{row['id']}"
-        return public_job(row)
+        response.headers["Location"] = f"/v1/jobs/{info['id']}"
+        return info
 
     @api.get("", response_model=JobList, summary="List jobs (newest first)")
     async def list_jobs(
         request: Request,
         status: Literal["queued", "running", "succeeded", "failed", "cancelled", "interrupted"] | None = None,
         kind: str | None = None,
+        priority: Literal["low", "normal", "high", "urgent"] | None = None,
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
     ) -> dict[str, Any]:
         rows, total = await run_in_threadpool(
-            store.list, caller(request), scoped(request), status, kind, limit, offset
+            store.list,
+            caller(request),
+            scoped(request),
+            status,
+            kind,
+            limit,
+            offset,
+            None if priority is None else PRIORITY_NAMES.index(priority),
         )
         now = time.time()
-        return {"jobs": [public_job(r, now) for r in rows], "total": total, "limit": limit, "offset": offset}
+        jobs = [public_job(r, now, runner.waiting(r)) for r in rows]
+        return {"jobs": jobs, "total": total, "limit": limit, "offset": offset}
 
     @api.get("/{job_id}", response_model=JobInfo, summary="Job status, progress, ETA and result summary")
     async def get_job(job_id: str, request: Request) -> dict[str, Any]:
-        return public_job(await load(request, job_id))
+        row = await load(request, job_id)
+        return public_job(row, waiting=runner.waiting(row))
 
     @api.post("/{job_id}/cancel", response_model=JobInfo, summary="Cancel a queued or running job")
     async def cancel_job(job_id: str, request: Request) -> dict[str, Any]:
         row = await load(request, job_id)
         if row["status"] in FINISHED:
             raise ApiError(409, f"job is already {row['status']}")
-        out = public_job(await runner.request_cancel(row))
+        fresh = await runner.request_cancel(row)
+        out = public_job(fresh, waiting=runner.waiting(fresh))
         await audit_job(request, "job.cancel", row)
         return out
 
@@ -1679,7 +2363,8 @@ def router(ctx: AppContext) -> APIRouter:
                 f"nothing to redeliver for {event}: "
                 + (f"its delivery is {state}" if state else "no such delivery was recorded"),
             )
-        return public_job(await run_in_threadpool(store.get, job_id) or row)
+        fresh = await run_in_threadpool(store.get, job_id) or row
+        return public_job(fresh, waiting=runner.waiting(fresh))
 
     @api.delete("/{job_id}", response_model=JobDeleted, summary="Delete a finished job and its results")
     async def delete_job(job_id: str, request: Request) -> dict[str, str]:

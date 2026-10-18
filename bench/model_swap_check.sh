@@ -63,7 +63,7 @@ fi
 run_dump() {  # $1 out file, $2.. extra args
   local out=$1
   shift
-  env -u CLEF_MODEL -u CLEF_TUNABLEOP PYTORCH_TUNABLEOP_ENABLED=0 CLEF_QUANT=none \
+  env -u CLEF_MODEL CLEF_MASK_FREE=0 CLEF_FAST_HEAD=0 CLEF_TUNABLEOP=0 PYTORCH_TUNABLEOP_ENABLED=0 CLEF_QUANT=none \
     "$PY" bench/parity.py --engine-dump "$out" "$@"
 }
 check_parity() {  # $1 label, $2 ref json, $3 new json
@@ -104,16 +104,16 @@ note "catalog"
 "$PY" -m clef_server.cli models || fail "clef models"
 
 note "smoke: clef-flash"
-env -u CLEF_TUNABLEOP CLEF_MODEL=clef-flash "$PY" -m clef_server.cli doctor --smoke \
+env CLEF_TUNABLEOP=0 CLEF_MODEL=clef-flash "$PY" -m clef_server.cli doctor --smoke \
   | tee "$OUT/smoke_clef-flash.txt" || fail "clef-flash smoke"
 
 note "smoke: clef (27B, CLEF_QUANT=nf4)"
 # the aliases must not redirect the 27B to other weights
 if [ -n "${CLEF_27B_PATH:-}" ]; then
-  big=(env -u CLEF_MODEL_REPO -u CLEF_MODEL_REVISION -u CLEF_TUNABLEOP CLEF_MODEL=clef
+  big=(env -u CLEF_MODEL_REPO -u CLEF_MODEL_REVISION CLEF_TUNABLEOP=0 CLEF_MODEL=clef
     "CLEF_MODEL_PATH=$CLEF_27B_PATH")
 else
-  big=(env -u CLEF_MODEL_PATH -u CLEF_MODEL_REPO -u CLEF_MODEL_REVISION -u CLEF_TUNABLEOP CLEF_MODEL=clef)
+  big=(env -u CLEF_MODEL_PATH -u CLEF_MODEL_REPO -u CLEF_MODEL_REVISION CLEF_TUNABLEOP=0 CLEF_MODEL=clef)
 fi
 if [ "${SKIP_27B:-0}" = 1 ]; then
   echo "SKIP: SKIP_27B=1"
@@ -155,7 +155,7 @@ if [ "${SKIP_SERVE:-0}" = 1 ]; then
 else
   note "serve: clef-flash with warmup, then HTTP checks"
   base="http://127.0.0.1:${PORT}"
-  if env -u CLEF_MODEL -u CLEF_TUNABLEOP CLEF_WARMUP=1 "$PY" -m clef_server.cli serve --detach --timeout 900; then
+  if env -u CLEF_MODEL CLEF_TUNABLEOP=0 CLEF_WARMUP=1 "$PY" -m clef_server.cli serve --detach --timeout 900; then
     curl -fsS "$base/readyz" && echo
     curl -fsS "$base/v1/models" | tee "$OUT/v1_models.json" && echo
     if curl -fsS "$base/v1/systemone" -H 'content-type: application/json' \

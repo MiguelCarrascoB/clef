@@ -2,7 +2,8 @@
 
 clef speaks two familiar dialects so existing tools can use it without code changes:
 
-- **OpenAI**: `GET /v1/models`, `POST /v1/chat/completions` (structured outputs and forced function calls).
+- **OpenAI**: `GET /v1/models`, `POST /v1/chat/completions` (structured outputs and forced function calls),
+  and `/v1/files` + `/v1/batches` (the [Batch API](#files-and-batches-the-openai-batch-api)).
 - **Hugging Face Inference API**: zero-shot classification at `POST /hf/models/{model_id}`.
 
 Both sit on the same engine and the same `infer` path as `/v1/systemone`: same API keys, same rate limit, same
@@ -225,6 +226,93 @@ Status codes match the rest of the API: `400` bad request or schema, `401` missi
 (`code: invalid_api_key`), `404` unknown model, `413` too large, `429` rate limited (with `Retry-After`,
 `type: rate_limit_error`), `503` model loading or GPU out of memory. The request id is in the `X-Request-ID` header.
 The native `/v1/*` routes keep `{detail, request_id}`.
+
+## Files and batches (the OpenAI Batch API)
+
+`/v1/files` and `/v1/batches` follow OpenAI's Batch API, so the `openai` SDK's `client.files` and `client.batches`
+work unchanged. A batch is one [async job](jobs.md) of kind `batch` (it shows up in `GET /v1/jobs?kind=batch`), so it
+shares the job queue, the daily quota, resume after a restart and the retention timer. All routes need the `jobs`
+scope and are private to the key that created them (an admin sees every file and batch). Errors use the OpenAI
+shape, `{"error": {"message", "type", "param", "code"}}`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="...")
+f = client.files.create(file=open("requests.jsonl", "rb"), purpose="batch")
+batch = client.batches.create(input_file_id=f.id, endpoint="/v1/chat/completions", completion_window="24h")
+# poll client.batches.retrieve(batch.id) until status is completed, then
+print(client.files.content(batch.output_file_id).text)
+```
+
+### The input file
+
+One JSON object per line (blank lines are ignored), at most `min(CLEF_MAX_BATCH_LINES, CLEF_MAX_JOB_ITEMS)` lines
+(50,000 by default), up to `CLEF_MAX_FILE_MB` (200):
+
+```json
+{"custom_id": "ticket-1", "method": "POST", "url": "/v1/chat/completions", "body": {"messages": [...], "response_format": {...}}}
+```
+
+`custom_id` is unique, `method` is `POST` and `url` equals the batch's `endpoint`. The supported endpoints are
+`/v1/chat/completions`, `/v1/classify` and `/v1/score`; each `body` is exactly what that route takes, with the same
+validation, the same limits and the same probabilities. (`stream: true` is not allowed in a batch.) The SDK does not
+check `endpoint`; clef answers `400` with `param: "endpoint"` for any other value.
+
+### Files
+
+| Route | |
+| --- | --- |
+| `POST /v1/files` | multipart: `file` (`.jsonl`), `purpose=batch`, optional `expires_after[anchor]=created_at` and `expires_after[seconds]` (3600..2592000). Streamed to disk; the body limit of this route alone is `CLEF_MAX_FILE_MB` |
+| `GET /v1/files` | `after`, `limit` (default 20), `order` (`desc`), `purpose`; cursor list |
+| `GET /v1/files/{id}`, `GET /v1/files/{id}/content` | the file object; the JSONL, streamed |
+| `DELETE /v1/files/{id}` | uploaded files only. A batch's output / error file is deleted with its job (`DELETE /v1/jobs/{job_id}`); an input file an unfinished batch still reads is `409` |
+
+Uploads expire after `expires_after` or `CLEF_FILE_TTL_HOURS` (30 days). The **output and error files are not
+copies**: they are streamed from the job's result rows, so they cost no disk and live as long as the job
+(`CLEF_JOB_TTL_HOURS`).
+
+### Batches
+
+| Route | |
+| --- | --- |
+| `POST /v1/batches` | `input_file_id`, `endpoint`, `completion_window` (`"24h"`), optional `metadata` (<= 16 string pairs; keys <= 64, values <= 512 characters) and `extra_body={"clef": {...}}` |
+| `GET /v1/batches/{id}`, `GET /v1/batches` | the batch; newest first, `after`, `limit` 1..100 |
+| `POST /v1/batches/{id}/cancel` | `cancelling` while a running chunk finishes, then `cancelled`; a queued batch is `cancelled` at once. `409` when it already ended |
+
+`status` is `in_progress`, `cancelling`, `completed`, `failed`, `expired` or `cancelled`, with OpenAI's timestamps and
+`request_counts` (`completed` = succeeded, `failed` = non-2xx lines). `usage.input_tokens` is the sum over the lines.
+`expires_at` is 24 hours after the batch is eligible to run: its creation time, or the next time its window opens when
+`clef.schedule` (or `CLEF_JOB_WINDOW`) holds it back. A batch not finished by then ends `expired`.
+
+- A file that is **structurally** wrong (a line that is not JSON, a duplicate or missing `custom_id`, a wrong `url`
+  or `method`, too many lines, an empty file) makes `POST /v1/batches` return a batch with status `failed` and
+  `errors.data = [{code, line, message, param}]` (at most 100). No job runs and nothing is charged.
+- A **request** that cannot run (a schema with no decisions, `n > 1`, an unknown `model`, a label set over the
+  limit) is a line of the error file with its OpenAI error body and status code; the batch still ends `completed`,
+  even when every line failed.
+- `output_file_id` appears once the batch ended with at least one success, `error_file_id` when a line failed or
+  never ran. Output is in input order: `{"id": "batch_req_...", "custom_id", "response": {"status_code",
+  "request_id", "body"}, "error": null}`. For a cancelled, expired or failed batch the error file also names, with
+  `{"response": null, "error": {"code": "batch_cancelled" | "batch_expired" | "batch_failed", "message"}}`, every
+  line that never ran; those custom ids are read back from the input file, which is why it cannot be deleted while
+  the batch is unfinished.
+- A batch that stops for a systemic reason (the engine went away, the circuit breaker) is `failed` with
+  `errors.data = [{"code": "server_error", ...}]`; the rows it did produce are still served.
+
+The `clef` extension, `extra_body={"clef": {"priority": "low", "urgent": false, "schedule": {"window": "20:00-06:00",
+"tz": "Europe/Madrid"}}}` (`priority` `low|normal|high`), is the [job scheduler](jobs.md#scheduling)'s: the batch is
+queued, ordered and windowed like any job. `urgent` needs the `urgent` scope (`403` otherwise). The daily quota of the key is reserved when the batch is created (`429`
+`insufficient_quota` when it does not fit; a failed or cancelled batch gets the unprocessed part back).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CLEF_MAX_FILE_MB` | `200` | body limit of `POST /v1/files` only (every other route keeps `CLEF_MAX_BODY_MB`) |
+| `CLEF_MAX_BATCH_LINES` | `50000` | requests per batch (also capped by `CLEF_MAX_JOB_ITEMS`) |
+| `CLEF_FILE_TTL_HOURS` | `720` | how long an uploaded file is kept unless it has `expires_after`; `0` = forever |
+
+Not supported: other `purpose` values (`assistants`, `fine-tune`...), other endpoints, `completion_window` other than
+`24h`, `output_expires_after` (ignored), `/v1/batches` from a file that another key uploaded (`404`, admins too).
 
 ## Hugging Face zero-shot classification
 

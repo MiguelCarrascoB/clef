@@ -71,6 +71,10 @@ jobs = Table(
     Column("quota_day", Text),  # E1
     Column("quota_reserved", BigInteger, nullable=False, server_default=text("0")),  # E1
     Column("tokens", BigInteger, nullable=False, server_default=text("0")),  # E1
+    # ---- 0003_job_hits
+    Column(
+        "hits", BigInteger, nullable=False, server_default=text("0")
+    ),  # cache hits handed back to the quota
     sqlite_autoincrement=True,
 )
 Index("jobs_status", jobs.c.status, jobs.c.seq)

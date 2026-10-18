@@ -183,6 +183,12 @@ class ClassifierDef(_Base):
     multi_label: bool = False
     threshold: float | None = Field(None, ge=0.0, le=1.0)
     description: str | None = None
+    review_threshold: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="single-label only: interactive runs below this confidence are queued for review",
+    )
 
     @model_validator(mode="after")
     def _shape(self) -> ClassifierDef:
@@ -194,6 +200,8 @@ class ClassifierDef(_Base):
             check_labels_shape(self.labels)
             if self.threshold is not None and not self.multi_label:
                 raise ValueError("threshold: only allowed with multi_label=true")
+            if self.review_threshold is not None and self.multi_label:
+                raise ValueError("review_threshold: only allowed for single-label classifiers")
         else:
             if self.levels is None:
                 raise ValueError("levels: field is required for kind=score")
@@ -202,6 +210,8 @@ class ClassifierDef(_Base):
             _check_names(self.levels, "levels")
             if self.multi_label or self.threshold is not None:
                 raise ValueError("multi_label/threshold: not allowed for kind=score")
+            if self.review_threshold is not None:
+                raise ValueError("review_threshold: only allowed for kind=classify")
         return self
 
 
@@ -302,6 +312,7 @@ class ClassifierInfo(BaseModel):
     multi_label: bool = False
     threshold: float | None = None
     description: str | None = None
+    review_threshold: float | None = None
     created_at: str
     updated_at: str
 

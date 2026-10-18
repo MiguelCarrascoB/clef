@@ -114,6 +114,11 @@ export function parseJob(body) {
     ok: body.status === 'succeeded',
     hasErrors: (p.failed ?? 0) > 0,
     warnings: body.warnings ?? [],
+    priority: body.priority ?? 'normal',
+    waitingReason: body.waiting_reason ?? null,
+    waitingBehind: body.waiting_behind ?? null,
+    nextWindowAt: body.next_window_at ?? null,
+    expired: body.expired ?? false,
     raw: body,
   };
 }
@@ -285,14 +290,14 @@ export class ClefClient {
    * Without `idempotencyKey` a network error after the request was sent is NOT retried (it could duplicate the
    * job). With one, the server returns the job created the first time, so retrying is safe and happens.
    */
-  async submitJob(kind, payload, { webhook, metadata, idempotencyKey } = {}) {
+  async submitJob(kind, payload, { webhook, metadata, idempotencyKey, priority, urgent, schedule, expireAfterS } = {}) {
     const hook = typeof webhook === 'string' ? { url: webhook } : webhook;
     const opts = idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : { retryNetwork: false };
-    return parseJob(await this._request('POST', '/v1/jobs', clean({ kind, payload, webhook: hook, metadata }), opts));
+    return parseJob(await this._request('POST', '/v1/jobs', clean({ kind, payload, webhook: hook, metadata, priority, urgent: urgent ? true : undefined, schedule, expire_after_s: expireAfterS }), opts));
   }
 
   /** classifyMany without holding a connection open: `labels` or a saved `classifier` name. */
-  classifyJob(inputs, labels, { classifier, instructions, multiLabel = false, threshold, model, webhook, metadata, idempotencyKey } = {}) {
+  classifyJob(inputs, labels, { classifier, instructions, multiLabel = false, threshold, model, webhook, metadata, idempotencyKey, priority, urgent, schedule, expireAfterS } = {}) {
     const payload = clean({
       labels,
       classifier,
@@ -302,7 +307,7 @@ export class ClefClient {
       model,
     });
     payload.inputs = inputs;
-    return this.submitJob('classify', payload, { webhook, metadata, idempotencyKey });
+    return this.submitJob('classify', payload, { webhook, metadata, idempotencyKey, priority, urgent, schedule, expireAfterS });
   }
 
   async job(id) {
@@ -386,6 +391,32 @@ export class ClefClient {
   }
   deleteClassifier(name) {
     return this._request('DELETE', `/v1/classifiers/${enc(name)}`);
+  }
+  // --- routers and the review queue (docs/router.md) ---
+  putRouter(name, settings = {}) {
+    return this._request('PUT', `/v1/routers/${enc(name)}`, settings);
+  }
+  getRouter(name) {
+    return this._request('GET', `/v1/routers/${enc(name)}`);
+  }
+  async listRouters() {
+    return (await this._request('GET', '/v1/routers')).routers || [];
+  }
+  deleteRouter(name) {
+    return this._request('DELETE', `/v1/routers/${enc(name)}`);
+  }
+  route(router, input) {
+    return this._request('POST', `/v1/routers/${enc(router)}/route`, { input });
+  }
+  propose(router) {
+    return this._request('POST', `/v1/routers/${enc(router)}/propose`);
+  }
+  listReview(filters = {}) {
+    const qs = Object.entries(filters).filter(([, v]) => v != null && v !== '').map(([k, v]) => `${enc(k)}=${enc(v)}`).join('&');
+    return this._request('GET', `/v1/review${qs ? `?${qs}` : ''}`);
+  }
+  resolveReview(id, action, body = {}) {
+    return this._request('POST', `/v1/review/${enc(id)}/resolve`, { action, ...body });
   }
 }
 

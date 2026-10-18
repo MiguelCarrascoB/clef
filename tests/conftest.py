@@ -39,11 +39,43 @@ def _pg_admin():  # psycopg is only needed when the Postgres runs are enabled
 
 
 @pytest.fixture(autouse=True)
+def _restore_environ() -> Iterator[None]:
+    """Put ``os.environ`` back as it was after every test. Code under test may write it directly, outside
+    monkeypatch: ``cli.load_config`` applies ``clef serve``'s flags (CLEF_PORT, CLEF_DEVICE...) and
+    ``dotenv.load_env`` fills in file values, and either would otherwise leak into every later test."""
+    saved = dict(os.environ)
+    yield
+    if dict(os.environ) != saved:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
 def _private_state_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """A test that builds ``Config()`` without ``state_dir`` must never open (or migrate) the developer's real
     state dir: its clef.db, its v3.1 jobs.db or its classifier files."""
     monkeypatch.setenv("CLEF_STATE_DIR", str(tmp_path_factory.mktemp("state")))
     monkeypatch.delenv("CLEF_LOG_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_env_files(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Never read a real ``./.env`` or ``~/.config/clef/env`` (CLEF_ENV_FILE= disables loading). The dotenv
+    module keeps per-process state (the CLEF_ENV_FILE snapshot, the files loaded): reset it around every test,
+    or the first test's value would hold for the whole run."""
+    from clef_server import dotenv
+
+    monkeypatch.setenv("CLEF_ENV_FILE", "")
+    dotenv.reset()
+    yield
+    dotenv.reset()
+
+
+@pytest.fixture(autouse=True)
+def _no_llm_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The router's LLM is off unless a test turns it on with a fake: never a live client in tests."""
+    for name in ("GEMINI_API_KEY", "CLEF_LLM_API_KEY", "CLEF_LLM_BASE_URL", "CLEF_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)

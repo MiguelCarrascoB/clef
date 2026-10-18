@@ -76,6 +76,7 @@ def test_redact_url_hides_the_password():
     )
     assert redact_url("sqlite:////tmp/x.db") == "sqlite:////tmp/x.db"
     assert "s3cret" not in redact_url("::not a url s3cret@")
+    pytest.importorskip("psycopg")  # the postgres extra; Database() refuses a Postgres URL without it
     db = Database("postgresql://clef:s3cret@localhost:1/clef")
     assert "s3cret" not in db.display_url and "s3cret" not in str(db.info())
 
@@ -157,9 +158,9 @@ def test_concurrent_writers_are_serialised(db):
 
 
 def test_upgrade_is_idempotent_and_reports_the_version(db):
-    assert db.schema_version() == code_version() == "0002"
+    assert db.schema_version() == code_version() == "0003"
     db.upgrade()
-    assert db.info()["schema_version"] == "0002" and db.info()["dialect"] == db.dialect
+    assert db.info()["schema_version"] == "0003" and db.info()["dialect"] == db.dialect
 
 
 def test_metadata_matches_the_migrated_database(db):
@@ -228,14 +229,14 @@ def test_legacy_jobs_db_is_copied_stamped_and_upgraded(cfg, caplog, sqlite_only)
     assert store.get("job_a")["status"] == "succeeded" and store.items("job_a", 0, 10) == [
         (0, '{"label": "x"}')
     ]
-    assert database.schema_version() == "0002"
+    assert database.schema_version() == "0003"
     from clef_server.classifiers import ClassifierStore
 
     assert ClassifierStore(database).get("tri")["version"] == 1
     assert (state / "classifiers.imported" / "tri.json").exists()
     database.close()
     again = open_database(cfg)  # second start: nothing to rename, nothing to import
-    assert again.schema_version() == "0002"
+    assert again.schema_version() == "0003"
     again.close()
 
 
@@ -550,7 +551,7 @@ def test_health_reports_the_database():
     client, _, _ = make_api()
     with client:
         db_info = client.get("/health").json()["db"]
-    assert db_info["schema_version"] == "0002" and db_info["dialect"] in ("sqlite", "postgresql")
+    assert db_info["schema_version"] == "0003" and db_info["dialect"] in ("sqlite", "postgresql")
     assert "***" in db_info["url"] or db_info["url"].startswith("sqlite")
 
 
@@ -694,9 +695,9 @@ def test_db_current_and_upgrade(cfg, monkeypatch, capsys, db_backend):
         assert code == 1 and "no database yet" in out and not Path(cfg.state_dir, "clef.db").exists()
     else:
         assert code == 1 and "(empty)" in out and "***" in out
-    assert run_cli("db", "upgrade") == 0 and "-> 0002" in capsys.readouterr().out
+    assert run_cli("db", "upgrade") == 0 and "-> 0003" in capsys.readouterr().out
     assert (
-        run_cli("db", "current") == 0 and "0002 (this clef expects 0002: current)" in capsys.readouterr().out
+        run_cli("db", "current") == 0 and "0003 (this clef expects 0003: current)" in capsys.readouterr().out
     )
 
 
@@ -706,7 +707,7 @@ def test_a_newer_schema_is_one_clear_error(cfg, monkeypatch, capsys, caplog, db_
     with database.tx() as conn:
         conn.execute(text("UPDATE alembic_version SET version_num = '0099'"))
     database.close()
-    with pytest.raises(DatabaseError, match=r"database schema 0099 is newer than this clef \(expects 0002\)"):
+    with pytest.raises(DatabaseError, match=r"database schema 0099 is newer than this clef \(expects 0003\)"):
         open_database(cfg)
     capsys.readouterr()
     assert run_cli("db", "upgrade") == 1
@@ -718,7 +719,7 @@ def test_a_newer_schema_is_one_clear_error(cfg, monkeypatch, capsys, caplog, db_
         main_mod.run(cfg)
     assert stop.value.code == 3
     assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
-        "cannot start: database schema 0099 is newer than this clef (expects 0002): upgrade clef, or point it"
+        "cannot start: database schema 0099 is newer than this clef (expects 0003): upgrade clef, or point it"
         " at another database"
     ]
 
@@ -821,7 +822,7 @@ def test_backup_sqlite_and_postgres_hint(cfg, monkeypatch, capsys, db_backend):
     if os.name == "posix":
         assert out_path.stat().st_mode & 0o777 == 0o600
     copy = Database(sqlite_url(out_path))
-    assert copy.schema_version() == "0002" and JobStore(copy).list(None, False, None, None, 10, 0)[1] == 3
+    assert copy.schema_version() == "0003" and JobStore(copy).list(None, False, None, None, 10, 0)[1] == 3
     copy.close()
     assert run_cli("backup", "--out", str(out_path)) == 1  # never overwrites
     assert run_cli("backup") == 0
@@ -871,7 +872,7 @@ def test_doctor_database_check(cfg, sqlite_only):
     assert not Path(cfg.state_dir, "clef.db").exists()  # read-only: nothing created
     database = Database(database_url(cfg))
     database.upgrade()
-    assert _doctor_db(cfg)["level"] == doctor.OK and "schema 0002" in _doctor_db(cfg)["detail"]
+    assert _doctor_db(cfg)["level"] == doctor.OK and "schema 0003" in _doctor_db(cfg)["detail"]
     with database.tx() as conn:
         conn.execute(text("UPDATE alembic_version SET version_num='0001'"))
     assert _doctor_db(cfg)["level"] == doctor.FAIL and "clef db upgrade" in _doctor_db(cfg)["detail"]

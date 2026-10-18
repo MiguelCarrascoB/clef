@@ -12,6 +12,7 @@ tests. Change it first, then the code.
 | `clef_server/__init__.py` | `__version__`; calls `backend.prepare_environment()` once (torch-free, before any torch import) |
 | `clef_server/config.py` | `Config` dataclass from `CLEF_*` env vars, `VERSION`, `MODEL_REPO`/`MODEL_REVISION`, `parse_api_keys` |
 | `clef_server/paths.py` | state dir, log/pid files, classifiers dir, `resolve_model_path(cfg)` (never downloads) |
+| `clef_server/dotenv.py` | optional `.env` loading: `./.env` then `~/.config/clef/env` fill `os.environ` before `Config` is built (non-empty set variables win, empty counts as unset; only `CLEF_*` and `GEMINI_API_KEY` are taken, other names are ignored with a warning naming them; `CLEF_ENV_FILE` overrides, empty disables, and is read from the real environment once per process, so a file cannot redirect loading); called by `config.load()`, `cli.main` and `doctor`; the server logs the loaded file names (never values) at startup |
 | `clef_server/backend.py` | **the only place with device-specific code**: detection, dtype, sync, OOM, memory, telemetry, preflight, quantization config (bitsandbytes / torchao), device memory cap, pinned host copies (`HostCopier`) |
 | `clef_server/offload.py` | CPU offload: `plan_layers` (which decoder layers stay on the host) and `LayerStreamer` (async copy-in per forward); pure logic plus a `copier` supplied by `backend.py` |
 | `clef_server/engine.py` | background model load (`load_model`: standard, quantized or offloaded), single GPU worker thread, micro-batching, length bucketing, warmup |
@@ -26,7 +27,8 @@ tests. Change it first, then the code.
 | `clef_server/main.py` | FastAPI app factory `create_app(cfg, engine)`, core routes, middleware, error mapping, `FEATURES` (feature modules mounted on the context), `run(cfg)` |
 | `clef_server/compat.py`, `compat_openai.py`, `compat_hf.py`, `compat_schema.py`, `compat_errors.py` | OpenAI (`/v1/models`, `/v1/chat/completions`) and Hugging Face zero-shot (`/hf/models/{id}`) routes; JSON-schema -> questions translation; client-shaped errors |
 | `clef_server/evaluation.py` | metric math (`compute_metrics`), `POST /v1/evaluate` and `/v1/evaluate/metrics`, the `evaluate` job kind |
-| `clef_server/jobs.py`, `clef_server/webhooks.py` | async jobs (SQLite store, FIFO runner, `/v1/jobs*` routes, built-in kinds) and signed, SSRF-guarded webhook delivery |
+| `clef_server/jobs.py`, `clef_server/webhooks.py` | async jobs (database store, the priority / fair-share / off-hours scheduler, `/v1/jobs*` routes, built-in kinds) and signed, SSRF-guarded webhook delivery |
+| `clef_server/jobsort.py` | F2, opt-in: length sort inside a job window and tokenize-ahead for jobs (see Job throughput) |
 | `clef_server/cli.py` | the `clef` command (serve/stop/status/logs/doctor/download/bench/open/version); `download` is a pinned, resumable `snapshot_download` with a disk-space check |
 | `clef_server/doctor.py` | environment checks per backend, including a recommended memory setting; `main(argv) -> int` |
 | `clef_server/httpbench.py` | the async HTTP load test (`clef bench`; `bench/http_bench.py` is a shim) |
@@ -37,11 +39,12 @@ tests. Change it first, then the code.
 | `clef_server/dbschema.py` | the SQLAlchemy `MetaData` and every `Table` in this document (one place; migrations mirror it) |
 | `clef_server/migrations/` | Alembic `env.py`, `script.py.mako`, `versions/NNNN_*.py` |
 | `clef_server/models/` | `base.py` (`DecisionModel`, `LocalTensorAdapter`, `Capabilities`, `ModelSpec`, `UnknownModel`), `registry.py` (`clef.models` entry points, `CLEF_MODEL`), `clef_release.py` (clef-flash, clef 27B) |
-| `clef_server/keystore.py` (planned, v3.2) | principals, hashed keys, key cache, quotas (`Quotas`), on `db.py`; shared by the server and `clef keys` |
-| `clef_server/admin.py` (planned, v3.2) | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
+| `clef_server/keystore.py` | principals, hashed keys, key cache, quotas (`Quotas`), on `db.py`; shared by the server and `clef keys` |
+| `clef_server/admin.py` | feature module: `/v1/whoami`, `/v1/admin/keys*`, `/v1/admin/audit` |
+| `clef_server/schedule.py` | pure off-hours window maths for the job scheduler (`Window`, `parse_window`; DST rules); the `Scheduler` itself is in `jobs.py` |
 | `clef_server/cache.py` | in-memory LRU result cache used by `Engine.prepare` / `Engine.submit` |
-| `clef_server/router.py`, `clef_server/llm.py` (planned, v3.2) | feature module: routers, label-set versions, the Review queue (`/v1/routers*`, `/v1/review*`); the OpenAI-compatible LLM client |
-| `clef_server/batches.py` (planned, v3.2) | feature module: OpenAI `/v1/files*` and `/v1/batches*` on the `batch` job kind |
+| `clef_server/router.py`, `clef_server/review.py`, `clef_server/llm.py` | feature module: routers, label-set versions, the Review routes (`/v1/routers*`, `/v1/review*`); `review.py` is the store of the `review` and `llm_calls` tables; the OpenAI-compatible LLM client |
+| `clef_server/batches.py` | feature module: OpenAI `/v1/files*` and `/v1/batches*` on the `batch` job kind |
 
 Invariants (unchanged from v2):
 - ONE uvicorn worker per process (one model adapter, one model), ONE thread ever touches the GPU (the engine worker).
@@ -93,27 +96,28 @@ All settings come from env vars. The CLI flags of `clef serve` set the same env 
 | `CLEF_FAST_HEAD` | `0` | `1`: the batch-vectorised, sync-free joint head `fast_joint_head` (D2; same maths as the release head, opt-in until `bench/perf_check.sh` passes on the GPU) |
 | `CLEF_CACHE_SIZE` | `10000` | result-cache entries (in-memory LRU); `0` = off |
 | `CLEF_CACHE_MB` | `256` | result-cache byte budget (stored-JSON size estimate); `0` = off |
-| `CLEF_JOB_TZ` (planned, v3.2) | `UTC` | IANA zone for job windows that give no `tz` and for `CLEF_JOB_WINDOW` |
-| `CLEF_JOB_WINDOW` (planned, v3.2) | empty | default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |
-| `CLEF_JOB_ACTIVE` (planned, v3.2) | `4` | jobs that may be `running` (taking turns) at once; `>= 1` |
-| `CLEF_JOB_AGING_S` (planned, v3.2) | `3600` | a waiting job's class rises one level per this many seconds without a turn (never to `urgent`); `0` = no aging |
-| `CLEF_JOB_SORT_WINDOW` (planned, v3.2) | `0` | F2: length-sort jobs in windows of N items (256-1024); `0` = off. Default flips only if the benchmark gain is over 10% |
-| `GEMINI_API_KEY` (planned, v3.2) | unset | the router's LLM key. Unset (and no `CLEF_LLM_API_KEY`) = router LLM off. Never logged; `clef doctor` only says whether it is set |
-| `CLEF_LLM_API_KEY` (planned, v3.2) | unset | key for another OpenAI-compatible provider; wins over `GEMINI_API_KEY` |
-| `CLEF_LLM_BASE_URL` (planned, v3.2) | `https://generativelanguage.googleapis.com/v1beta/openai/` | OpenAI-compatible endpoint (ollama, LM Studio, vLLM, OpenAI work the same) |
-| `CLEF_LLM_MODEL` (planned, v3.2) | `gemini-3.8-flash` | model id sent to the endpoint |
-| `CLEF_LLM_TIMEOUT_S` (planned, v3.2) | `60` | total timeout of one LLM call (2 retries on 429 / 5xx) |
-| `CLEF_ROUTER_BATCH` (planned, v3.2) | `20` | buffered items per proposal call |
-| `CLEF_ROUTER_COLD_BATCH` (planned, v3.2) | `20` | buffered items before the cold-start (bootstrap) call |
-| `CLEF_ROUTER_FLUSH_S` (planned, v3.2) | `600` | flush a non-empty buffer after this long even if it is below the batch size |
-| `CLEF_ROUTER_MODE` (planned, v3.2) | `review` | default mode of new routers: `review` or `auto` |
-| `CLEF_ROUTER_MAX_NEW_PER_DAY` (planned, v3.2) | `10` | auto mode: labels a router may add per UTC day |
-| `CLEF_ROUTER_MAX_INPUT_CHARS` (planned, v3.2) | `500` | each buffered input is truncated to this before it is sent to the LLM |
-| `CLEF_REVIEW_TTL_DAYS` (planned, v3.2) | `30` | review items' input text is deleted this long after creation (and at once when resolved) |
-| `CLEF_MAX_FILE_MB` (planned, v3.2) | `200` | body limit for `POST /v1/files` only (everything else keeps `CLEF_MAX_BODY_MB`) |
-| `CLEF_MAX_BATCH_LINES` (planned, v3.2) | `50000` | lines per batch input file; the effective cap is `min(this, CLEF_MAX_JOB_ITEMS)` |
-| `CLEF_FILE_TTL_HOURS` (planned, v3.2) | `720` | uploaded files without `expires_after` are purged this long after upload |
-| v2 knobs | unchanged | `CLEF_MAX_TOKENS`, `CLEF_MAX_BODY_MB`, `CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES`, `CLEF_VIDEO_FPS`, `CLEF_MAX_BATCH`, `CLEF_MAX_QUESTIONS`, `CLEF_ALLOW_URL_FETCH`, `CLEF_URL_FETCH_MAX_MB`, `CLEF_MAX_MICROBATCH`, `CLEF_BATCH_WINDOW_MS`, `CLEF_BUCKETS`, `CLEF_PAD_MULTIPLE` (64, measured on ROCm only), `CLEF_PAD_TO_BUCKET`, `CLEF_WARMUP`, `CLEF_LOG_STATE`, `CLEF_LOG_BUFFER` |
+| `CLEF_JOB_TZ` | `UTC` | IANA zone for job windows that give no `tz` and for `CLEF_JOB_WINDOW` |
+| `CLEF_JOB_WINDOW` | empty | default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open |
+| `CLEF_JOB_ACTIVE` | `4` | jobs that may be `running` (taking turns) at once; `>= 1` |
+| `CLEF_JOB_AGING_S` | `3600` | a waiting job's class rises one level per this many seconds without a turn (never to `urgent`); `0` = no aging |
+| `CLEF_JOB_SORT_WINDOW` | `0` | F2: a job takes N items at a time (N >= 1; 256-1024 recommended), sorts the ones that need a forward by token length and sends them in micro-batches; results are persisted per window in input order. `0` = off. Default flips only if `bench/sort_check.sh` shows a gain over 10% on the GPU |
+| `CLEF_TOKENIZE_AHEAD` | `0` | F2: `1`: the next window (a micro-batch when the sort is off) is encoded on CPU threads (`ctx.prepare`) while the current one is on the GPU. Same flip rule as the sort |
+| `GEMINI_API_KEY` | unset | the router's LLM key. Unset (and no `CLEF_LLM_API_KEY`) = router LLM off. Never logged; `clef doctor` only says whether it is set |
+| `CLEF_LLM_API_KEY` | unset | key for another OpenAI-compatible provider; wins over `GEMINI_API_KEY` |
+| `CLEF_LLM_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | OpenAI-compatible endpoint (ollama, LM Studio, vLLM, OpenAI work the same) |
+| `CLEF_LLM_MODEL` | `gemini-3.8-flash` | model id sent to the endpoint |
+| `CLEF_LLM_TIMEOUT_S` | `60` | total timeout of one LLM call (2 retries on 429 / 5xx) |
+| `CLEF_ROUTER_BATCH` | `20` | buffered items per proposal call |
+| `CLEF_ROUTER_COLD_BATCH` | `20` | buffered items before the cold-start (bootstrap) call |
+| `CLEF_ROUTER_FLUSH_S` | `600` | flush a non-empty buffer after this long even if it is below the batch size |
+| `CLEF_ROUTER_MODE` | `review` | default mode of new routers: `review` or `auto` |
+| `CLEF_ROUTER_MAX_NEW_PER_DAY` | `10` | auto mode: labels a router may add per UTC day |
+| `CLEF_ROUTER_MAX_INPUT_CHARS` | `500` | each buffered input is truncated to this before it is sent to the LLM |
+| `CLEF_REVIEW_TTL_DAYS` | `30` | review items' input text is deleted this long after creation (and at once when resolved) |
+| `CLEF_MAX_FILE_MB` | `200` | body limit for `POST /v1/files` only (everything else keeps `CLEF_MAX_BODY_MB`) |
+| `CLEF_MAX_BATCH_LINES` | `50000` | lines per batch input file; the effective cap is `min(this, CLEF_MAX_JOB_ITEMS)` |
+| `CLEF_FILE_TTL_HOURS` | `720` | uploaded files without `expires_after` are purged this long after upload |
+| v2 knobs | unchanged | `CLEF_MAX_TOKENS`, `CLEF_MAX_BODY_MB`, `CLEF_MAX_IMAGES/VIDEOS/PIXELS/FRAMES`, `CLEF_VIDEO_FPS`, `CLEF_MAX_BATCH`, `CLEF_MAX_QUESTIONS`, `CLEF_ALLOW_URL_FETCH`, `CLEF_URL_FETCH_MAX_MB`, `CLEF_MAX_MICROBATCH`, `CLEF_BATCH_WINDOW_MS`, `CLEF_BUCKETS`, `CLEF_PAD_MULTIPLE` (64, measured on ROCm only), `CLEF_PAD_TO_BUCKET`, `CLEF_WARMUP`, `CLEF_TUNABLEOP_ONLINE` (0: live forwards never tune; idle background tuning), `CLEF_TUNABLEOP_IDLE_S` (2: quiet seconds before a tune step), `CLEF_LOG_STATE`, `CLEF_LOG_BUFFER` |
 
 `Config` validates enums (device, dtype, quant, quant backend, offload, log format), `CLEF_MAX_DEVICE_MEMORY_GB >= 0`, the threshold range, `CLEF_RATE_LIMIT >= 0`, `CLEF_INTERACTIVE_BURST >= 1` and `CLEF_DRAIN_S >= 0` in `__post_init__` (ValueError on a bad value) and exposes `api_keys() -> dict[name, key]`,
 `auth_required`, `is_loopback`, `public_limits()`.
@@ -333,9 +337,9 @@ appears in `openapi.json`.
 | `POST /v1/jobs`, `GET /v1/jobs`, `GET /v1/jobs/{id}`, `GET /v1/jobs/{id}/results`, `POST /v1/jobs/{id}/cancel`, `DELETE /v1/jobs/{id}` | async jobs | [Jobs](#async-jobs-and-webhooks-jobspy-webhookspy) |
 | `GET /v1/stats`, `/v1/stats/timeseries`, `/v1/log`, `/v1/events` | observability (console) | below |
 | `GET /v1/classifiers/{name}/versions[/{v}]` | classifier history | Storage |
-| `GET /v1/whoami`, `/v1/admin/keys*`, `GET /v1/admin/audit` (planned, v3.2) | principals, keys, quotas, audit | Keys and principals |
-| `/v1/routers*`, `/v1/review*` (planned, v3.2) | self-evolving router, human review queue | Review queue and router |
-| `/v1/files*`, `/v1/batches*` (planned, v3.2) | OpenAI Files + Batch API | OpenAI Files and Batches |
+| `GET /v1/whoami`, `/v1/admin/keys*`, `GET /v1/admin/audit` | principals, keys, quotas, audit | Keys and principals |
+| `/v1/routers*`, `/v1/review*` | self-evolving router, human review queue | Review queue and router |
+| `/v1/files*`, `/v1/batches*` | OpenAI Files + Batch API | OpenAI Files and Batches |
 
 ### Auth, rate limit, CORS (`security.py`)
 
@@ -504,8 +508,9 @@ Guide: [jobs.md](jobs.md).
   `DELETE /v1/jobs/{id}` (409 while queued or running).
 - Storage: the database (`ctx.db`: SQLite `<state_dir>/clef.db` or `CLEF_DATABASE_URL`; jobs, payloads, result rows,
   webhook deliveries; see Storage). Statuses: `queued`, `running`, `succeeded`, `failed`, `cancelled`,
-  `interrupted`. One runner, FIFO, one job at a time and ONE micro-batch in flight (`CLEF_MAX_MICROBATCH` records
-  through `ctx.decide`), so interactive requests interleave.
+  `interrupted`. Jobs are scheduled by class and fair share (see Job scheduler), at most `CLEF_JOB_ACTIVE` at a time, and
+  ONE micro-batch in flight across all of them (`CLEF_MAX_MICROBATCH` records through `ctx.decide`), so
+  interactive requests interleave.
   A job interrupted by a stop or crash resumes after its last stored row on the next start. Rows are appended in
   one transaction that reads `done` inside it, so an in-flight chunk is either stored whole or recomputed (no gap,
   no duplicate). A clean stop (lifespan shutdown) parks the running job as `interrupted` without counting it;
@@ -519,8 +524,9 @@ Guide: [jobs.md](jobs.md).
   SQLite transaction, so a crash cannot lose the event. A row the engine rejects
   becomes an `{"index", "error"}` row; the job fails only on systemic errors (engine down for
   `CLEF_JOB_ENGINE_WAIT_S`). Finished jobs are purged `CLEF_JOB_TTL_HOURS` after they finish.
-- Ownership: with auth on, a job belongs to the key name that submitted it and other keys get 404 (also in the
-  list); jobs created while auth was off (owner NULL) are visible to admins only once auth is on.
+- Ownership: with auth on, a job belongs to the key name that submitted it. Another non-admin principal gets 404
+  (not in its list either); a key without the `jobs` scope gets 403; admins see every job, owner-less ones (created
+  while auth was off) included.
 - Webhooks: events `job.succeeded`, `job.failed`, `job.cancelled` (default) and opt-in `job.progress` (at most one
   per 10 s, one attempt). Headers `X-Clef-Event`, `X-Clef-Delivery`, and with a secret `X-Clef-Timestamp` and
   `X-Clef-Signature: sha256=` HMAC-SHA256 of `"<timestamp>.<raw body>"`. 2xx = delivered; 408 / 425 / 429 / 5xx and
@@ -611,7 +617,7 @@ state transition), 413 too large, 429 rate limited (+ `Retry-After`), 503 not re
 message; traceback only in the server log). The OpenAI and Hugging Face routes use their clients' error shapes (see
 Compat).
 
-Planned (v3.2): **403** a valid key without the route's scope (`{"detail": "key 'ci-bot' lacks scope 'jobs'"}`;
+Also: **403** a valid key without the route's scope (`{"detail": "key 'ci-bot' lacks scope 'jobs'"}`;
 OpenAI shape `permission_denied`); **404** also for a `model` the server does not serve (`model_not_found` on the
 OpenAI routes); **429** also for an exhausted daily quota (`daily quota exceeded (N records/day)`, `Retry-After` =
 seconds to the next UTC midnight; OpenAI code `insufficient_quota`). `ERRORS` in `main.py` and
@@ -652,19 +658,20 @@ clef version
 ## Console (`static/`)
 
 Zero-build Preact + htm; one vendored charting library (`static/vendor/uPlot.*`, MIT) for time series, everything
-else hand-written SVG. No runtime CDN calls. Screens: Playground (SystemOne + Classify modes), History, Batch, Evaluate (labelled dataset -> `/v1/classify/batch`
+else hand-written SVG. No runtime CDN calls. Screens: Playground (SystemOne + Classify modes), History, Batch, Review (routers and the review queue; `classifiers` scope), Evaluate (labelled dataset -> `/v1/classify/batch`
 in chunks -> `/v1/evaluate/metrics`; confusion heatmap, reliability diagram, coverage curve, mistakes, export), Ops.
 It consumes `/health`, `/v1/stats`, `/v1/stats/timeseries`, `/v1/events?step_s=` (read with `fetch()` and the
 `X-API-Key` header, not `EventSource`, so the key never goes in the URL), `/v1/log`, `/v1/systemone`,
 `/v1/batch`, `/v1/classify`, `/v1/classify/batch`, `/v1/classifiers*`, `/v1/evaluate/metrics`.
 
-## Planned work (v3.2)
+## Build contract (v3.2)
 
-The sections below are the contract for the v3.2 build waves (C to F). Each heading carries `(planned, v3.2)`; the
-coordinator removes the marker when the work lands, and the "Supersedes" line says which text above it replaces
-then. Do not link to these headings by anchor (the slug changes when the marker goes).
+The sections below were the contract for the v3.2 build waves (C to F) and are now built: storage, models, keys,
+cache, review and router, the job scheduler, files and batches, job throughput. Not built: wave G (vLLM and graph
+capture) and what the sections explicitly mark as later. Where a section says "Supersedes", read it as already
+applied to the text above.
 
-Rules shared by every planned section:
+Rules shared by every section below:
 - One clef server per database (D3). No leases, no outbox, no cross-process cancel. `recover()` keeps turning
   every `running` job into `interrupted` at startup.
 - SQL below is the logical DDL. It is valid on SQLite and Postgres except for identity columns, written
@@ -761,6 +768,7 @@ Alembic layout (`src/clef_server/migrations/`, shipped in the wheel; no `alembic
 | --- | --- | --- |
 | `0001_baseline` | `jobs`, `items`, `jobs_status`, `jobs_idem` exactly as today | C1 |
 | `0002_v32` | `clef_meta`, `classifiers`, `classifier_versions`, `audit_log`, the new `jobs` columns, `api_principals`, `api_keys`, `api_usage`, `routers`, `router_label_sets`, `review`, `llm_calls`, `files`, `batches` | C1 |
+| `0003_job_hits` | `jobs.hits BIGINT NOT NULL DEFAULT 0`: the result-cache hits already handed back to the job's quota reservation (E1; review fix: the refund was in memory only) | E1 |
 
 - Legacy DB (a `jobs` table, no `alembic_version`): run today's `idem_key` ALTER if the column is missing,
   `stamp 0001`, then `upgrade heads`.
@@ -791,6 +799,7 @@ ALTER TABLE jobs ADD COLUMN eligible_at DOUBLE PRECISION;             -- E1: fir
 ALTER TABLE jobs ADD COLUMN quota_day TEXT;                           -- E1: UTC day the reservation was charged to
 ALTER TABLE jobs ADD COLUMN quota_reserved BIGINT NOT NULL DEFAULT 0; -- E1: records reserved at submit
 ALTER TABLE jobs ADD COLUMN tokens BIGINT NOT NULL DEFAULT 0;         -- E1: sum of input_tokens of the stored rows
+ALTER TABLE jobs ADD COLUMN hits BIGINT NOT NULL DEFAULT 0;           -- 0003: cache hits handed back to the quota
 
 CREATE TABLE classifiers (
     name           TEXT PRIMARY KEY,             -- NAME_RE
@@ -901,9 +910,9 @@ As built (C1; additions to the interface above, nothing in it changed):
 - `claim_next()` returns the running row plus `claimed_from` (`"queued"` | `"interrupted"`, the status before
   the claim); `run_base_done` is set to `done` by the claim and zeroed by `reset_items`. The runner seeds
   `cancel_ids` from the claimed row and never discards an id after a claim. `JobStore.close()` closes its
-  `Database` (tests); the server never calls it. When `claim_next` itself raises (possibly after its commit),
-  `_runner_failed(None)` calls `park_running()`: safe with one job at a time, but E1 (`CLEF_JOB_ACTIVE > 1`)
-  must replace it, since it would park jobs other tasks are still running.
+  `Database` (tests); the server never calls it. The scheduler claims with `claim(job_id)`; when that
+  raises (possibly after its commit) the runner parks only that id, never `park_running()`, which stays for the
+  clean stop after every job task has ended.
 - `ClassifierStore.put` / `delete` take keyword-only `actor`, `ip`, `request_id` for the audit row (`actor`
   defaults to `created_by`, then `"anonymous"`). The JSON import writes `classifier.put` rows with actor `import`.
 - `ClassifierStore.put` first takes `db.serialize(conn, "classifier:<name>")` (on Postgres a `SELECT ... FOR UPDATE`
@@ -1424,7 +1433,7 @@ Env: `CLEF_CACHE_SIZE` (Configuration). Tables: none. Routes: none (header only)
 Invariants: a cache entry is only ever written from a successful forward of the same process; media records never
 hit the cache; the key never contains secrets or the API key.
 
-## Review queue and router (planned, v3.2)
+## Review queue and router
 
 Scope (D7, D8, D15, D17, D19): a **router** is its own resource that grows the label set of one single-label saved
 classifier. It runs in review mode (default) or auto mode, only **adds** labels (grow-only; no merge, split, rename
@@ -1463,8 +1472,9 @@ class OpenAICompatClient:                   # POST {base_url}chat/completions, A
         #        JSON object in the text) before LLMError
 
 def client_from_config(cfg: Config) -> LLMClient | None
-    # None (router LLM off) unless CLEF_LLM_API_KEY or GEMINI_API_KEY is set in the process env (clef does not
-    # read .env files: the systemd EnvironmentFile / compose .env put it there). Every call is logged to llm_calls.
+    # None (router LLM off) unless CLEF_LLM_API_KEY or GEMINI_API_KEY is set: in the process env, or in an env
+    # file that dotenv.py loads before Config is built (./.env, ~/.config/clef/env; see the dotenv row of the
+    # module table). Every call is logged to llm_calls.
 ```
 
 Tables (created by C1 in `0002`):
@@ -1559,7 +1569,8 @@ Review mode: passing proposals become `review` rows `kind=proposal, state=open` 
 Auto mode: a passing proposal is activated at once, at most `CLEF_ROUTER_MAX_NEW_PER_DAY` labels per UTC day
 (beyond that it waits as a review row). Activation = new `router_label_sets` version → `ClassifierStore.put` →
 re-route the buffered items in the background; an item that still fails the gate gets `reroutes += 1`, and after 2
-it becomes `permanent_other` (out of future batches).
+it becomes `permanent_other` (out of future batches; its `input` is set to NULL in the same statement, D17, since
+nothing reads it again; `input_sha256` and the prediction stay).
 
 Cold start: a router with no seeds has no label set (clef needs >= 2 options). Every routed item is answered
 `other` with reason `cold` without a forward, and buffered. At `CLEF_ROUTER_COLD_BATCH` (20) items one bootstrap
@@ -1569,7 +1580,10 @@ or edit, at once). One seed is enough to start the normal loop (`[seed, other]`)
 Low-confidence items from saved classifiers: `ClassifierDef` gains `review_threshold: float | None` (0..1, default
 None = off). On interactive single-label runs (`POST /v1/classifiers/{name}[/batch]`, not jobs), a result with
 `confidence < review_threshold` creates a `review` row `kind=item, reason=low_confidence, router=NULL` with the
-input. Media inputs are never captured.
+input, in the classifier owner's queue. Only runs by the owner or an admin (auth off counts as admin) are captured:
+another key's run of the classifier is not captured at all, because storing it under the owner would hand that
+key's input text to the owner, and the caller cannot act on another owner's classifier review. A classifier with no
+owner (made while auth was off) is then captured only for admins. Media inputs are never captured.
 
 Routes (scopes from Keys; owner-scoped like jobs, admins see all; OpenAPI models for every body):
 
@@ -1601,7 +1615,37 @@ Invariants: input text is stored only in `review.input` and only until resolved 
 machine unless an LLM key is set; the router never edits a classifier except by appending a version; single-label
 only (D8).
 
-## Job scheduler (planned, v3.2)
+As built (E2; additions and deviations, nothing above changed in meaning):
+- Modules: besides `router.py` and `llm.py`, `review.py` holds `ReviewStore` (all SQL of `review` and `llm_calls`);
+  `router.py` holds `RouterStore` (`routers`, `router_label_sets`), `RouterService` and the routes. No migration:
+  everything was created in `0002`.
+- `LLMClient` also exposes `base_url` and `model`. The response schema has no `maxItems`: the number of new
+  labels (<= 3, <= 8 for the starter set, <= capacity), names, word limits and index bounds are enforced in code, and
+  a violating proposal is dropped, not the call. Absent values are `""` (strict-schema friendly), not null.
+  `client_from_config` is called once in `router(ctx)` and stored in `ctx.extra["llm_client"]`; tests replace it.
+  `ctx.extra["review_capture"]` is the hook the saved-classifier routes in `main.py` call.
+- `config` also holds `CLEF_ROUTER_MODE`. `PUT /v1/routers/{name}` takes `seeds` only on a new or cold router (400
+  otherwise: labels are only added). `max_labels` 2..63; capacity = `min(max_labels, CLEF_MAX_LABELS - 1)`.
+- Router response gains `classifier_version` and `llm: {"enabled", "host", "model", "calls_today",
+  "input_tokens_today", "output_tokens_today", "errors_today"}` (the console badge). `POST .../propose` runs the LLM
+  call and the re-check before it answers 202 `{"router", "items", "llm_call_id", "proposals", "queued",
+  "activated"}`; 502 when the LLM call failed (recorded in `llm_calls`), 400 at the label cap or with fewer than 2
+  buffered items. After a failed call the background loop skips that router for 5 minutes.
+- Review rows: items whose text is part of an open proposal are `open` (not `buffered`) until the proposal is
+  resolved. Proposals the re-check refuses are stored with `state="failed"` and the acceptance numbers. `reroutes`
+  counts every check an unplaced item has been through (a propose call that did not use it, a failed or rejected
+  proposal, a re-route after publishing); at 2 the item is `permanent_other`. Items the LLM lists in `covered_by` or
+  `unclear_indices` become `open` with `prediction.llm_hint`. Proposal `label` is a JSON list of the accepted names.
+- Background loop (every 15 s): flush due routers (batch full, or oldest item older than `CLEF_ROUTER_FLUSH_S` with
+  >= 2 items, >= 5 for a cold start) and purge once an hour. A full batch also starts a flush right after the route
+  call that completed it. The starter set of a cold router is exempt from `CLEF_ROUTER_MAX_NEW_PER_DAY`; its pruning
+  keeps the labels that >= 2 buffered items land on and needs half of the items covered.
+- Human approval of an edited subset is not re-checked (a person decided); descriptions are 1-40 words there.
+- Scopes: as in Keys. Routers and review rows are owner-scoped (other owners get 404; PUT on another's router 403).
+- `ClassifierDef.review_threshold` is stored only when set. `clef doctor` reports whether the LLM is on.
+- Not built: tuning of the default thresholds on `tickets_labelled.csv` (needs the model; defaults are the contract's).
+
+## Job scheduler
 
 Module boundary: all in `jobs.py` (`JobRunner` + a `Scheduler` class). Kinds keep their `validate` / `run`
 signatures; scheduling happens per chunk inside `decide_resilient`, which every built-in kind (and `evaluate`, the
@@ -1613,17 +1657,36 @@ Policy:
   job's effective class rises one level per `CLEF_JOB_AGING_S` without a turn, never to `urgent`.
 - Fair share inside a class: stride scheduling per **owner** (principal name; `NULL` = one owner). `pass +=
   cost / weight`, weight 1 for everyone in v3.2, cost = the chunk's records. The next turn goes to the lowest pass;
-  an owner that comes back sets `pass = max(own, current minimum)`. Within one owner: higher class first, then
+  an owner that comes back sets `pass = max(own, current minimum)`. "Comes back" = goes from no runnable job to
+  runnable: a new job, or a job leaving a pause (its window reopened, a slot came free); the minimum is over the
+  owners that were runnable already (`vtime` when there are none), and an un-paused job's aging clock restarts,
+  so a pause never banks turns. Within one owner: higher class first, then
   interrupted, then `seq`. State is in memory and rebuilt after a restart.
 - Turn gate: `await scheduler.turn(job)` before every engine call of a job; `scheduler.done(job, cost)` after.
-  **One job chunk in flight across all jobs** (as today): interactive work still goes first through the engine's
+  The gate wraps each engine call inside `decide_resilient` (so a bisected chunk takes one turn per call and no
+  turn is held while a job waits for an unavailable engine). **One job chunk in flight across all jobs** (as today): interactive work still goes first through the engine's
   lanes. A unit test asserts the background lane never holds more than one job chunk.
 - Active set: up to `CLEF_JOB_ACTIVE` jobs are claimed (`JobStore.claim(job_id)`, chosen in stride order) and run
   as their own asyncio tasks; all of them show `running` (D9). `runner.current` becomes a set; progress webhooks
-  are per job.
+  are per job. `claim(job_id)` returns the claimed row (plus `claimed_from`) or `None`; `claim_next` stays for
+  tools and tests but the runner no longer uses it. An `urgent` job does not wait for a free slot (it is
+  admitted at once, even above `CLEF_JOB_ACTIVE`), or the class would mean nothing while four normal jobs run.
+  Candidates are ordered like turn waiters (class after aging, owner pass, jobs the owner already runs,
+  interrupted, `seq`).
+- Fair slots: when no slot is free and a job of another owner waits for one (queued in its window, or running
+  and paused `active_limit`), an owner holding more than its share (`ceil(CLEF_JOB_ACTIVE / owners wanting
+  slots)`, at least 1; urgent jobs hold no counted slot) gives up its **youngest** job (highest `seq`; among
+  over-share owners, the one holding most). The victim finishes its chunk in flight, then stays `running` with
+  `waiting_reason: "active_limit"` (D9: like a job paused off-hours, it keeps its task, its progress and its
+  quota reservation; nothing is parked or re-claimed) and gets the next free slot. A job of a higher effective
+  class than the waiter never yields, an urgent job never yields, and a waiter whose owner already holds its
+  share takes nothing. A single owner with nobody waiting still uses every slot. A free slot goes first to the
+  waiting job whose owner holds the fewest. So `CLEF_JOB_ACTIVE` bounds the jobs taking turns, not the job tasks.
 - Windows: `schedule = {"window": "HH:MM-HH:MM", "tz": "<IANA>"}` per job (default `CLEF_JOB_WINDOW` in
   `CLEF_JOB_TZ`). `start > end` crosses midnight; `start == end` = 24 h. Aware datetimes via `zoneinfo`; on DST
-  days an edge inside the skipped hour starts at the next valid minute, the repeated hour uses `fold=0`. A job gets
+  days an edge inside the skipped hour starts at the next valid minute, the repeated hour uses `fold=0`; an instance
+  whose two edges fall in the same skipped hour is empty that day, and `next_start` skips it (it returns only a
+  moment `contains` accepts). A job gets
   turns only inside its window. A queued job outside it stays `queued`; a running job that leaves it stays
   `running` but gets no turns and frees its active slot. Both show `waiting_reason: "off_hours"` and
   `next_window_at`. Unknown tz or a bad window: 400 at submit.
@@ -1637,6 +1700,12 @@ Policy:
   returns another job, a DB error), the reservation is refunded in full before the error is returned. The whole
   job is charged to the submit day; on `cancelled` / `failed` / expiry, `total - done` is refunded to that day.
   Env principals and auth off: no reservation.
+  Cache hits are not charged (D23 #3): each chunk's hits (`Prepared.hits` from `ctx.prepare`) are handed back to
+  the reservation once the chunk's rows are stored, and `quota_reserved` drops by the same number in that
+  transaction, which also adds them to `jobs.hits` (migration `0003`). Credited hits are capped at what is still
+  reserved, and exactly the credited number goes back to the quota. The final refund of a cancelled / failed job
+  is `quota_reserved - done + hits`, read from the row, so it is exact after a restart too; a non-resumable job
+  that restarts from 0 resets `hits` with its rows.
 
 Python API (for E2-free kinds and F1, so they never edit `jobs.py`):
 ```python
@@ -1646,7 +1715,8 @@ class JobRunner:
                      schedule: dict | None = None, expire_after_s: float | None = None,
                      idem_key: str | None = None) -> dict
         # validation, snapshot, model check, quota reservation, create, poke; raises ValueError (400),
-        # PermissionError (403, urgent), QuotaExceeded (429), JobsFull (409). POST /v1/jobs uses it.
+        # PermissionError (403, urgent), QuotaExceeded (429), JobsFull (409), LookupError (404, unknown
+        # model). POST /v1/jobs uses it (through `submit_ex`, which also says whether the job was a replay).
     async def cancel(self, job_id: str) -> dict
     def get(self, job_id: str) -> dict | None
 class JobHandle:
@@ -1669,10 +1739,33 @@ Errors: 400 bad window / tz / priority; 403 `urgent` without the scope; 409 `CLE
 Invariants: one job chunk in flight; rows stay contiguous `0..done-1` (F2's length sort persists each window in
 input order); `recover()` unchanged; webhooks unchanged.
 
-Supersedes when landed: "One runner, FIFO, one job at a time and ONE micro-batch in flight" in Async jobs (the
-"one micro-batch in flight" part stays).
+### Job throughput: window sort and tokenize ahead (F2, `jobsort.py`)
 
-## OpenAI Files and Batches (planned, v3.2)
+Opt-in, both default off (`CLEF_JOB_SORT_WINDOW`, `CLEF_TOKENIZE_AHEAD`), benchmark-gated (`bench/sort_check.sh`).
+`run_chunked` and the evaluate kind build a `jobsort.windowed(ctx, n, build, decide_resilient)` once per run; it
+is `None` with both flags off, and then the original loop runs unchanged.
+- A step is one **window**: `CLEF_JOB_SORT_WINDOW` items (never fewer than `CLEF_MAX_MICROBATCH`), or one
+  micro-batch when only tokenizing ahead. The caller builds the window's requests and calls
+  `sorter.decide(job, start, reqs)`, which returns results in the same order as `reqs`.
+- `decide` encodes the whole window with `ctx.prepare` (CPU threads), orders the records that need a forward
+  (no cache hit, no in-window duplicate) by `(is_media, token length)`, stable, and queues them with
+  `ctx.decide_prepared(priority="background")` in micro-batches of `CLEF_MAX_MICROBATCH`: one micro-batch in
+  flight, as before; interactive work still goes first through the engine lanes. Hits and duplicates are put
+  back as `Engine.submit` would (`timing.cached`).
+- Persistence: the caller persists the **whole window in one `add_items`** in input order. Rows stay contiguous
+  `0..done-1`; a crash, clean stop or cancel inside a window leaves `done` at the window start (at most one
+  window is recomputed on resume; the resume point need not be window aligned). Progress and the circuit
+  breaker advance once per window.
+- Tokenize ahead: after window k is encoded, a task encodes window k+1 while k is on the GPU. One GPU worker
+  only. The prefetch looks the cache up before window k's results are stored, so a duplicate in the next window
+  is computed again (same row content, only cache statistics differ).
+- Errors: a failed prefetch or encode, or a micro-batch the engine rejects (`ValueError`, OOM, not ready), is
+  re-run through `decide_resilient` for just those records, so isolation, bisection and the engine wait behave as
+  without the flags. Cancel is checked between micro-batches.
+- Scheduler: each micro-batch takes a turn (`JobHandle.engine_prepared`, the gated hand-off) and the window's cache
+  hits are noted on the handle (not charged); the fallback goes through `decide_resilient`, also gated.
+
+## OpenAI Files and Batches
 
 Module boundary: `batches.py` is a feature module listed in `FEATURES` before `jobs` (it registers the `batch` job
 kind); it reaches the runner lazily through `ctx.extra["jobs"]` and only through the `JobRunner` / `JobHandle`
@@ -1738,8 +1831,8 @@ Batch: `{"id", "object": "batch", "endpoint", "errors", "input_file_id", "comple
 "failed_at", "expired_at", "cancelling_at", "cancelled_at", "request_counts": {"total", "completed", "failed"},
 "metadata", "model", "usage": {"input_tokens", "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 0,
 "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens"}}`. `request_counts.completed = done - failed`;
-`usage.input_tokens = jobs.tokens`; `model` = `spec.id`; `expires_at = eligible_at + 24h` (null before the window
-opens). The SDK's `extra_body={"clef": {...}}` lands as the top-level `clef` field.
+`usage.input_tokens = jobs.tokens`; `model` = `spec.id`; `expires_at = eligible_at + 24h`
+(always set: the scheduler sets `eligible_at` at submit, to the next time the window opens). The SDK's `extra_body={"clef": {...}}` lands as the top-level `clef` field.
 
 Mapping to jobs (one batch = one job of kind `batch`, visible in `GET /v1/jobs?kind=batch`; submitted through
 `JobRunner.submit(..., expire_after_s=86400)`; the `batch` kind spec itself sets `"completed_if_all_failed": True`):
@@ -1778,7 +1871,41 @@ Invariants: files are never in the DB; virtual files never exist on disk; deleti
 and output / error file rows; the batch path uses the same translation as the live routes, so probabilities match
 `/v1/chat/completions`.
 
-## Build ownership (planned, v3.2)
+As built (F1; clarifications and deviations from the text above, nothing else changed):
+- `prepare_chat(body, cfg, model)` takes the served model id the caller already resolved (`served_model`; its
+  `UnknownModel` is the route's 404, a `model_not_found` line in a batch). `render_chat(chat, result, request_id,
+  total_ms=None)` returns the non-streaming body; `chat_outcome` returns the parts the streaming route also needs.
+- `jobs.py` was touched in three places the contract did not list: `JobStore.add_items` sums the rows' `input_tokens`
+  into `jobs.tokens` (an explicit `tokens=` count wins); the circuit breaker ignores rows that carry a 4xx
+  `status_code` (a bad batch line is the client's mistake, still counted in `jobs.failed`); `_execute` honours
+  `completed_if_all_failed`. Each exists once, in `jobs.py`.
+- Defaults: `CLEF_MAX_FILE_MB` 200 (OpenAI's limit), `CLEF_MAX_BATCH_LINES` 50000, `CLEF_FILE_TTL_HOURS` 720.
+- A structurally failed batch still needs the `batches.job_id` foreign key, so it gets a terminal `failed` job row
+  (kind `batch`, `payload {}`, nothing reserved, never runnable) written in the same transaction as the batch.
+- `output_file_id` / `error_file_id` are `null` until usable: the batch ended, and the output file has a success /
+  the error file a failed or never-run line. A batch that failed validation has neither.
+- Clarification: an input file that an unfinished batch references cannot be deleted (409) and is skipped by the TTL
+  purge, because the error file re-reads the custom ids from it. After the batch ended the input file may go; the
+  error file then omits the lines that never ran.
+- Clarification: admins list, read and delete every file and batch, but `POST /v1/batches` only accepts an input
+  file the caller uploaded (404 otherwise). The `batch` job re-checks that the file's owner is the job's owner when
+  it runs, so `POST /v1/jobs {"kind": "batch"}` cannot read another key's file. The job's quota reservation is the
+  file row's `lines`, never the payload's.
+- A line nested too deeply for the JSON parser (`RecursionError`) is an `invalid_json_line` like any other bad
+  JSON (and an error row if it is met at run time), never a 500.
+- `POST /v1/jobs {"kind": "batch"}` gets the same structural scan at submit, through the kind's `snapshot` hook
+  (submit only, not on every run or resume): a structural problem is a 400 naming the first bad line. It scans only
+  a file owned by the submitter (`jobs.SUBMIT_OWNER`), so it never describes another key's file; `POST /v1/batches`
+  marks the file it scanned itself (a context variable), so a batch is not scanned twice.
+- The seam to the scheduler is `batches.submit_batch_job`, a call to `JobRunner.submit` with the caller's
+  principal, `clef.priority`, `clef.urgent`, `clef.schedule` and `expire_after_s = 86400`. It maps `ValueError` to 400
+  (a bad option), `PermissionError` to 403 (`urgent` without the scope), a model not served to 404, `JobsFull` to 409
+  and `QuotaExceeded` to 429. The scheduler reserves the quota once, at submit, from the input file's stored line
+  count, and sets `eligible_at` (the submit time, or the next time the window opens), so the batch's `expires_at`
+  is known from the start: `eligible_at + 24h`.
+- The audit actions are `batch.cancel` and `file.delete`, as listed in Storage.
+
+## Build ownership (v3.2)
 
 Files a workstream may create (C) or modify (M). Tests: new files per workstream (see the shared rules), plus the
 existing tests a contract change forces. Every workstream may append to `CHANGELOG.md` and its own docs page;
@@ -1793,8 +1920,8 @@ existing tests a contract change forces. Every workstream may append to `CHANGEL
 | D3 cache | `cache.py` | `engine.py` (`prepare` / `submit` cache calls, `cache_stats`), `stats.py` (`cache` block), `config.py` (`CLEF_CACHE_SIZE`) |
 | E1 scheduler | | `jobs.py`, `evaluation.py` (`job.decide`), `config.py` (`CLEF_JOB_*`), `pyproject.toml` (`tzdata`), `clef_client/*`, `clients/js/*` (job fields), `static/screens/batch.js` (job fields, optional), `docs/jobs.md` |
 | E2 router | `router.py`, `llm.py`, `static/screens/review.js` | `main.py` (`FEATURES` += `router`, low-confidence capture in the classifier-run routes), `classify.py` (`ClassifierDef.review_threshold`), `config.py` (`CLEF_LLM_*`, `CLEF_ROUTER_*`, `CLEF_REVIEW_TTL_DAYS`), `doctor.py` (LLM key check), `static/app.js` (tab), `clef_client/*`, `clients/js/*` (router helpers), new `docs/router.md` |
-| F1 batches | `batches.py` | `compat_openai.py` (`prepare_chat` / `render_chat`), `main.py` (`FEATURES` += `batches`, `GuardMiddleware` file limit), `config.py` (`CLEF_MAX_FILE_MB`, `CLEF_MAX_BATCH_LINES`, `CLEF_FILE_TTL_HOURS`), `pyproject.toml` (`python-multipart`), `docs/openai-compat.md` |
-| F2 throughput | | `jobs.py` (window sort in `run_chunked`, prefetch via `ctx.prepare`), `evaluation.py` (same for the evaluate kind), `engine.py` only if `Engine.prepare` / `submit` need a fix, `config.py` (`CLEF_JOB_SORT_WINDOW`) |
+| F1 batches | `batches.py` | `compat_openai.py` (`prepare_chat` / `render_chat`), `main.py` (`FEATURES` += `batches`, `GuardMiddleware` file limit), `config.py` (`CLEF_MAX_FILE_MB`, `CLEF_MAX_BATCH_LINES`, `CLEF_FILE_TTL_HOURS`), `pyproject.toml` (`python-multipart`), `jobs.py` (three small hooks, see "As built"), `docs/openai-compat.md` |
+| F2 throughput | `jobsort.py` | `jobs.py` (window sort in `run_chunked`, prefetch via `ctx.prepare`), `evaluation.py` (same for the evaluate kind), `engine.py` only if `Engine.prepare` / `submit` need a fix, `config.py` (`CLEF_JOB_SORT_WINDOW`, `CLEF_TOKENIZE_AHEAD`) |
 
 Same-wave shared files and how they split:
 
@@ -1821,9 +1948,9 @@ Same-wave shared files and how they split:
 | F | `main.py`, `compat_openai.py`, `pyproject.toml` | F1 only |
 | F | `config.py` | append-only (`# F1`, `# F2`) |
 | all | Alembic heads | no new revision expected after C1; if two appear in one wave, the coordinator adds `alembic merge` (startup runs `upgrade heads`) |
-| all | `docs/ARCHITECTURE.md` | each workstream edits only its own planned section; the coordinator removes markers and applies the "Supersedes" lines |
+| all | `docs/ARCHITECTURE.md` | each workstream edited only its own section; the coordinator removes markers and applies the "Supersedes" lines |
 
-## Contract decisions (planned, v3.2)
+## Contract decisions (v3.2)
 
 Confirmed by the user (2026-10-17):
 1. **Unknown model (C2):** 404 `model_not_found` on every route except the HF path id, which stays ignored. This

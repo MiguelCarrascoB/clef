@@ -6,6 +6,7 @@ The same job in four languages: triage a support ticket ("Checkout is down, orde
 
 | File | Needs |
 | --- | --- |
+| `quickstart.ipynb` | **start here**: a guided tour in Jupyter (classify, saved classifiers, jobs, OpenAI batch API, evaluation, router + Review, API keys, performance settings); `pip install -e . openai` |
 | `curl.sh` | bash, curl |
 | `classify.py` | `pip install -e .` (or `PYTHONPATH=src`) |
 | `classify.mjs` | Node 18+ |

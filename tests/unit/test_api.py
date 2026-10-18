@@ -61,6 +61,7 @@ class FakeEngine:
                 "vram_reserved_gb": 2.0,
             },
             "telemetry": {"available": True, "source": "nvml", "util_pct": 12.0},
+            "tunableop": {"tuned": 535, "pending": 3, "this_run": 2},
         }
 
     def sample(self) -> dict[str, Any]:
@@ -1229,6 +1230,7 @@ def test_stats_body_has_new_fields(api):
     s = client.get("/v1/stats").json()
     assert s["status"] == "ready" and s["gpu"]["memory_kind"] == "vram"
     assert s["telemetry"]["source"] == "nvml"
+    assert s["tunableop"] == {"tuned": 535, "pending": 3, "this_run": 2}  # background tuning progress
     h = client.get("/health").json()
     assert h["backend"] == "cuda" and h["telemetry"]["available"] is True and h["version"].startswith("3.")
 

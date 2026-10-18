@@ -42,6 +42,7 @@ import importlib.metadata
 import importlib.util
 import logging
 import os
+import signal
 import sys
 import threading
 import time
@@ -94,6 +95,20 @@ class GpuOutOfMemory(RuntimeError):
 
 def _dtype_name(dtype: Any) -> str:
     return str(dtype).replace("torch.", "")
+
+
+TUNE_RECHECK_S = 300.0  # TunableOp: how often an idle server looks for GEMMs live traffic ran untuned
+
+
+def _tunable() -> Any:
+    """torch.cuda.tunable when TunableOp is on for this process (CLEF_TUNABLEOP=1 sets the env), else None."""
+    if os.environ.get("PYTORCH_TUNABLEOP_ENABLED") != "1":
+        return None
+    tunable = getattr(torch.cuda, "tunable", None)
+    try:
+        return tunable if tunable is not None and tunable.is_enabled() else None
+    except Exception:
+        return None
 
 
 def bucket_for(length: int, buckets: tuple[int, ...] | list[int]) -> int:
@@ -483,6 +498,12 @@ class Engine:
         self.error: str | None = None
         self.load_seconds: float | None = None
         self.warmup_seconds: float | None = None
+        self.tuning: dict | None = None  # TunableOp background tuning: {phase, tuned, pending, this_run}
+        self._tuner: Any = None  # TunableOp background tuner process (clef_server.tuner)
+        self._tuner_paused = False
+        self._tuner_check_at = 0.0
+        self._tuned_mtime: float | None = None
+        self._pending_at = (0, 0)  # (GEMMs pending, tuned) when the tuner was last started
         # The served model: resolved now (torch-free), loaded on the worker. An unknown CLEF_MODEL is a load
         # error (status "error"), not a crash.
         self._spec_error: str | None = None
@@ -750,6 +771,7 @@ class Engine:
             "fast_path": fast_path,
             "versions": versions,
             "warnings": list(self._warnings),
+            "tunableop": dict(self.tuning) if self.tuning else None,  # background tuning progress
         }
 
     def _fast_path(self, b: Backend) -> dict[str, Any]:
@@ -837,6 +859,7 @@ class Engine:
         if not self._load():
             self._drain_fail()
             return
+        background = self._stop_tuning()  # TunableOp: tuned file loaded, live forwards never tune
         warm = self._warmup_steps() if self.cfg.warmup else iter(())
         if self.cfg.warmup:
             self.status = "warming"
@@ -844,14 +867,29 @@ class Engine:
         warm_done = not self.cfg.warmup
         if warm_done:
             self.status = "ready"
+        # TunableOp: discovery (the warmup grid with the current kernels) runs here while quiet; the tuning
+        # itself runs in a separate process (`_tuner_tick`), paused while requests arrive
+        discover = self._warmup_steps(grid=True) if background and self.cfg.warmup else None
+        if background:
+            self.tuning = {"phase": "discovering" if discover else "tuning", "tuned": None, "tuner": None}
+        quiet_s = max(0.0, float(getattr(self.cfg, "tunableop_idle_s", 2.0)))
+        last_work = time.monotonic()
         while not self._stop.is_set():
-            timeout = 0.0 if not warm_done else 0.5
+            if not warm_done:
+                timeout = 0.0
+            elif discover is not None:  # wait for a quiet moment: steady traffic never waits behind discovery
+                timeout = max(0.0, last_work + quiet_s - time.monotonic())
+            else:
+                timeout = 0.5
             batch = self._collect(timeout)
             if batch is None:  # sentinel
                 break
             if batch:
+                self._pause_tuner()  # the GPU goes to the request
                 self._process(batch)
+                last_work = time.monotonic()
                 continue
+            quiet = time.monotonic() - last_work >= quiet_s
             if not warm_done:  # idle: advance warmup one step
                 try:
                     next(warm)
@@ -861,6 +899,15 @@ class Engine:
                     self.status = "ready"
                     log.info("warmup done in %.1fs", self.warmup_seconds)
                     # a final empty-queue check happens on the next loop turn
+            elif discover is not None:
+                if quiet:
+                    try:
+                        next(discover)
+                    except StopIteration:
+                        discover = None
+            elif background:
+                self._tuner_tick(quiet)
+        self._stop_tuner()
         self._drain_fail()
 
     def _make_model(self) -> DecisionModel:
@@ -1087,15 +1134,150 @@ class Engine:
         ms = (time.perf_counter() - t0) * 1000
         return logits, ms, sum(e.length for e in encs), padded_len * len(encs)
 
+    # ------------------------------------------------------------------ TunableOp
+    def _stop_tuning(self) -> bool:
+        """Before the first forward: TunableOp keeps its tuned GEMMs, but a live forward never tunes.
+        An untuned shape runs the default kernel instead of stalling its request while every GEMM of the
+        forward is benchmarked (7900 XTX, online tuning: p50 2.7 s, p95 39 s per request). It is recorded to
+        PYTORCH_TUNABLEOP_UNTUNED_FILENAME for the background tuner process (or `clef tune`). True: run it."""
+        tunable = _tunable()
+        if tunable is None or getattr(self.cfg, "tunableop_online", False):
+            return False
+        try:
+            # torch loads the results file when its results manager is first used, and only while tuning is
+            # on: stopping first (no warmup) would leave every tuned kernel unloaded (measured on 2.11: 0 of
+            # 1181 results, default kernels). get_results() is that first use.
+            tunable.get_results()
+            tunable.tuning_enable(False)
+            tunable.record_untuned_enable(True)
+        except Exception:
+            log.exception("TunableOp: could not stop live tuning")
+            return False
+        self._tuning_stopped = True
+        log.info(
+            "TunableOp: live forwards use tuned or default kernels; untuned GEMMs are recorded to %s and "
+            "tuned in the background while idle",
+            os.environ.get("PYTORCH_TUNABLEOP_UNTUNED_FILENAME", "tunableop_untuned.csv"),
+        )
+        return True
+
+    def _tuner_paths(self) -> tuple[Path, Path, Path] | None:
+        """(untuned base, results file, skip file) of this model's tuned directory, or None."""
+        untuned = os.environ.get("PYTORCH_TUNABLEOP_UNTUNED_FILENAME")
+        results = os.environ.get("PYTORCH_TUNABLEOP_FILENAME")
+        if not untuned or not results:
+            return None
+        ordinal = torch.cuda.current_device() if torch.cuda.is_available() else 0
+        results_path = Path(results.replace("%d", str(ordinal)))
+        return Path(untuned), results_path, results_path.with_name("tunableop_skip.csv")
+
+    def _tuner_tick(self, quiet: bool) -> None:
+        """Worker thread, idle turns only: reload the results file when the tuner wrote to it, resume a
+        paused tuner once it is quiet, start one when recorded GEMMs wait (checked every TUNE_RECHECK_S)."""
+        tunable = _tunable()
+        paths = self._tuner_paths()
+        if tunable is None or paths is None:
+            return
+        base, results, skip = paths
+        now = time.monotonic()
+        with contextlib.suppress(OSError):
+            mtime = results.stat().st_mtime
+            if mtime != self._tuned_mtime:
+                self._tuned_mtime = mtime
+                tunable.read_file(str(results))  # each tuned GEMM speeds up the next forward
+        if self._tuner is not None and self._tuner.poll() is not None:  # finished: look again at once
+            self._tuner, self._tuner_check_at = None, now
+        if self._tuner is not None:
+            if quiet and self._tuner_paused:
+                self._signal_tuner(signal.SIGCONT)
+        elif quiet and now >= self._tuner_check_at:
+            self._tuner_check_at = now + TUNE_RECHECK_S
+            from . import tuner as tuner_mod
+
+            tuned = {(r[0], r[1]) for r in tunable.get_results()}
+            todo = tuner_mod.pending(base, skip, tuned)
+            if todo:
+                self._start_tuner(base, results, skip)
+            self._pending_at = (len(todo), len(tuned))  # pending counts down from here as results land
+        if self.tuning is not None:
+            running = self._tuner is not None
+            tuned_n = len(tunable.get_results())
+            todo_n, tuned_then = self._pending_at
+            self.tuning.update(
+                phase="tuning" if running else "done",
+                tuned=tuned_n,
+                pending=max(0, todo_n - (tuned_n - tuned_then)) if running else todo_n,
+                tuner=("paused" if self._tuner_paused else "running") if running else None,
+            )
+
+    def _start_tuner(self, base: Path, results: Path, skip: Path) -> None:
+        import subprocess
+
+        log_path = results.with_name("tuner.log")
+        try:
+            with open(log_path, "a") as out:  # the child keeps its own copy of the descriptor
+                self._tuner = subprocess.Popen(
+                    [sys.executable, "-m", "clef_server.tuner", str(base), str(results), str(skip)],
+                    stdout=out, stderr=subprocess.STDOUT, env=dict(os.environ),
+                    preexec_fn=(lambda: os.nice(10)) if hasattr(os, "nice") else None,
+                )  # fmt: skip
+        except OSError:
+            log.exception("TunableOp: could not start the background tuner")
+            self._tuner = None
+            return
+        self._tuner_paused = False
+        log.info("TunableOp: background tuner started (pid %d, log %s)", self._tuner.pid, log_path)
+
+    def _signal_tuner(self, sig: int) -> None:
+        proc = self._tuner
+        if proc is None or proc.poll() is not None:
+            return
+        with contextlib.suppress(OSError):
+            os.kill(proc.pid, sig)
+            self._tuner_paused = sig == signal.SIGSTOP
+
+    def _pause_tuner(self) -> None:
+        """A request arrived: stop the tuner at once so the GPU is the request's (it resumes once quiet)."""
+        if self._tuner is not None and not self._tuner_paused:
+            self._signal_tuner(signal.SIGSTOP)
+
+    def _stop_tuner(self) -> None:
+        proc = self._tuner
+        if proc is None:
+            return
+        self._signal_tuner(signal.SIGCONT)
+        with contextlib.suppress(Exception):
+            proc.terminate()
+            proc.wait(timeout=10)
+        with contextlib.suppress(Exception):
+            if proc.poll() is None:
+                proc.kill()
+        self._tuner = None
+
     # ------------------------------------------------------------------ warmup
     def _warm_encode(self, repeats: int) -> Any:
         model = self.model
         return model.encode(model.warm_record(repeats))
 
-    def _warmup_steps(self):
-        """Generator: each next() runs one warmup forward (so queued requests can interleave)."""
+    def _warmup_targets(self, grid: bool = False) -> tuple[list[int], list[int], bool]:
+        """(lengths, batch sizes, full grid?) of a warmup pass. Normally each bucket <= 1024 at batch 1 and at
+        max_microbatch. The grid (TunableOp's background discovery) is every text-batch shape the server
+        produces up to 1024 tokens: each padded length (pad_multiple steps, or the buckets with
+        pad_to_bucket) at every batch size, because TunableOp keys on the exact GEMM shape."""
+        top = max(1, self.cfg.max_microbatch)
         buckets = [b for b in sorted(self.cfg.buckets) if b <= 1024]
-        sizes = sorted({1, max(1, self.cfg.max_microbatch)})
+        if not grid or not buckets:
+            return buckets, sorted({1, top}), False
+        multiple = int(getattr(self.cfg, "pad_multiple", 1))
+        if getattr(self.cfg, "pad_to_bucket", False) or multiple < 32:  # < 32: too many shapes to tune
+            lengths = buckets
+        else:
+            lengths = list(range(multiple, buckets[-1] + 1, multiple))
+        return lengths, list(range(1, top + 1)), True
+
+    def _warmup_steps(self, grid: bool = False):
+        """Generator: each next() runs one warmup forward (so queued requests can interleave)."""
+        buckets, sizes, grid = self._warmup_targets(grid)
         try:
             base = self._warm_encode(0).length
             per = max(1, self._warm_encode(1).length - base)
@@ -1117,7 +1299,8 @@ class Engine:
             except Exception:
                 log.exception("warmup encode failed for bucket %d", b)
                 continue
-            real = bucket_for(enc.length, self.cfg.buckets)
+            # the grid dedupes on the padded length the forward really runs; otherwise on the bucket
+            real = self.padded_length(enc.length) if grid else bucket_for(enc.length, self.cfg.buckets)
             if real in seen:
                 continue
             seen.add(real)

@@ -37,9 +37,9 @@ def open_store(cfg: Config) -> JobStore:
 
 
 def hold_runner(monkeypatch: pytest.MonkeyPatch, store: JobStore) -> list[bool]:
-    """Keep the runner's atomic claim_next off jobs a test sets up by hand; `.clear()` releases it."""
-    hold, real = [True], store.claim_next
-    monkeypatch.setattr(store, "claim_next", lambda: None if hold else real())
+    """Keep the runner from admitting jobs a test sets up by hand; `.clear()` releases it."""
+    hold, real = [True], store.runnable
+    monkeypatch.setattr(store, "runnable", lambda: [] if hold else real())
     return hold
 
 
@@ -243,9 +243,9 @@ def test_max_jobs_409_and_list_filter():
         assert client.get("/v1/jobs", params={"status": "succeeded"}).json()["total"] >= 2
 
 
-def test_fifo_one_at_a_time():
+def test_fifo_one_at_a_time_with_a_single_slot():
     eng = SlowEngine(delay=0.05)
-    client, _, _ = make(eng)
+    client, _, _ = make(eng, job_active=1)  # the default (4) lets jobs advance in turns: test_scheduler.py
     with client:
         a = submit(client, payload={"inputs": list("abcdefgh") * 3, "labels": LABELS}).json()["id"]
         b = submit(client).json()["id"]
@@ -309,7 +309,7 @@ def test_cancel_running_job_between_chunks():
 
 def test_cancel_queued_job_and_delete_rules():
     eng = SlowEngine(delay=0.1)
-    client, _, _ = make(eng)
+    client, _, _ = make(eng, job_active=1)
     with client:
         a = submit(client, payload={"inputs": [f"t{i}" for i in range(40)], "labels": LABELS}).json()["id"]
         b = submit(client).json()["id"]
@@ -735,17 +735,17 @@ def test_cancel_arriving_right_after_the_claim_is_not_lost(monkeypatch):
     eng = SlowEngine(delay=0.05)
     client, _, app = make(eng)
     runner = app.state.ctx.extra["jobs"]
-    real = runner.store.claim_next
+    real = runner.store.claim
 
-    def claim_next() -> dict | None:
-        row = real()
+    def claim(job_id: str) -> dict | None:
+        row = real(job_id)
         if row is not None:
             # exactly what request_cancel does for a running job, landing right after the claim
             runner.cancel_ids.add(row["id"])
             runner.store.flag_cancel(row["id"])
         return row
 
-    monkeypatch.setattr(runner.store, "claim_next", claim_next)
+    monkeypatch.setattr(runner.store, "claim", claim)
     with client:
         payload = {"inputs": [f"t{i}" for i in range(40)], "labels": LABELS}
         job = wait(client, submit(client, payload=payload).json()["id"])
@@ -1085,16 +1085,16 @@ def test_runner_error_is_not_counted_as_a_crash(monkeypatch):
     monkeypatch.setattr("clef_server.jobs.RUNNER_RETRY_PAUSE_S", 0.01)
     client, _, app = make()
     runner = app.state.ctx.extra["jobs"]
-    real = runner.store.claim_next
+    real = runner.store.claim
     boom = [True]
 
-    def claim_next() -> dict | None:
-        row = real()
+    def claim(job_id: str) -> dict | None:
+        row = real(job_id)
         if row is not None and (boom.pop() if boom else False):
             raise RuntimeError("transient")  # the runner fails with the job left 'running'
         return row
 
-    monkeypatch.setattr(runner.store, "claim_next", claim_next)
+    monkeypatch.setattr(runner.store, "claim", claim)
     with client:
         job = wait(client, submit(client).json()["id"])
         assert job["status"] == "succeeded" and job["resumes"] == 0, job
@@ -1145,3 +1145,12 @@ def test_cancel_is_not_lost_when_park_wins_the_race(monkeypatch):
         got = client.get(f"/v1/jobs/{jid}").json()
         assert got["status"] == "cancelled" and got["resumes"] == 0
         assert sum(eng.sizes) == 0  # never run
+
+
+def test_public_job_reports_the_job_it_waits_behind():
+    store = open_store(Config(state_dir=tempfile.mkdtemp(prefix="clef-jobs-")))
+    row = store.create("classify", "alice", {"inputs": ["x"]}, None, None, 1)
+    view = public_job(row, waiting=("behind", None, "job_older"))
+    assert view["waiting_reason"] == "behind" and view["waiting_behind"] == "job_older"
+    assert public_job(row)["waiting_reason"] is None and public_job(row)["waiting_behind"] is None
+    store.close()

@@ -107,6 +107,7 @@ nav:
       - OpenAI & Hugging Face compatibility: openai-compat.md
       - Evaluation: evaluation.md
       - Jobs & webhooks: jobs.md
+      - Router & Review: router.md
       - Smaller GPUs: memory.md
       - Remote access: remote-access.md
       - Console: console.md

@@ -168,6 +168,37 @@ class ClefClient:
     def delete_classifier(self, name: str) -> dict[str, Any]:
         return self._request("DELETE", f"/v1/classifiers/{quote(name, safe='')}")
 
+    # -- routers and the review queue (docs/router.md) --
+    def put_router(self, name: str, **settings: Any) -> dict[str, Any]:
+        """Create or change a router (seeds, instructions, domain_hint, mode, max_labels, gate)."""
+        return self._request("PUT", f"/v1/routers/{quote(name, safe='')}", json=settings)
+
+    def get_router(self, name: str) -> dict[str, Any]:
+        return self._request("GET", f"/v1/routers/{quote(name, safe='')}")
+
+    def list_routers(self) -> list[dict[str, Any]]:
+        return (self._request("GET", "/v1/routers")).get("routers", [])
+
+    def delete_router(self, name: str) -> dict[str, Any]:
+        return self._request("DELETE", f"/v1/routers/{quote(name, safe='')}")
+
+    def route(self, router: str, input: Any) -> dict[str, Any]:
+        """Route one input; the result has ``reason`` and ``review_id`` besides the classify fields."""
+        return self._request("POST", f"/v1/routers/{quote(router, safe='')}/route", json={"input": input})
+
+    def propose(self, router: str) -> dict[str, Any]:
+        return self._request("POST", f"/v1/routers/{quote(router, safe='')}/propose")
+
+    def list_review(self, **filters: Any) -> dict[str, Any]:
+        """``kind``, ``state``, ``router``, ``classifier``, ``limit``, ``offset``."""
+        return self._request("GET", "/v1/review", params={k: v for k, v in filters.items() if v is not None})
+
+    def resolve_review(self, review_id: str, action: str, **body: Any) -> dict[str, Any]:
+        """action: label (label=), discard, approve (labels=[{name, description}] optional), reject."""
+        return self._request(
+            "POST", f"/v1/review/{quote(review_id, safe='')}/resolve", json={"action": action, **body}
+        )
+
     # -- async jobs (large batches; see docs/jobs.md) --
     def submit_job(
         self,
@@ -177,13 +208,20 @@ class ClefClient:
         webhook: str | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        priority: str | None = None,
+        urgent: bool = False,
+        schedule: dict[str, Any] | None = None,
+        expire_after_s: float | None = None,
     ) -> Job:
         """Queue a job and return at once. ``webhook``: a URL, or ``{"url", "secret", "events"}``.
+
+        ``priority`` ("low" | "normal" | "high"), ``urgent`` (needs the ``urgent`` scope), ``schedule``
+        (``{"window": "20:00-06:00", "tz": "Europe/Madrid"}``) and ``expire_after_s``: see docs/jobs.md.
 
         ``idempotency_key``: submitting again with the same key (same API key) returns the job created the
         first time instead of a duplicate, so a lost response can be retried safely.
         """
-        body = c.job_body(kind, payload, webhook, metadata)
+        body = c.job_body(kind, payload, webhook, metadata, priority, urgent, schedule, expire_after_s)
         return parse_job(
             self._request("POST", "/v1/jobs", json=body, headers=c.idem_headers(idempotency_key))
         )

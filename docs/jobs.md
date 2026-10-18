@@ -8,7 +8,7 @@ page or stream the results when it is done.
 ```mermaid
 stateDiagram-v2
     [*] --> queued: POST /v1/jobs (202)
-    queued --> running: runner picks it up (FIFO)
+    queued --> running: the scheduler admits it (class, fair share, window)
     running --> succeeded: all items processed
     running --> failed: systemic error, every item failed, or the circuit breaker tripped
     running --> cancelled: POST .../cancel (between chunks)
@@ -22,9 +22,9 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-Interactive requests (`/v1/classify`, `/v1/systemone`, ...) stay responsive while a job runs: the runner
-processes one job at a time and keeps **one chunk** (`CLEF_MAX_MICROBATCH` records, 8 by default) in flight
-at the engine, and the engine queue has a **priority lane**: job chunks go in the background lane, requests in
+Interactive requests (`/v1/classify`, `/v1/systemone`, ...) stay responsive while jobs run: up to
+`CLEF_JOB_ACTIVE` jobs advance in turns, but only **one chunk** (`CLEF_MAX_MICROBATCH` records, 8 by default)
+across all of them is in flight at the engine, and the engine queue has a **priority lane**: job chunks go in the background lane, requests in
 the interactive one, and the next micro-batch is interactive when any request is waiting (up to
 `CLEF_INTERACTIVE_BURST` interactive micro-batches in a row, then one background group). A request
 arriving mid-job therefore waits only for the job micro-batch already being computed (it is never preempted):
@@ -58,6 +58,8 @@ All under `/v1`, same API key rules as the rest. Errors are `{detail, request_id
 ```
 
 `webhook` and `metadata` are optional (`metadata` is any JSON up to 16 KB, echoed back on every read).
+Scheduling fields, all optional, are described in [Scheduling](#scheduling): `priority`, `urgent`, `schedule`,
+`expire_after_s`.
 
 **Idempotency.** Send an `Idempotency-Key` header (1-128 printable ASCII characters) and a resubmission with the
 same key by the same API key returns the job created the first time (`202`, plus `Idempotent-Replay: true`)
@@ -77,6 +79,7 @@ Built-in kinds:
 | `score` | `inputs`, either `levels` or `classifier` (a saved score classifier), optional `instructions`, `model` | `{index, score, level, level_index, confidence, distribution, input_tokens}` |
 | `systemone` | `requests`: a list of `/v1/systemone` bodies (media allowed, same per-request limits) | `{index, model, answers, input_tokens}` |
 | `evaluate` | the same body as `POST /v1/evaluate` (up to `CLEF_MAX_JOB_EVAL_ROWS` rows), see [evaluation](evaluation.md#as-a-job) | `{index, input, gold, predicted, confidence, correct, scores}`; the job `result` is the metrics object |
+| `batch` | internal: created by `POST /v1/batches` ([OpenAI Batch API](openai-compat.md#files-and-batches-the-openai-batch-api)); `input_file_id`, `endpoint`. A run where every line failed still ends `succeeded` | `{index, custom_id, status_code, request_id, body \| error, input_tokens}` |
 
 Other kinds can be registered by feature modules (`evaluate` is one); `POST` with an unknown
 kind answers `400` and lists the available ones. A saved `classifier` is **copied into the job at submit**: the
@@ -111,6 +114,8 @@ the model is still loading a job waits and retries; it does not fail. Every fail
   "result": null,
   "warnings": ["3 of 12000 item(s) failed; their result rows carry an 'error' field"],
   "metadata": {"batch": "2026-10-03"},
+  "priority": "normal", "urgent": false, "schedule": null, "waiting_reason": "turn", "waiting_behind": null, "next_window_at": null,
+  "expired": false, "model": "clef-flash@abc1234", "tokens": 381204,
   "webhook": {"url": "https://hooks.example.com/clef", "events": ["job.succeeded"], "has_secret": true,
               "failed_deliveries": 0,
               "deliveries": {"job.succeeded": {"id": "...", "status": "pending", "attempts": 0}}}
@@ -277,6 +282,57 @@ CLEF_WEBHOOK_ALLOW='hooks.example.com,*.corp.example.net,192.168.1.0/24'
 * Secrets are stored in the database (`clef.db` in the state directory, or your `CLEF_DATABASE_URL`) in clear
   text, because HMAC needs them; protect it like the API keys file. The secret is write-only through the API.
 
+## Scheduling
+
+Several jobs can be `running` at once (up to `CLEF_JOB_ACTIVE`, default 4); they take turns at the engine, one
+chunk at a time, so a long job from one key no longer blocks everyone else's. Every job in turns shows
+`running` in `GET /v1/jobs`; `waiting_reason` says why one is not advancing right now: `turn` (waiting for its
+chunk), `behind` (an older job of the same key goes first; `waiting_behind` is its id), `active_limit` (no free slot, or it gave its slot to another key's job: see Fair slots), `off_hours`
+(outside its window; `next_window_at` says when it opens).
+
+**Priority.** `"priority": "low" | "normal" (default) | "high"`. Classes are strict: while a `high` job has work,
+`normal` and `low` wait. A job that has not had a turn for `CLEF_JOB_AGING_S` (default 3600 s) moves up one class
+(never to `urgent`), so nothing starves. `GET /v1/jobs?priority=high` filters.
+
+**Fair share.** Inside a class, turns are shared per key name (the job owner), weighted by records: two keys with
+one huge job each advance at the same speed, and a key with ten jobs does not get ten times the turns. Inside one
+key the oldest job goes first and the key's newer jobs wait (`waiting_reason: "behind"`) until it finishes: the
+first results arrive sooner than if the jobs shared the turns, and the last ones no later. Send `"priority":
+"high"` to let a newer job go first. A key
+that comes back after being idle, or whose jobs were paused (off-hours, or waiting for a slot), starts level with
+the others; it does not collect the turns it missed.
+
+**Fair slots.** When every slot is taken and another key's job waits for one, a key holding more than its share
+(`CLEF_JOB_ACTIVE` divided by the keys that want a slot, rounded up) gives up its newest job after that job's current
+chunk. The job stays `running` with `waiting_reason: "active_limit"`, keeps its progress and continues when a slot is
+free again. A key alone in the queue still uses every slot; a `high` job never yields to a `normal` one, and urgent
+jobs are not counted.
+
+**Off-hours window.** `"schedule": {"window": "20:00-06:00", "tz": "Europe/Madrid"}` restricts a job to a window
+(`start > end` crosses midnight, `start == end` is 24 h; `tz` defaults to `CLEF_JOB_TZ`). Without `schedule`, a
+job uses `CLEF_JOB_WINDOW` when it is set. Outside the window a queued job stays `queued`; a job that is running
+when the window closes finishes its current chunk, then stays `running` (`waiting_reason: "off_hours"`) without
+taking turns or holding a slot, and continues when the window opens again. On a daylight-saving change, an edge
+inside the skipped hour starts at the next valid minute and an edge in the repeated hour uses the first
+occurrence; a window that lies entirely inside the skipped hour (say `02:15-02:45`) does not open that day. A bad window or time zone is `400`.
+
+**Urgent.** `"urgent": true` needs the `urgent` scope (`403` otherwise). The job takes the top class, ignores its
+window and does not wait for a free slot.
+
+**Expiry.** `"expire_after_s": 7200` cancels the job (`status: "cancelled"`, `error: "expired"`, `expired: true`)
+that long after it first could run: from submit, or, for a windowed job submitted outside its window, from the
+moment the window first opens. It stops between chunks; the rows already computed are kept.
+
+**Daily quota.** For a key with a daily quota, the whole job (its record count) is reserved at submit, against
+the UTC day of the submit, even if it runs on later days: `429 daily quota exceeded` when it does not fit,
+nothing is queued. When a job ends `cancelled` or `failed` (expiry included), the records it did not process are
+handed back to that day. Records answered from the result cache are not charged. A replay of an
+`Idempotency-Key` is free.
+
+Everything above is kept in the database, so queued jobs, priorities, windows and reservations survive a
+restart; the fair-share counters restart from zero. A job that was paused off-hours when the server stopped
+resumes as `interrupted` and waits for its window like a queued one.
+
 ## Limits, ownership, retention
 
 | Setting | Default | Meaning |
@@ -290,6 +346,10 @@ CLEF_WEBHOOK_ALLOW='hooks.example.com,*.corp.example.net,192.168.1.0/24'
 | `CLEF_WEBHOOK_ATTEMPTS` | 10 | Delivery attempts for final events. |
 | `CLEF_WEBHOOK_BACKOFF_S` | 2 | First retry delay; doubles each attempt. |
 | `CLEF_WEBHOOK_BACKOFF_CAP_S` | 120 | Longest delay between two attempts. |
+| `CLEF_JOB_ACTIVE` | 4 | Jobs that take turns at once (`>= 1`). `1` runs them strictly one after another. |
+| `CLEF_JOB_AGING_S` | 3600 | A waiting job rises one priority class per this many seconds without a turn; `0` = no aging. |
+| `CLEF_JOB_TZ` | `UTC` | Time zone of job windows that give no `tz`, and of `CLEF_JOB_WINDOW`. |
+| `CLEF_JOB_WINDOW` | empty | Default window `HH:MM-HH:MM` for jobs without `schedule`; empty = always open. |
 | `CLEF_JOB_MAX_RESUMES` | 3 | A job that crashed the server (found `running` at startup) more often than this fails (`interrupted N times, giving up`); clean restarts do not count; `0` = no limit. |
 
 The request body limit (`CLEF_MAX_BODY_MB`, default 64) applies to `POST /v1/jobs`: roughly 100 000 short
@@ -297,10 +357,11 @@ texts fit, 50 000 long ones may not. Media in `systemone` jobs counts too. Per-r
 tokens) are the same as for the synchronous endpoints.
 
 **Ownership.** With auth off, every caller sees every job. With `CLEF_API_KEY` / `CLEF_API_KEYS` on, a job is
-owned by the key name that submitted it (`default` for `CLEF_API_KEY`); other keys get `404` for it (not `403`)
-and do not see it in `GET /v1/jobs`. There is no admin view: read the database (see [Storage](#storage)) if you
-need one. Jobs submitted while auth was off (no owner) become admin-only once you turn auth on: other keys get `404` for them. Webhook URLs and
-metadata are visible to the owner.
+owned by the key name that submitted it (`default` for `CLEF_API_KEY`); another key without the `admin` scope
+gets `404` for it (not `403`) and does not see it in `GET /v1/jobs`, while a key without the `jobs` scope gets
+`403` on every `/v1/jobs` route. Keys with the `admin` scope (and the env keys, which have every scope) see
+all jobs, including those submitted while auth was off (no owner), which nobody else sees once auth is on.
+Webhook URLs and metadata are visible to the owner and to admins.
 
 **Persistence and restart.** Jobs, their submitted payloads (your inputs) and result rows live in the database
 (SQLite `<state dir>/clef.db` by default, or Postgres; in clear text, see [Storage](#storage)) and survive restarts.
@@ -366,8 +427,8 @@ review, router and batch tables live there too. One clef server per database: Po
 * **Errors.** A database that cannot be reached answers `503 database unavailable`. Drop everything by deleting
   `clef.db` (SQLite) or the database (Postgres) with the server stopped.
 
-**Throughput.** Jobs run one at a time, FIFO, at the engine's batch speed, shared with interactive traffic.
-There is no priority between jobs. Inside the engine, job work (`ctx.decide`, including the `evaluate` kind) is
+**Throughput.** Up to `CLEF_JOB_ACTIVE` jobs take turns, one chunk at a time, at the engine's batch speed, shared with
+interactive traffic; priority, fair share and windows between jobs are in [Scheduling](#scheduling). Inside the engine, job work (`ctx.decide`, including the `evaluate` kind) is
 in the background lane and requests (`ctx.infer`) in the interactive lane:
 
 - A micro-batch holds one class. Interactive goes first whenever any is queued, even if it arrived during a
@@ -376,6 +437,12 @@ in the background lane and requests (`ctx.infer`) in the interactive lane:
   job records would wait for all 8; running it alone costs the job one extra host overhead instead.
 - Jobs are not starved by steady traffic: after `CLEF_INTERACTIVE_BURST` (default 8) interactive micro-batches in
   a row while job work waited, one job micro-batch runs. Lower it to favour jobs, raise it to favour requests.
+- Two opt-in flags raise a job's own throughput without changing any of this (one GPU worker, one job chunk in
+  flight, interactive first): `CLEF_JOB_SORT_WINDOW=N` takes N items at a time and sends them to the engine sorted by
+  token length (less padding), and `CLEF_TOKENIZE_AHEAD=1` encodes the next window on CPU threads while the current
+  one is on the GPU. Results stay in input order, rows are persisted a whole window at a time and a resume
+  recomputes at most one window. They apply to the `classify`, `score`, `systemone`, `evaluate` and `batch` kinds,
+  are off by default, and wait for a GPU measurement ([Performance](performance.md)).
 - `GET /v1/stats` reports `queue_depth_by_class` (`interactive`, `background`) next to the total `queue_depth`.
 
 Measured on the RX 7900 XTX (bf16, short tickets) before the lane existed: a 500-item `classify` job ran at
@@ -402,6 +469,10 @@ async def run(ctx, parsed, job) -> dict | None:
 ```
 
 Rows containing an `"error"` key count as failed, and the circuit breaker above applies to every kind (it raises
-`JobAborted` from `add_items`). Call the model with `ctx.decide(requests, batch=True)`, keep one
-call in flight, and check `job.cancelled` between calls. Add `"resumable": True` only if `run` honours
+`JobAborted` from `add_items`). Call the model with `job.decide(requests)` (it waits for the job's turn in the scheduler; `ctx.decide` directly
+bypasses the turns), keep one call in flight, and check `job.cancelled` between calls (it also turns true when the job
+expires). Other optional kind keys: `"records": fn(parsed) -> int` (records reserved from the daily quota at submit;
+default the length of `inputs` / `requests`) and `"completed_if_all_failed": True` (a run where every item failed still
+ends `succeeded`; otherwise it ends `failed`). `job.add_items(rows, tokens=N)` adds `N` to the job's `tokens`; without
+`tokens` it sums the rows' `input_tokens`. Add `"resumable": True` only if `run` honours
 `job.resume_from` (the number of rows already stored) and does not re-emit them.

@@ -36,6 +36,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config as config_mod
+from . import dotenv
 from .appctx import AppContext
 from .classifiers import ClassifierStore, ClassifierVersions, InvalidName, TooManyClassifiers, validate_name
 from .classify import (
@@ -106,7 +107,7 @@ ERRORS: dict[int | str, dict[str, Any]] = {
     }.items()
 }
 # Feature modules: each exposes router(ctx: AppContext) -> APIRouter (see appctx.py). One line each.
-FEATURES: list[str] = ["evaluation", "compat", "jobs", "admin"]
+FEATURES: list[str] = ["evaluation", "compat", "batches", "jobs", "admin", "router"]
 
 
 class ApiError(Exception):
@@ -169,6 +170,13 @@ class GuardMiddleware:
     def __init__(self, app: Any, cfg: Config, stats: Stats):
         self.app, self.cfg, self.stats = app, cfg, stats
         self.limit = cfg.max_body_mb * 1024 * 1024
+        self.file_limit = cfg.max_file_mb * 1024 * 1024  # F1: POST /v1/files only
+
+    def limit_for(self, scope: dict[str, Any]) -> tuple[int, int]:
+        """(bytes, MB) allowed for this request: the file limit for the upload route, else the body limit."""
+        if scope["method"] == "POST" and scope["path"] == "/v1/files":
+            return self.file_limit, self.cfg.max_file_mb
+        return self.limit, self.cfg.max_body_mb
 
     async def __call__(self, scope: dict[str, Any], receive: Callable, send: Callable) -> None:
         if scope["type"] != "http":
@@ -183,6 +191,7 @@ class GuardMiddleware:
         tracked = is_tracked(scope["method"], scope["path"])
         status = 500
         received = 0
+        limit, limit_mb = self.limit_for(scope)
 
         async def send_wrap(msg: dict[str, Any]) -> None:
             nonlocal status
@@ -201,16 +210,20 @@ class GuardMiddleware:
             msg = await receive()
             if msg["type"] == "http.request":
                 received += len(msg.get("body", b""))
-                if received > self.limit:
-                    raise BodyTooLarge(self.cfg.max_body_mb)
+                if received > limit:
+                    raise BodyTooLarge(limit_mb)
             return msg
 
         try:
             with self.stats.in_flight() if tracked else nullcontext():
                 declared = headers.get("content-length", "")
-                if declared.isdigit() and int(declared) > self.limit:
-                    state["error"] = msg_ = f"request body exceeds {self.cfg.max_body_mb} MB limit"
-                    resp = JSONResponse({"detail": msg_, "request_id": rid}, status_code=413)
+                if declared.isdigit() and int(declared) > limit:
+                    state["error"] = msg_ = f"request body exceeds {limit_mb} MB limit"
+                    if scope["path"] == "/v1/files":  # the OpenAI SDKs parse this error shape
+                        err = {"message": msg_, "type": "invalid_request_error", "param": None, "code": None}
+                        resp = JSONResponse({"error": err}, status_code=413)
+                    else:
+                        resp = JSONResponse({"detail": msg_, "request_id": rid}, status_code=413)
                     await resp(scope, receive, send_wrap)
                 else:
                     await self.app(scope, receive_wrap, send_wrap)
@@ -315,6 +328,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
     async def lifespan(app_: FastAPI) -> AsyncIterator[None]:
         install_access_filter()  # after uvicorn's dictConfig; covers launchers other than run()
         log.info("starting clef server %s (model load runs in background)", VERSION)
+        log.info("%s", dotenv.startup_line())  # a ./.env picked up from an unexpected cwd shows here
         for line in (bind_warning(cfg, auth.enabled) or "").splitlines():  # needs the DB: DB keys count
             log.warning(line)
         app_.state.draining = False
@@ -781,7 +795,11 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                 functools.partial(
                     store.put,
                     name,
-                    body.model_dump(),
+                    # review_threshold joins the stored definition only when set, so an unchanged re-PUT of an
+                    # older classifier stays a no-op
+                    body.model_dump(
+                        exclude=None if body.review_threshold is not None else {"review_threshold"}
+                    ),
                     owner=caller,
                     created_by=caller,
                     model=ctx.model_ref(),
@@ -859,6 +877,21 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             raise ApiError(404, f"classifier {name!r} not found")
         return {"deleted": name}
 
+    async def capture_review(
+        request: Request, name: str, doc: dict[str, Any], inputs: list[Any], results: list[Any]
+    ) -> None:
+        """E2: single-label results below review_threshold become Review items (router.py).
+
+        Only for the classifier's owner or an admin (auth off counts as admin): the items land in the owner's
+        queue, so capturing another key's run would hand that key's input text to the owner. Such a run is not
+        captured at all (not under the caller either: the caller cannot act on another owner's classifier)."""
+        capture = ctx.extra.get("review_capture")  # set by the router feature; ctx exists by request time
+        if capture is None or doc.get("review_threshold") is None:
+            return
+        if getattr(request.state, "key_name", None) != doc.get("owner") and not is_admin(request):
+            return
+        await capture(name, doc, inputs, results)
+
     def run_threshold(doc: dict[str, Any], given: float | None) -> float | None:
         if not doc.get("multi_label"):
             if given is not None:
@@ -886,7 +919,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
                 model=body.model,
                 **common,
             )
-        return await run_classify(
+        out = await run_classify(
             request,
             labels=doc["labels"],
             instructions=doc.get("instructions"),
@@ -895,6 +928,9 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             model=body.model,
             **common,
         )
+        if not body.images and not body.videos:  # E2: results below review_threshold go to the Review queue
+            await capture_review(request, name, doc, [body.input], [out])
+        return out
 
     @v1.post(
         "/classifiers/{name}/batch",
@@ -909,7 +945,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
         doc = await load_classifier(name, body.version)
         if doc["kind"] == "score":
             raise ApiError(400, "batch is only supported for classify classifiers")
-        return await run_classify_batch(
+        out = await run_classify_batch(
             request,
             inputs=body.inputs,
             labels=doc["labels"],
@@ -919,6 +955,8 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             model=body.model,
             classifier=name,
         )
+        await capture_review(request, name, doc, body.inputs, out["results"])
+        return out
 
     # ---- observability
     def model_info() -> dict[str, Any]:
@@ -948,6 +986,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             k: gpu.get(k) for k in ("vram_allocated_gb", "vram_reserved_gb", "vram_total_gb", "memory_kind")
         }
         body["telemetry"] = meta.get("telemetry")
+        body["tunableop"] = meta.get("tunableop")  # background tuning: {phase, tuned, pending, this_run}
         return body
 
     @v1.get("/stats", summary="Rolling latency / throughput / GPU stats", dependencies=ops_scope)

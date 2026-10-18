@@ -162,3 +162,17 @@ export const rotateKey = (name, body) => request(`/v1/admin/keys/${encodeURIComp
 export const revokeKey = (name, keyId, force) => request(`/v1/admin/keys/${encodeURIComponent(name)}/revoke${force ? '?force=true' : ''}`, { method: 'POST', body: keyId ? { key_id: keyId } : {} });
 export const keyUsage = (name, days = 30) => request(`/v1/admin/keys/${encodeURIComponent(name)}/usage?days=${days}`);
 export const audit = (before) => request(`/v1/admin/audit?limit=50${before != null ? `&before=${before}` : ''}`);
+
+// ---- router and review queue (E2) -------------------------------------------------------------------
+const enc = encodeURIComponent;
+export const listRouters = () => request('/v1/routers');
+export const putRouter = (name, body) => request(`/v1/routers/${enc(name)}`, { method: 'PUT', body });
+export const deleteRouter = (name) => request(`/v1/routers/${enc(name)}`, { method: 'DELETE' });
+export const proposeRouter = (name) => request(`/v1/routers/${enc(name)}/propose`, { method: 'POST', okStatuses: [202] });
+export const routerVersions = (name) => request(`/v1/routers/${enc(name)}/versions`);
+export const activateRouterVersion = (name, v) => request(`/v1/routers/${enc(name)}/versions/${v}/activate`, { method: 'POST' });
+export const listReview = (params = {}) => {
+  const qs = Object.entries(params).filter(([, v]) => v !== '' && v != null).map(([k, v]) => `${enc(k)}=${enc(v)}`).join('&');
+  return request(`/v1/review${qs ? `?${qs}` : ''}`);
+};
+export const resolveReview = (id, body) => request(`/v1/review/${enc(id)}/resolve`, { method: 'POST', body });

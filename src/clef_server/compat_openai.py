@@ -7,6 +7,7 @@ import logging
 import time
 import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -157,6 +158,127 @@ def _usage(result: dict[str, Any]) -> dict[str, int]:
     return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
 
 
+@dataclass
+class ChatPlan:
+    """A validated chat request: what to ask the engine (``sreq``) and how to turn the answer back."""
+
+    model: str
+    sreq: SystemOneRequest
+    plan: Plan
+    tool_name: str | None
+    named: bool
+    threshold: float
+    logprobs: bool
+    top_logprobs: int
+    stream: bool
+    include_usage: bool
+    ignored: list[str]
+
+
+@dataclass
+class ChatOutcome:
+    """A decoded answer: the parts of a chat completion (the batch kind and the live route share them)."""
+
+    model: str
+    message: dict[str, Any]
+    finish: str
+    logprobs: dict[str, Any] | None
+    usage: dict[str, int]
+    extra: dict[str, Any]
+
+
+def prepare_chat(body: dict[str, Any], cfg: Any, model: str) -> ChatPlan:
+    """Validate a chat completions body and build the engine request. Pure: no engine, no request.
+
+    ``model`` is the served id the caller already resolved (``served_model``; an unknown id is its 404).
+    Raises SchemaError (-> 400 ``invalid_request_error``) for anything clef cannot decide.
+    """
+    if _int_param(body, "n") not in (None, 1):
+        raise SchemaError(
+            "n > 1 is not supported: clef returns one deterministic decision", "n", "unsupported_value"
+        )
+    top = _int_param(body, "top_logprobs")
+    if top is not None and not 0 <= top <= MAX_TOP_LOGPROBS:
+        raise SchemaError(f"top_logprobs must be between 0 and {MAX_TOP_LOGPROBS}", "top_logprobs")
+    if top is not None and body.get("logprobs") is not True:
+        raise SchemaError("top_logprobs requires logprobs: true", "top_logprobs")
+    stream = body.get("stream") is True
+    opts = body.get("stream_options")
+    include_usage = stream and isinstance(opts, dict) and opts.get("include_usage") is True
+
+    plan, tool_name, named = _target(body, cfg.max_labels)
+    state, images, videos = messages_to_state(body.get("messages"))
+    try:
+        sreq = SystemOneRequest(
+            model=model,
+            state=state,
+            questions={k: Question(**q) for k, q in plan.questions.items()},
+            images=images or None,
+            videos=videos or None,
+        )
+    except ValueError as exc:  # pydantic: message already names the field
+        raise SchemaError(str(exc), None) from exc
+    return ChatPlan(
+        model=model,
+        sreq=sreq,
+        plan=plan,
+        tool_name=tool_name,
+        named=named,
+        threshold=resolve_threshold(None, cfg),
+        logprobs=body.get("logprobs") is True,
+        top_logprobs=top or 0,
+        stream=stream,
+        include_usage=include_usage,
+        ignored=ignored_fields(body),
+    )
+
+
+def chat_outcome(
+    chat: ChatPlan, result: dict[str, Any], request_id: str, total_ms: float | None = None
+) -> ChatOutcome:
+    """Decode the engine's answer for ``chat``. ``total_ms`` (when known) goes into ``clef.timing``."""
+    out = decode(chat.plan, result["answers"], chat.threshold)
+    message, finish = _message(out, chat.tool_name, chat.named)
+    timing = dict(result.get("timing") or {})
+    if total_ms is not None:
+        timing["total_ms"] = round(total_ms, 1)
+    return ChatOutcome(
+        model=result.get("model") or chat.model,
+        message=message,
+        finish=finish,
+        logprobs=out.logprobs(chat.plan, chat.top_logprobs) if chat.logprobs else None,
+        usage=_usage(result),
+        extra={
+            "ignored": chat.ignored,
+            "questions": out.detail,
+            "timing": timing,
+            "request_id": request_id,
+        },
+    )
+
+
+def chat_body(out: ChatOutcome) -> dict[str, Any]:
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": out.model,
+        "choices": [
+            {"index": 0, "message": out.message, "logprobs": out.logprobs, "finish_reason": out.finish}
+        ],
+        "usage": out.usage,
+        "system_fingerprint": None,
+        "clef": out.extra,
+    }
+
+
+def render_chat(
+    chat: ChatPlan, result: dict[str, Any], request_id: str, total_ms: float | None = None
+) -> dict[str, Any]:
+    """The non-streaming chat completion body for ``result`` (what ``POST /v1/chat/completions`` returns)."""
+    return chat_body(chat_outcome(chat, result, request_id, total_ms))
+
+
 def _sse(obj: Any) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False) if obj != '[DONE]' else '[DONE]'}\n\n"
 
@@ -196,73 +318,32 @@ def router(ctx: AppContext) -> APIRouter:
             model = served_model(ctx.engine, requested)
         except UnknownModel as exc:
             return _not_served(request, exc)
-        if _int_param(body, "n") not in (None, 1):
-            raise SchemaError(
-                "n > 1 is not supported: clef returns one deterministic decision", "n", "unsupported_value"
-            )
-        top = _int_param(body, "top_logprobs")
-        if top is not None and not 0 <= top <= MAX_TOP_LOGPROBS:
-            raise SchemaError(f"top_logprobs must be between 0 and {MAX_TOP_LOGPROBS}", "top_logprobs")
-        if top is not None and body.get("logprobs") is not True:
-            raise SchemaError("top_logprobs requires logprobs: true", "top_logprobs")
-        stream = body.get("stream") is True
-        opts = body.get("stream_options")
-        include_usage = stream and isinstance(opts, dict) and opts.get("include_usage") is True
-
-        plan, tool_name, named = _target(body, ctx.cfg.max_labels)
-        state, images, videos = messages_to_state(body.get("messages"))
-        try:
-            sreq = SystemOneRequest(
-                model=model,
-                state=state,
-                questions={k: Question(**q) for k, q in plan.questions.items()},
-                images=images or None,
-                videos=videos or None,
-            )
-        except ValueError as exc:  # pydantic: message already names the field
-            raise SchemaError(str(exc), None) from exc
+        chat = prepare_chat(body, ctx.cfg, model)
         t0 = time.perf_counter()
         try:
-            results = await ctx.infer(request, [sreq], batch=False)
+            results = await ctx.infer(request, [chat.sreq], batch=False)
         except UnknownModel as exc:
             return _not_served(request, exc)
-        res = results[0]
-        model = res.get("model") or model
-        out = decode(plan, res["answers"], resolve_threshold(None, ctx.cfg))
-
-        cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-        message, finish = _message(out, tool_name, named)
-        logprobs = out.logprobs(plan, top or 0) if body.get("logprobs") is True else None
-        usage = _usage(res)
-        ignored = ignored_fields(body)
-        if ignored:
-            log.debug("chat/completions ignored request fields: %s", ", ".join(ignored))
-        extra = {
-            "ignored": ignored,
-            "questions": out.detail,
-            "timing": {**(res.get("timing") or {}), "total_ms": round((time.perf_counter() - t0) * 1000, 1)},
-            "request_id": request.state.request_id,
-        }
-        if stream:
+        out = chat_outcome(chat, results[0], request.state.request_id, (time.perf_counter() - t0) * 1000)
+        if chat.ignored:
+            log.debug("chat/completions ignored request fields: %s", ", ".join(chat.ignored))
+        if chat.stream:
+            cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
             return StreamingResponse(
                 _stream(
-                    cid, created_at, model, message, finish, logprobs, usage if include_usage else None, extra
+                    cid,
+                    created_at,
+                    out.model,
+                    out.message,
+                    out.finish,
+                    out.logprobs,
+                    out.usage if chat.include_usage else None,
+                    out.extra,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        return JSONResponse(
-            {
-                "id": cid,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{"index": 0, "message": message, "logprobs": logprobs, "finish_reason": finish}],
-                "usage": usage,
-                "system_fingerprint": None,
-                "clef": extra,
-            }
-        )
+        return JSONResponse(chat_body(out))
 
     return r
 

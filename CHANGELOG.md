@@ -3,6 +3,60 @@
 ## Unreleased
 
 ### Added
+- **`clef tune`** (ROCm, `CLEF_TUNABLEOP=1`): tunes the GEMM shapes the server served untuned after warmup
+  (recorded in `<state dir>/tunableop/<model>@<rev8>/tunableop_untuned0.csv`) and adds them to the tuned file.
+- **Self-evolving router and Review queue (E2)**: `PUT|GET|DELETE /v1/routers/{name}`, `POST .../route[/batch]`,
+  `.../propose`, `.../versions[/{v}/activate]`, `GET /v1/review`, `POST /v1/review/{id}/resolve`. A router buffers
+  what its classifier cannot place ("other", or below a threshold that rises with the label count), sends 20 items at
+  a time to an LLM for new labels, re-classifies them with clef against the proposed set before accepting, and only
+  adds labels (at most 63 plus `other`). Review mode (default) queues proposals; auto mode publishes them as a new
+  classifier version. Cold start proposes a starter set from the first 20 items. Off unless `GEMINI_API_KEY` (or
+  `CLEF_LLM_API_KEY`) is set; `CLEF_LLM_BASE_URL` / `CLEF_LLM_MODEL` point it at ollama, LM Studio or OpenAI. New
+  `CLEF_ROUTER_*`, `CLEF_LLM_*` and `CLEF_REVIEW_TTL_DAYS` settings, `docs/router.md`, a console **Review** screen,
+  router and review helpers in the Python and JS clients, and an LLM line in `clef doctor`.
+- Saved classifiers accept `review_threshold` (single-label): interactive runs below it, by the classifier's owner
+  or an admin, are queued for review (another key's runs are never captured, so its text does not reach the owner). Review
+  input text is dropped when resolved, when an item becomes `permanent_other`, and after `CLEF_REVIEW_TTL_DAYS` (30).
+- **Job scheduler (E1)**: up to `CLEF_JOB_ACTIVE` (default 4) jobs run in turns, one chunk in flight across all of
+  them, so interactive requests keep their priority. `POST /v1/jobs` takes `priority` (`low|normal|high`; strict
+  classes, aging with `CLEF_JOB_AGING_S`), `urgent` (new `urgent` scope: top class, ignores the window), `schedule`
+  (`{"window": "20:00-06:00", "tz": ...}` or `CLEF_JOB_WINDOW` / `CLEF_JOB_TZ`; a job that leaves its window stays
+  `running` with `waiting_reason: "off_hours"`; a window that lies entirely in a daylight-saving gap does not open that day) and `expire_after_s` (counted from when the window opens; ends
+  `cancelled` with `error: "expired"`). Turns are shared fairly per key (stride scheduling; a key whose jobs sat out a window or waited for a slot starts level with the others when they resume, it does not bank the missed turns), and so are slots: when another key waits, a key holding more than `ceil(CLEF_JOB_ACTIVE / keys wanting a slot)` lets its newest job wait (`running`, `active_limit`) after its current chunk. Job objects gain
+  `priority`, `urgent`, `schedule`, `waiting_reason`, `next_window_at`, `expired`, `model`, `tokens`;
+  `GET /v1/jobs?priority=`. The daily record quota is reserved at submit (UTC day of the submit, refunded for
+  what a cancelled / failed / expired job did not process); result-cache hits are not charged (counted in the new
+  `jobs.hits` column, migration `0003`, so the refund is exact after a restart). Python API:
+  `JobRunner.submit/cancel/get`, `JobHandle.decide`, and the kind keys `completed_if_all_failed` (a run where every
+  item failed still ends `succeeded`) and `records` (quota size). New dependency `tzdata` (server extra).
+- **`.env` files**: clef loads `KEY=VALUE` lines from `./.env` and then `~/.config/clef/env` before reading its
+  settings, so `GEMINI_API_KEY=...` can live in a file next to where you run `clef serve`. A variable already set (non-empty) in the
+  environment always wins; `CLEF_ENV_FILE=<path>` loads only that file and `CLEF_ENV_FILE=` loads none (read from the
+  real environment only, never from a file). Only `CLEF_*` and `GEMINI_API_KEY` are taken from files; other names are
+  ignored with a warning. Values are never logged; the server logs the loaded file names at startup and
+  `clef doctor` lists them. See docs/configuration.md.
+- **Job throughput flags (F2, off by default)**: `CLEF_JOB_SORT_WINDOW=N` sorts each window of N job items by
+  token length before they reach the engine, and `CLEF_TOKENIZE_AHEAD=1` encodes the next window on CPU threads
+  while the current one is on the GPU. Results stay in input order, rows stay gap-free and a resume recomputes at
+  most one window. Applies to the classify, score, systemone, evaluate and batch (OpenAI Batches, F1) job kinds. Not enabled by default until
+  `bench/sort_check.sh` shows a gain over 10% on the GPU (measurement pending, see Performance).
+- **OpenAI Files and Batches (F1)**: `POST/GET/DELETE /v1/files` (multipart upload of `.jsonl`, `purpose=batch`,
+  `/content` streamed) and `POST/GET /v1/batches`, `POST /v1/batches/{id}/cancel`, for chat completions,
+  `/v1/classify` and `/v1/score` lines. The `openai` SDK's `client.files` / `client.batches` work unchanged; errors
+  use the OpenAI shape. A batch is one job of kind `batch` (`GET /v1/jobs?kind=batch`), so it shares the queue,
+  quota, resume and retention; output and error files are streamed from the job's rows, not stored. Private to the
+  key that created them, scope `jobs`. New: `CLEF_MAX_FILE_MB` (200, body limit of `POST /v1/files` only),
+  `CLEF_MAX_BATCH_LINES` (50000), `CLEF_FILE_TTL_HOURS` (720); new `server` dependency `python-multipart`. The
+  `clef` extension (`extra_body={"clef": {"priority", "urgent", "schedule"}}`) goes to the job scheduler, and
+  `expires_at` is 24 h after the batch could first run. Jobs gain `jobs.tokens` (the sum of the rows' `input_tokens`)
+  and result rows with a 4xx `status_code` no longer trip the circuit breaker. `POST /v1/jobs` with `kind: "batch"` runs
+  the same structural check of the input file at submit (400 naming the first bad line); a line nested too deeply
+  to parse is an `invalid_json_line`, not a 500. See docs/openai-compat.md.
+- `bench/vllm/` (Wave G, not yet run on a GPU): `vllm_check.sh` benchmarks a pinned vLLM ROCm nightly container against
+  clef (flags off, and MASK_FREE + FAST_HEAD) with a parity run, load at concurrency 1/8/16/32 and an adopt / do-not-adopt table;
+  A refused run touches nothing, and cleanup removes only the container id and clef state dirs of its own run
+  (`bench/out/vllm/run-*`); an unreadable GPU needs `FORCE=1`. `vllm_client.py` maps clef records to vLLM's `/v1/systemone` and fails loudly on a shape mismatch. `clef bench`'s load
+  generator takes an optional response check.
 - `GET /readyz` (open): 200 `{"ready": true}` only when the model is ready and the server is not draining, else
   503 with `status` `loading|warming|error|draining`. With `CLEF_DRAIN_S=N` (`clef serve --drain-s N`, default 0)
   the first SIGTERM / Ctrl-C keeps the server up for N seconds answering `draining` (a second signal stops at once),
@@ -60,6 +114,15 @@
   owner-less classifiers.
 
 ### Changed
+- **TunableOp tunes in the background** (`CLEF_TUNABLEOP`, now on by default on ROCm). A live request never tunes any
+  more (it used to stall for seconds on every new shape: measured p50 2.7 s, p95 39 s). The server is ready after the
+  normal warmup; it records the GEMMs of every text-batch shape up to 1024 tokens and a separate tuner process
+  (`python -m clef_server.tuner`) tunes them one at a time, paused while requests arrive; the server reloads each
+  result as it lands. About an hour of idle time on the 7900 XTX, once per GPU / driver / ROCm / torch version.
+  Measured gain once tuned: +27-32% req/s on mixed-length traffic, single requests p50 104 vs 137 ms. Progress in
+  `/v1/stats` (`tunableop`). `CLEF_TUNABLEOP=0` turns it off; `CLEF_TUNABLEOP_ONLINE=1` keeps the old behaviour.
+- **`CLEF_MASK_FREE` and `CLEF_FAST_HEAD` default to on with the ROCm backend** (unset = auto; off on CUDA, MPS and
+  CPU until measured there; `0` / `1` forces them). Bench baselines set all three to 0 explicitly.
 - **`model` in requests**: optional everywhere (omit it, or send null, for the served model); responses report the
   served id. A model the server does not serve is now **404** on every route (OpenAI routes:
   `model_not_found`) instead of being ignored; `/v1/chat/completions` no longer lists `model` in `clef.ignored`.

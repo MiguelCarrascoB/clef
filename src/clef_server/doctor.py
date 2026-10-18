@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import backend as backend_mod
+from . import dotenv
 from .config import VERSION, Config
 from .models import UnknownModel
 from .models import registry as model_registry
@@ -85,10 +86,20 @@ def check_python(r: Report) -> None:
 
 def check_config(r: Report) -> Config | None:
     try:
+        dotenv.load_env()
         cfg = Config()
     except Exception as exc:
         r.add(FAIL, "config", str(exc))
         return None
+    if dotenv.loaded:  # file names only, never their values
+        r.add(OK, "env files", "loaded " + ", ".join(dotenv.loaded))
+    else:
+        off = os.environ.get(dotenv.ENV_FILE_VAR) == ""
+        r.add(
+            SKIP,
+            "env files",
+            "disabled (CLEF_ENV_FILE is empty)" if off else "none found (./.env, ~/.config/clef/env)",
+        )
     r.add(
         OK,
         "config",
@@ -471,6 +482,17 @@ def check_database(r: Report, cfg: Config) -> None:
         )
 
 
+def check_router_llm(r: Report, cfg: Config) -> None:
+    """E2: whether the router's LLM is on. Says only whether a key is set, never the key."""
+    if not cfg.llm_api_key:
+        r.add(SKIP, "router llm", "off (set GEMINI_API_KEY to let the router propose labels)")
+        return
+    from urllib.parse import urlsplit
+
+    host = urlsplit(cfg.llm_base_url).netloc or cfg.llm_base_url
+    r.add(OK, "router llm", f"on: key set, buffered inputs go to {host} (model {cfg.llm_model})")
+
+
 # ---------------------------------------------------------------------------------------------- smoke
 class _NullStats:
     def record_forward(self, *a: Any, **k: Any) -> None: ...
@@ -484,7 +506,8 @@ def run_smoke(r: Report, cfg: Config, timeout: float = 900.0) -> None:
 
     from .engine import Engine
 
-    eng = Engine(dataclasses.replace(cfg, warmup=False), _NullStats())
+    # cache off: the warm probe repeats the first record and must run a forward, not a cache hit
+    eng = Engine(dataclasses.replace(cfg, warmup=False, cache_size=0), _NullStats())
     t0 = time.perf_counter()
     eng.start()
     try:
@@ -533,6 +556,7 @@ def run_checks(no_gpu: bool = False, smoke: bool = False, echo: bool = True) -> 
         return r
     server_up = check_port(r, cfg)
     check_database(r, cfg)
+    check_router_llm(r, cfg)
     if no_gpu:
         check_model(r, cfg)  # torch-free: an unknown CLEF_MODEL fails CI too
         r.add(SKIP, "gpu / weights / disk", "skipped (--no-gpu)")

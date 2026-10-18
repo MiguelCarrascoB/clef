@@ -262,6 +262,9 @@ def engine_dump(out_path: str, records: list[dict], timeout: float = 1800.0) -> 
 
     print(f"engine from {Path(clef_server.__file__).parent}", flush=True)
     cfg = dataclasses.replace(Config(), warmup=False)
+    # D3: the result cache would answer the batched pass from the singles pass (no forward at all)
+    if any(f.name == "cache_size" for f in dataclasses.fields(cfg)):
+        cfg = dataclasses.replace(cfg, cache_size=0)
     eng = Engine(cfg, _NullStats())
     eng.start()
     t0 = time.perf_counter()
