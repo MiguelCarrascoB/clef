@@ -43,8 +43,10 @@ noisy tail (p95 2873 ms).
 
 - 100 requests per level; avg server batch 1.0 at c=1 and ~7.8 at c=16. Concurrency 8: 8.2 req/s.
 - Compute-bound: GEMMs ~83% of GPU kernel time at ~95 TFLOPS. Batching adds ~30% throughput, not more.
-- About half of a single forward is host overhead; HIP graph capture is blocked by a device sync in transformers'
-  `masking_utils._ignore_causal_mask_sdpa`.
+- A ~330-token single forward is GPU-bound: kernel/wall 0.78 measured without the profiler (68.4 / 87.6 ms, 2026-10-18,
+  MASK_FREE + FAST_HEAD + TunableOp). The earlier "about half is host overhead" came from wall time measured inside
+  the profiler. With `attention_mask=None` the backbone captures into a HIP graph (transformers skips its mask check
+  while capturing); replay saves ~27% at 64 tokens, ~5% at 128 and nothing at 384. Replay parity is not checked yet.
 - The joint head is ~5% of the forward. Padding to a multiple of 64 beat raw lengths and full buckets
   (`CLEF_PAD_MULTIPLE`); re-measure on other backends before assuming the same.
 - Warm restart: load ~45-100 s, warmup ~12 s with a warm Triton cache (~110 s the very first time).
@@ -168,7 +170,7 @@ the floor). Every top-1 change was a near coin-flip (reference top-2 margin 0.00
 | `CLEF_TUNABLEOP=1` (tuned) | 0.0219 / 3 | 104.2 / 502.5 | 5.7 | 10.1 | 10.8 |
 | both + TunableOp (**the ROCm default**) | 0.0273 / 0 | 98.6 / 452.3 | 6.0 | 11.3 | 11.8 |
 
-Step 0 (`profile_forward.py --batch 8`): single record kernel/wall 0.22 (host overhead dominates), batch 8 0.68;
+Step 0 (`profile_forward.py --batch 8`): single record kernel/wall 0.22 with profiler overhead in the wall time (0.78 without it, see above), batch 8 0.68;
 GEMM 81-84% of kernel time. Accuracy on the 47 labelled tickets: 0.872 with TunableOp off and on.
 
 Mixed-length traffic (`clef bench --mixed`), TunableOp off vs on: c=1 5.9 vs 7.6 req/s (p50/p95/max 151/241/249 vs

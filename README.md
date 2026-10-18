@@ -37,10 +37,10 @@ ClefClient().classify("Checkout is down", ["billing", "technical"])
 - 🖼️ **Multimodal input:** text, JSON, images and video in the same request.
 - 🔌 **Works with existing clients:** the official OpenAI SDK (structured outputs) and Hugging Face zero-shot clients run against your own machine.
 - 📏 **Measures quality on your data:** accuracy, F1, a confusion matrix and calibration (ECE, Brier), plus a coverage-vs-accuracy curve for choosing an auto-route threshold.
-- ⏱️ **Async jobs, batches and webhooks:** up to 100,000 rows per job, persisted in SQLite (or Postgres) and resumable after a restart, fair turns between API keys, the OpenAI Batch API (`/v1/files`, `/v1/batches`), and signed callbacks guarded against SSRF.
+- ⏱️ **Async jobs, batches and webhooks:** up to 100,000 rows per job, persisted in SQLite (or Postgres with `CLEF_DATABASE_URL`) and resumable after a restart. A scheduler handles priority classes, urgent jobs, off-hours windows and fair turns between API keys. The OpenAI Batch API (`/v1/files`, `/v1/batches`) and signed callbacks guarded against SSRF are included.
 - 🌱 **A label set that grows:** a router keeps the texts its classifier cannot place, asks an LLM (Gemini, or any OpenAI-compatible server) for new labels, and only shows you the ones clef itself confirms, in a **Review** queue.
 - 💻 **Runs on the hardware you have:** NVIDIA, AMD (ROCm, also under WSL2), Apple Silicon and CPU. A 24 GB card runs it as is. **16, 12 and 8 GB GPUs** work through CPU layer streaming or int8, and the cost of each option is measured.
-- 🧰 **Comes with tooling:** a `clef` CLI (`serve`, `doctor`, `download`, `bench`), typed sync and async Python clients, a JS/TS client with no dependencies, an OpenAPI schema, Docker images and service files.
+- 🧰 **Comes with tooling:** a `clef` CLI (`serve`, `doctor`, `download`, `bench`, `tune`, `keys`, `db`, `backup`), typed sync and async Python clients, a JS/TS client with no dependencies, an OpenAPI schema, Docker images and service files.
 - 🔒 **Local by default:** binds to loopback only, with hashed API keys (scopes, daily quotas, a console **Keys** tab and an audit log), per-key rate limits, SSRF guards and input caps for LAN use.
 
 > [!NOTE]
@@ -122,7 +122,7 @@ with ClefClient() as clef:
     clef.save_job_results(job.id, "results.csv", format="csv")
 ```
 
-Jobs survive restarts and share the GPU fairly with interactive calls: jobs of different API keys take turns, and inside one key the oldest job goes first (the others show `waiting_reason: "behind"`). Results can be paged or streamed as JSON, NDJSON or CSV. Webhooks are off until `CLEF_WEBHOOK_ALLOW` lists the receivers. The OpenAI SDK's `files.create` + `batches.create` work too ([guide](docs/openai-compat.md)).
+Jobs survive restarts and share the GPU fairly with interactive calls: jobs of different API keys take turns, and inside one key the oldest job goes first (the others show `waiting_reason: "behind"`). `POST /v1/jobs` also takes `priority` (`low`, `normal`, `high`), `urgent` (needs the `urgent` scope), `schedule` (an off-hours window such as `20:00-06:00`, or `CLEF_JOB_WINDOW` for all jobs) and `expire_after_s` ([guide](docs/jobs.md)). Results can be paged or streamed as JSON, NDJSON or CSV. Webhooks are off until `CLEF_WEBHOOK_ALLOW` lists the receivers. The OpenAI SDK's `files.create` + `batches.create` work too ([guide](docs/openai-compat.md)).
 
 ### Grow the label set with a router
 
@@ -170,8 +170,8 @@ flowchart LR
     subgraph server["FastAPI app (create_app)"]
         SEC["security<br/>keys · rate limit · CORS"]
         CORE["classify · score ·<br/>saved classifiers · SystemOne"]
-        FEAT["feature modules via AppContext<br/>compat · evaluation · jobs + webhooks"]
-        DB[("SQLite / Postgres<br/>jobs · classifiers")]
+        FEAT["feature modules via AppContext<br/>compat · batches · evaluation ·<br/>jobs + scheduler · router + review"]
+        DB[("SQLite / Postgres<br/>jobs · classifiers · keys · audit")]
     end
     subgraph engine["Engine"]
         Q["request queue<br/>(tokenized on caller threads)"]
@@ -190,10 +190,10 @@ flowchart LR
 
 Design points:
 
-- **Only one thread ever touches the GPU.** Requests are tokenized in a thread pool, queued, and resolved through futures by the engine worker. That worker micro-batches text records by length bucket and pads to a multiple of 64. On ROCm this is faster than raw lengths, because hipBLASLt picks better GEMM tiles for aligned shapes.
+- **Only one thread ever touches the GPU.** Requests are tokenized in a thread pool, queued, and resolved through futures by the engine worker. That worker micro-batches text records by length bucket and pads to a multiple of 64. On ROCm this is faster than raw lengths, because hipBLASLt picks better GEMM tiles for aligned shapes. On ROCm a separate TunableOp tuner process also uses the GPU, but only while the server is idle: it is paused when a request arrives.
 - **All device-specific code is in `backend.py`:** detection, dtype rules, OOM handling, memory caps, pinned host copies and telemetry. Everything else is backend-agnostic and unit-tested on CPU with mocked backends.
 - **CPU offload streams decoder layers in for each forward.** `offload.py` plans which layers stay on the host and copies them in asynchronously. Probabilities stay identical to the full-GPU run; only latency changes.
-- **Features plug in through `AppContext`.** The OpenAI/HF compatibility routes, evaluation and jobs are modules that receive the engine, stats and auth dependencies through one interface.
+- **Features plug in through `AppContext`.** The OpenAI/HF compatibility routes, batches, evaluation, jobs and the router are modules that receive the engine, stats and auth dependencies through one interface.
 
 Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/performance.md](docs/performance.md).
 
@@ -209,11 +209,13 @@ Measured on an AMD RX 7900 XTX (ROCm 7.2, WSL2, bf16), 2026-10-18. This is the o
 | Mixed-length traffic (`clef bench --mixed`) | 5.9-6.2 req/s | **7.6-7.9 req/s (+27-32%)** |
 | Peak VRAM | ~21.7 GB | ~21.0 GB |
 
-On ROCm, clef tunes its matrix multiplies for your exact GPU (PyTorch TunableOp): the server is ready in seconds and tunes in the background while idle, about an hour of idle time once per GPU / driver / ROCm / PyTorch version, kept in the state dir. Probabilities move by up to ~0.03 with these settings; top answers only change on near coin-flip questions. `CLEF_TUNABLEOP=0`, `CLEF_MASK_FREE=0` and `CLEF_FAST_HEAD=0` turn them off ([Performance](docs/performance.md)).
+On ROCm, clef tunes its matrix multiplies for your exact GPU (PyTorch TunableOp): the server is ready in seconds, and a separate tuner process works while the server is idle. The tuner is paused the moment a request arrives, so requests never wait for it. Tuning takes about an hour of idle time once per GPU / driver / ROCm / PyTorch version, kept in the state dir. Probabilities move by up to ~0.03 with these settings; top answers only change on near coin-flip questions. `CLEF_TUNABLEOP=0`, `CLEF_MASK_FREE=0` and `CLEF_FAST_HEAD=0` turn them off ([Performance](docs/performance.md)).
 
 **vLLM** (nightly, which serves clef-flash natively) was measured on the same card: +10% at concurrency 8-32, slower for single requests (p95 157 against 108 ms). It is not adopted for now; `bench/vllm/vllm_check.sh` re-runs the comparison on other GPUs, where the result may differ.
 
-Profiling shows the model is **compute-bound**: GEMMs take about 81% of GPU kernel time at batch 8, and most of a single-record forward is host overhead. NVIDIA, Apple Silicon and CPU numbers are still pending.
+For batch jobs, `CLEF_JOB_SORT_WINDOW=512` (sort job items by length) gave +13-14% job throughput but a worse interactive p95 (926 against ~750 ms), so it stays off by default.
+
+Profiling shows the model is **compute-bound**: GEMMs take about 81% of GPU kernel time at batch 8, and a typical single record (~330 tokens) is GPU-bound too, with about 20% host or idle time. NVIDIA, Apple Silicon and CPU numbers are still pending.
 
 ### Hardware requirements
 
@@ -286,7 +288,8 @@ docker compose --profile cuda up -d     # or --profile rocm (Linux host)
 ```
 
 Ports are published on `127.0.0.1`. For LAN access, set `CLEF_BIND=0.0.0.0` together with `CLEF_API_KEYS`. The
-container turns healthy only once the model has loaded (the healthcheck uses `/readyz`).
+container turns healthy only once the model has loaded (the healthcheck uses `/readyz`). Keep the `clef-data` volume:
+it holds the database and, on ROCm, the tuned GEMM file.
 </details>
 
 <details><summary><b>🖥️ CPU only</b></summary>
@@ -308,13 +311,17 @@ uv pip install -r requirements/cpu.txt && uv pip install -e ".[server,dev]"
 pytest tests/unit && ruff check . && ruff format --check .   # CPU only, never loads the weights
 ```
 
-The repository has 500+ unit tests covering the API, engine, offload planning, evaluation metrics, jobs, webhooks, security and clients. All of them run on CPU against mocked backends. See [CONTRIBUTING.md](CONTRIBUTING.md).
+The repository has 1,100+ unit tests covering the API, engine, offload planning, evaluation metrics, jobs, the scheduler, batches, the router, webhooks, keys, security and clients. All of them run on CPU against mocked backends. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Roadmap
 
 - [ ] Validate on NVIDIA and Apple Silicon hardware, then publish the numbers
 - [ ] Publish to PyPI (`clef-local`)
-- [ ] Remove the device sync in SDPA masking to unblock graph capture / `torch.compile`, since about 50% of a single-record forward is host overhead
+- [ ] Try HIP/CUDA graph replay for short records. With the ROCm defaults the model already captures into a graph, but replay only helps below ~128 tokens (64 tokens: 43 → 32 ms); at ~330 tokens it saves nothing. Check parity first. `torch.compile(fullgraph=True)` is blocked by the gated-delta kernels from `fla`, which disable compilation
+- [ ] Measure `CLEF_MASK_FREE` / `CLEF_FAST_HEAD` on CUDA and MPS before turning them on there (`bench/perf_check.sh`)
+- [ ] Re-run the vLLM comparison (`bench/vllm/vllm_check.sh`) on other GPUs
+- [x] ROCm speed defaults (TunableOp tuned in the background, `MASK_FREE`, `FAST_HEAD`), measured on the RX 7900 XTX
+- [x] Compare vLLM with clef on the RX 7900 XTX (not adopted: +10% at high concurrency, slower single requests)
 - [x] Quantization accuracy table on CUDA (int8 / nf4, measured against lossless offload because bf16 does not fit in 12 GB)
 - [x] Test the LangChain integration
 
@@ -331,10 +338,12 @@ Apache-2.0, see [LICENSE](LICENSE). The model is Cloudflare's [clef-flash](https
 
 - **API compatible con OpenAI** (*structured outputs*) y con *zero-shot* de Hugging Face, además de clientes en Python (síncrono y asíncrono) y en JS/TS.
 - **Evaluación con tus propios datos:** *accuracy*, F1, matriz de confusión, calibración (ECE, Brier) y una curva cobertura-precisión para elegir el umbral de automatización. En la muestra incluida, de 47 tickets, obtuvo *accuracy* 0.87 y ECE 0.04.
-- **Trabajos asíncronos** de hasta 100 000 filas, guardados en SQLite (o Postgres) y reanudables, con *webhooks* firmados.
+- **Trabajos asíncronos** de hasta 100 000 filas, guardados en SQLite (o Postgres con `CLEF_DATABASE_URL`) y reanudables, con *webhooks* firmados. Un planificador gestiona prioridades, trabajos urgentes, ventanas fuera de horario y turnos justos entre claves API. También admite la API Batch de OpenAI (`/v1/files`, `/v1/batches`).
+- **Un conjunto de etiquetas que crece:** un *router* guarda los textos que su clasificador no sabe colocar, pide etiquetas nuevas a un LLM (Gemini, o cualquier servidor compatible con OpenAI) y solo te muestra las que clef confirma, en la cola **Review**.
 - **Funciona en NVIDIA, AMD (ROCm/WSL2), Apple Silicon y CPU.** En GPUs de 16, 12 u 8 GB funciona con *offload* a CPU o int8, y el coste de cada opción está medido.
-- **Rendimiento medido en una RX 7900 XTX:** p50 de 149 ms por registro y hasta 8.9 req/s con *micro-batching*.
-- **Seguro por defecto:** solo escucha en *loopback*, con claves API con nombre, límite de peticiones y protección contra SSRF.
+- **Rendimiento medido en una RX 7900 XTX** con los valores por defecto de ROCm: p50 / p95 de 104 / 108 ms por registro, 9.5 req/s de uno en uno y 11.1-11.8 req/s con *micro-batching*. En ROCm, TunableOp ajusta las multiplicaciones de matrices en un proceso aparte, solo mientras el servidor está libre.
+- **Herramientas:** CLI `clef` (`serve`, `doctor`, `download`, `bench`, `tune`, `keys`, `db`, `backup`), imágenes Docker y un cuaderno de ejemplo ([`examples/quickstart.ipynb`](examples/quickstart.ipynb)).
+- **Seguro por defecto:** solo escucha en *loopback*, con claves API guardadas como *hash* (permisos, cuotas diarias, pestaña **Keys** en la consola y registro de auditoría), límite de peticiones y protección contra SSRF.
 
 Inicio rápido:
 

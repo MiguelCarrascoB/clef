@@ -132,7 +132,7 @@ def prepare_environment(environ: MutableMapping[str, str] = os.environ) -> list[
     """Torch-free. setdefault() the per-platform env BEFORE torch is imported. Returns the names it set.
     - torch build is ROCm (importlib.metadata version of torch contains "+rocm"):
         TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1, and on WSL (/dev/dxg exists) HSA_ENABLE_DXG_DETECTION=1;
-        PYTORCH_TUNABLEOP_* only when CLEF_TUNABLEOP=1. HSA_* / AOTriton are NEVER set on other backends.
+        PYTORCH_TUNABLEOP_* unless CLEF_TUNABLEOP=0 (on by default). HSA_* / AOTriton are NEVER set on other backends.
     - macOS: PYTORCH_ENABLE_MPS_FALLBACK=1.
     - everywhere: HF_HUB_OFFLINE=1 is NOT set here (the CLI download needs the network; the engine passes
       local paths so it never downloads)."""

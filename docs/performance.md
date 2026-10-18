@@ -14,8 +14,9 @@ requests per level, one session (details: [hardware results](hardware-results.md
 
 !!! info "Compute-bound"
     GEMMs are 81-84% of GPU kernel time, so batching adds only ~25% throughput, and the fastest lever on ROCm is
-    better GEMM kernels (TunableOp below). A single-record forward is mostly host overhead (kernel/wall 0.22);
-    graph capture would remove most of it but is blocked by a device sync in transformers' SDPA masking. Padding
+    better GEMM kernels (TunableOp below). A ~330-token single-record forward is GPU-bound too: kernel time
+    is ~78% of wall time without the profiler (68 of 88 ms). With `CLEF_MASK_FREE` (the ROCm default) the backbone
+    captures into a HIP graph, but replay only helps short records (64 tokens: 43 → 32 ms; 384 tokens: no gain). Padding
     text batches to a multiple of 64 beats both raw lengths and full buckets (`CLEF_PAD_MULTIPLE`); that was
     measured on ROCm only. NVIDIA, Mac and CPU numbers are pending hardware.
 
@@ -52,7 +53,7 @@ Measured (fixed-length records): the two flags +2-4% req/s alone, +5-12% with Tu
 
 ### TunableOp (ROCm)
 
-`CLEF_TUNABLEOP=1` makes PyTorch autotune each GEMM shape once and remember the winner. The tuned kernels are
+TunableOp (on by default with ROCm builds; `CLEF_TUNABLEOP=0` turns it off) makes PyTorch autotune each GEMM shape once and remember the winner. The tuned kernels are
 written to `<state_dir>/tunableop/<model>@<rev8>/tunableop_0.csv` and reloaded on the next start.
 
 TunableOp picks, for every GEMM shape clef runs, the fastest kernel this GPU, driver, ROCm and PyTorch offer
@@ -60,7 +61,7 @@ TunableOp picks, for every GEMM shape clef runs, the fastest kernel this GPU, dr
 req/s on mixed-length traffic). It does not change the model. The results are tied to those versions: torch checks
 them and tunes again after an upgrade.
 
-1. `CLEF_TUNABLEOP=1 clef serve`. The server loads the tuned file, runs the normal short warmup and is **ready in
+1. `clef serve`. The server loads the tuned file, runs the normal short warmup and is **ready in
    seconds**, with the default kernels for anything not tuned yet. A live request never tunes.
 2. In the background it records the GEMMs it produces (it runs every text-batch shape up to 1024 tokens, each
    padded length at every batch size, once it has been quiet for `CLEF_TUNABLEOP_IDLE_S`, 2 s) and starts a
@@ -68,7 +69,7 @@ them and tunes again after an upgrade.
    is paused (SIGSTOP) the moment a request arrives and resumed once it is quiet again, so a request never waits
    for it; the server reloads the tuned file whenever it changes, so each tuned GEMM speeds up the next forward.
    The tuner writes `<state_dir>/tunableop/<model>@<rev8>/tunableop_0.csv` (it owns the file) and lists the GEMMs
-   it cannot tune in `tunableop_skip.csv`. All of it takes about an hour of idle time on the 7900 XTX (~620 GEMMs:
+   it cannot tune in `tunableop_skip.csv`. All of it takes about an hour of idle time on the 7900 XTX (the grid gave 535 GEMMs and 61 min on the first measured run:
    rocBLAS has many candidate kernels per GEMM, some take 30 s); progress is in `/v1/stats` (`tunableop`: phase
    discovering / tuning / done, tuned, pending, tuner running / paused). Later starts only read the file: keep the
    state dir (a Docker volume) and this happens once per GPU / driver / ROCm / PyTorch version.

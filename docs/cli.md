@@ -10,7 +10,12 @@
 | `clef doctor [--no-gpu] [--smoke] [--json]` | environment checks per backend; `--smoke` loads the model and runs one record |
 | `clef download [--revision SHA] [--dir DIR] [--yes]` | pinned, resumable download of the weights with a disk-space check |
 | `clef bench [args]` | HTTP load test against the running server |
-| `clef tune` | TunableOp (ROCm, `CLEF_TUNABLEOP=1`): tune the GEMM shapes the server ran untuned after warmup; stop the server first ([Performance](performance.md#tunableop-rocm)) |
+| `clef tune` | TunableOp (ROCm, on by default): tune the GEMM shapes the server ran untuned after warmup; stop the server first ([Performance](performance.md#tunableop-rocm)) |
+| `clef models [--json]` | list the model catalog and installed adapters (`*` = selected) |
+| `clef keys create\|list\|rotate\|revoke\|update\|usage` | API keys and principals: scopes, daily quota, rate limit, expiry, rotation with a grace period (`--grace 24h`), usage per day; writes to the database directly, so it works with the server stopped |
+| `clef db current\|upgrade\|copy --from URL --to URL` | database schema version, migration, and a copy into an empty database (e.g. SQLite to Postgres); see [Jobs](jobs.md) |
+| `clef backup [--out PATH]` | consistent copy of the SQLite database, safe while the server runs (default `<state_dir>/backups/`) |
+| `clef classifiers export [--out DIR] [--name NAME]` | write the latest version of each saved classifier as `<DIR>/<name>.json` |
 | `clef open` | open the console in the browser |
 | `clef version` | print the version |
 

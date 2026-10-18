@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- **`clef tune`** (ROCm, `CLEF_TUNABLEOP=1`): tunes the GEMM shapes the server served untuned after warmup
+- **`clef tune`** (ROCm, TunableOp on by default): tunes the GEMM shapes the server served untuned after warmup
   (recorded in `<state dir>/tunableop/<model>@<rev8>/tunableop_untuned0.csv`) and adds them to the tuned file.
 - **Self-evolving router and Review queue (E2)**: `PUT|GET|DELETE /v1/routers/{name}`, `POST .../route[/batch]`,
   `.../propose`, `.../versions[/{v}/activate]`, `GET /v1/review`, `POST /v1/review/{id}/resolve`. A router buffers
@@ -38,8 +38,9 @@
 - **Job throughput flags (F2, off by default)**: `CLEF_JOB_SORT_WINDOW=N` sorts each window of N job items by
   token length before they reach the engine, and `CLEF_TOKENIZE_AHEAD=1` encodes the next window on CPU threads
   while the current one is on the GPU. Results stay in input order, rows stay gap-free and a resume recomputes at
-  most one window. Applies to the classify, score, systemone, evaluate and batch (OpenAI Batches, F1) job kinds. Not enabled by default until
-  `bench/sort_check.sh` shows a gain over 10% on the GPU (measurement pending, see Performance).
+  most one window. Applies to the classify, score, systemone, evaluate and batch (OpenAI Batches, F1) job kinds. Measured on the
+  7900 XTX: the sort window gave +13-14% job throughput but a worse interactive p95 (926 ms), and tokenize ahead
+  gained nothing, so both stay off by default (see docs/performance.md).
 - **OpenAI Files and Batches (F1)**: `POST/GET/DELETE /v1/files` (multipart upload of `.jsonl`, `purpose=batch`,
   `/content` streamed) and `POST/GET /v1/batches`, `POST /v1/batches/{id}/cancel`, for chat completions,
   `/v1/classify` and `/v1/score` lines. The `openai` SDK's `client.files` / `client.batches` work unchanged; errors
@@ -52,7 +53,8 @@
   and result rows with a 4xx `status_code` no longer trip the circuit breaker. `POST /v1/jobs` with `kind: "batch"` runs
   the same structural check of the input file at submit (400 naming the first bad line); a line nested too deeply
   to parse is an `invalid_json_line`, not a 500. See docs/openai-compat.md.
-- `bench/vllm/` (Wave G, not yet run on a GPU): `vllm_check.sh` benchmarks a pinned vLLM ROCm nightly container against
+- `bench/vllm/` (Wave G, run on the 7900 XTX: vLLM is +10% at concurrency 8-32 but slower for single requests, so it
+  is not adopted): `vllm_check.sh` benchmarks a pinned vLLM ROCm nightly container against
   clef (flags off, and MASK_FREE + FAST_HEAD) with a parity run, load at concurrency 1/8/16/32 and an adopt / do-not-adopt table;
   A refused run touches nothing, and cleanup removes only the container id and clef state dirs of its own run
   (`bench/out/vllm/run-*`); an unreadable GPU needs `FORCE=1`. `vllm_client.py` maps clef records to vLLM's `/v1/systemone` and fails loudly on a shape mismatch. `clef bench`'s load
