@@ -5,7 +5,8 @@ docs/ARCHITECTURE.md (Job scheduler) for the contract.
 
 * ``start > end`` crosses midnight, ``start == end`` is 24 h (always open).
 * Edges are wall-clock times in the zone. In the skipped hour of a spring-forward day an edge starts at the
-  next valid minute; in the repeated hour of a fall-back day it uses the first occurrence (``fold=0``).
+  next valid minute; in the repeated hour of a fall-back day it uses the first occurrence (``fold=0``). An
+  instance whose two edges fall in the same gap is empty that day (``next_start`` skips it).
 """
 
 from __future__ import annotations
@@ -52,28 +53,31 @@ class Window:
     def always(self) -> bool:
         return self.start == self.end
 
+    def _span(self, d: date) -> tuple[float, float]:
+        """The instance that opens on local day ``d``: ``(start, end)``; empty (start == end) when both edges
+        fall in one daylight-saving gap (e.g. 02:15-02:45 on a spring-forward day)."""
+        end_day = d + timedelta(days=1) if self.start > self.end else d
+        return _at(self.tz, d, self.start), _at(self.tz, end_day, self.end)
+
     def _spans(self, ts: float) -> list[tuple[float, float]]:
         """The window instances that could contain ``ts`` (those starting yesterday or today, local)."""
         today = datetime.fromtimestamp(ts, self.tz).date()
-        out = []
-        for d in (today - timedelta(days=1), today):
-            end_day = d + timedelta(days=1) if self.start > self.end else d
-            out.append((_at(self.tz, d, self.start), _at(self.tz, end_day, self.end)))
-        return out
+        return [self._span(d) for d in (today - timedelta(days=1), today)]
 
     def contains(self, ts: float) -> bool:
         return self.always or any(s <= ts < e for s, e in self._spans(ts))
 
     def next_start(self, ts: float) -> float | None:
-        """The first opening strictly after ``ts`` (None for a 24 h window)."""
+        """The first opening strictly after ``ts`` (None for a 24 h window). An instance a DST gap swallowed
+        whole (start == end) is not an opening: it is skipped, so ``contains`` accepts what this returns."""
         if self.always:
             return None
         today = datetime.fromtimestamp(ts, self.tz).date()
-        for k in range(0, 3):
-            s = _at(self.tz, today + timedelta(days=k), self.start)
-            if s > ts:
+        for k in range(0, 4):
+            s, e = self._span(today + timedelta(days=k))
+            if s > ts and e > s:
                 return s
-        raise AssertionError("unreachable: some day within 3 has an opening after ts")  # pragma: no cover
+        raise AssertionError("unreachable: some day within 4 has an opening after ts")  # pragma: no cover
 
     def next_end(self, ts: float) -> float | None:
         """When the instance that contains ``ts`` closes (None when outside or always open)."""

@@ -311,7 +311,7 @@ job uses `CLEF_JOB_WINDOW` when it is set. Outside the window a queued job stays
 when the window closes finishes its current chunk, then stays `running` (`waiting_reason: "off_hours"`) without
 taking turns or holding a slot, and continues when the window opens again. On a daylight-saving change, an edge
 inside the skipped hour starts at the next valid minute and an edge in the repeated hour uses the first
-occurrence. A bad window or time zone is `400`.
+occurrence; a window that lies entirely inside the skipped hour (say `02:15-02:45`) does not open that day. A bad window or time zone is `400`.
 
 **Urgent.** `"urgent": true` needs the `urgent` scope (`403` otherwise). The job takes the top class, ignores its
 window and does not wait for a free slot.

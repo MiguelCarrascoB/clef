@@ -1684,7 +1684,9 @@ Policy:
   waiting job whose owner holds the fewest. So `CLEF_JOB_ACTIVE` bounds the jobs taking turns, not the job tasks.
 - Windows: `schedule = {"window": "HH:MM-HH:MM", "tz": "<IANA>"}` per job (default `CLEF_JOB_WINDOW` in
   `CLEF_JOB_TZ`). `start > end` crosses midnight; `start == end` = 24 h. Aware datetimes via `zoneinfo`; on DST
-  days an edge inside the skipped hour starts at the next valid minute, the repeated hour uses `fold=0`. A job gets
+  days an edge inside the skipped hour starts at the next valid minute, the repeated hour uses `fold=0`; an instance
+  whose two edges fall in the same skipped hour is empty that day, and `next_start` skips it (it returns only a
+  moment `contains` accepts). A job gets
   turns only inside its window. A queued job outside it stays `queued`; a running job that leaves it stays
   `running` but gets no turns and frees its active slot. Both show `waiting_reason: "off_hours"` and
   `next_window_at`. Unknown tz or a bad window: 400 at submit.

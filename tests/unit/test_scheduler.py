@@ -323,6 +323,26 @@ def test_fair_slots_victim_choice_respects_class_and_urgent():
     assert u.slot_victim(ent("y2", "bob", cls=PRIORITY_URGENT, seq=4), NOON) is None  # urgent never waits
 
 
+def test_a_window_instance_swallowed_by_the_dst_gap_is_skipped():
+    """Review E/F #9: 02:15-02:45 in Madrid on 2026-03-29 (02:00 -> 03:00) has start == end == 03:00, an empty
+    instance; next_start must return the next real opening, a moment contains() accepts."""
+    w = parse_window("02:15-02:45", "Europe/Madrid")
+    day = datetime(2026, 3, 29, 0, 0, tzinfo=w.tz).timestamp()
+    nxt = w.next_start(day)
+    assert nxt is not None and w.contains(nxt)
+    assert datetime.fromtimestamp(nxt, w.tz).isoformat() == "2026-03-30T02:15:00+02:00"
+    for spec, d in (
+        ("02:15-02:45", (2026, 3, 29)),
+        ("02:30-03:30", (2026, 3, 29)),
+        ("01:00-02:15", (2026, 3, 29)),
+    ):
+        w = parse_window(spec, "Europe/Madrid")
+        t0 = datetime(*d, 0, 0, tzinfo=w.tz).timestamp()
+        for m in range(0, 48 * 60, 7):
+            ns = w.next_start(t0 + m * 60)
+            assert ns is not None and w.contains(ns), (spec, m)
+
+
 def test_window_edges_around_dst():
     ny = "America/New_York"
     gap = parse_window("02:30-04:00", ny)  # 2026-03-08 02:00 -> 03:00: 02:30 does not exist
