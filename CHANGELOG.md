@@ -36,7 +36,7 @@
 - **Job throughput flags (F2, off by default)**: `CLEF_JOB_SORT_WINDOW=N` sorts each window of N job items by
   token length before they reach the engine, and `CLEF_TOKENIZE_AHEAD=1` encodes the next window on CPU threads
   while the current one is on the GPU. Results stay in input order, rows stay gap-free and a resume recomputes at
-  most one window. Applies to the classify, score, systemone and evaluate job kinds. Not enabled by default until
+  most one window. Applies to the classify, score, systemone, evaluate and batch (OpenAI Batches, F1) job kinds. Not enabled by default until
   `bench/sort_check.sh` shows a gain over 10% on the GPU (measurement pending, see Performance).
 - **OpenAI Files and Batches (F1)**: `POST/GET/DELETE /v1/files` (multipart upload of `.jsonl`, `purpose=batch`,
   `/content` streamed) and `POST/GET /v1/batches`, `POST /v1/batches/{id}/cancel`, for chat completions,

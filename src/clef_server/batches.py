@@ -1285,8 +1285,12 @@ def router(ctx: AppContext) -> APIRouter:
             job = await submit_batch_job(ctx, request, payload, options)
         finally:
             _SCANNED.reset(scanned)
-        # The job is queued already, but cannot finish before the batch row exists: its payload is complete
-        # and the runner is only poked below. A failure here stops the job instead of leaving it orphaned.
+        # The job is queued already and the runner may claim it, even finish it, before the batch row below
+        # exists (submit pokes the runner, and the runner also polls). That is safe: the kind needs only its
+        # payload and the input file, never the batch row, and every batch view starts from the row, so nobody
+        # sees a batch without it. If the insert fails, request_cancel stops a queued / running job and
+        # refunds what it did not process; a job that already finished stays a plain `batch` job (GET
+        # /v1/jobs, deletable) with no batch view.
         batch_row, out_row, err_row = rows_for(job["id"])
         try:
             await run_in_threadpool(store.create_batch, batch_row, out_row, err_row)
