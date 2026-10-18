@@ -94,6 +94,7 @@ def test_bump_attempts_makes_permanent_other_after_two(store):
     store.bump_attempts([rid])
     row = store.get(rid)
     assert row["state"] == "permanent_other" and row["reroutes"] == 2
+    assert row["input"] is None and row["input_sha256"] == input_sha("x")  # D17: the text goes with it
     assert store.buffered("r1", 10) == []  # out of future batches
 
 

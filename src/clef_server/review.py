@@ -15,7 +15,7 @@ import secrets
 import time
 from typing import Any
 
-from sqlalchemy import and_, case, func, select, update
+from sqlalchemy import and_, case, func, null, select, update
 
 from . import dbschema as t
 from .db import Database
@@ -256,16 +256,19 @@ class ReviewStore:
 
     def bump_attempts(self, ids: list[str], max_attempts: int = 2) -> None:
         """The items were sent through a check and are still unplaced: reroutes += 1; at ``max_attempts`` they
-        become ``permanent_other`` (out of future batches) and ``buffered`` otherwise."""
+        become ``permanent_other`` (out of future batches; the input text is dropped in the same statement,
+        D17: nothing will read it again) and ``buffered`` otherwise."""
         if not ids:
             return
+        final = R.c.reroutes + 1 >= max_attempts
         with self.db.tx() as conn:
             conn.execute(
                 update(R)
                 .where(R.c.id.in_(ids), R.c.state.in_(OPEN_ITEM))
                 .values(
                     reroutes=R.c.reroutes + 1,
-                    state=case((R.c.reroutes + 1 >= max_attempts, "permanent_other"), else_="buffered"),
+                    state=case((final, "permanent_other"), else_="buffered"),
+                    input=case((final, null()), else_=R.c.input),
                 )
             )
 

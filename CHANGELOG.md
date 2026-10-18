@@ -14,7 +14,7 @@
   router and review helpers in the Python and JS clients, and an LLM line in `clef doctor`.
 - Saved classifiers accept `review_threshold` (single-label): interactive runs below it, by the classifier's owner
   or an admin, are queued for review (another key's runs are never captured, so its text does not reach the owner). Review
-  input text is dropped when resolved and after `CLEF_REVIEW_TTL_DAYS` (30).
+  input text is dropped when resolved, when an item becomes `permanent_other`, and after `CLEF_REVIEW_TTL_DAYS` (30).
 - **Job scheduler (E1)**: up to `CLEF_JOB_ACTIVE` (default 4) jobs run in turns, one chunk in flight across all of
   them, so interactive requests keep their priority. `POST /v1/jobs` takes `priority` (`low|normal|high`; strict
   classes, aging with `CLEF_JOB_AGING_S`), `urgent` (new `urgent` scope: top class, ignores the window), `schedule`

@@ -1569,7 +1569,8 @@ Review mode: passing proposals become `review` rows `kind=proposal, state=open` 
 Auto mode: a passing proposal is activated at once, at most `CLEF_ROUTER_MAX_NEW_PER_DAY` labels per UTC day
 (beyond that it waits as a review row). Activation = new `router_label_sets` version → `ClassifierStore.put` →
 re-route the buffered items in the background; an item that still fails the gate gets `reroutes += 1`, and after 2
-it becomes `permanent_other` (out of future batches).
+it becomes `permanent_other` (out of future batches; its `input` is set to NULL in the same statement, D17, since
+nothing reads it again; `input_sha256` and the prediction stay).
 
 Cold start: a router with no seeds has no label set (clef needs >= 2 options). Every routed item is answered
 `other` with reason `cold` without a forward, and buffered. At `CLEF_ROUTER_COLD_BATCH` (20) items one bootstrap

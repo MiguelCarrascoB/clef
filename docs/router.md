@@ -69,7 +69,8 @@ labels (to avoid duplicates) and the numbered texts; it asks for at most 3 new l
 proposal's member texts under *current labels + the proposal + other*. A proposal passes when at least half of its
 members (and at least 2) land on the new label, and it fails as a duplicate when most land on one existing label. Texts
 a person already labelled with an existing label count against the proposal. Failed proposals are kept as `failed`
-rows so you can see why. Items that no proposal takes are checked at most twice more, then become `permanent_other`.
+rows so you can see why. Items that no proposal takes are checked at most twice more, then become `permanent_other`, and their text is
+dropped at that moment.
 
 ## Modes
 
