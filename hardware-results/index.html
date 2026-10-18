@@ -708,6 +708,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../memory/" class="md-nav__link">
         
   
@@ -1186,6 +1214,67 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#rtx-4070-ti-12-gb-on-wsl2-cuda-128-2026-10-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RTX 4070 Ti (12 GB) on WSL2, CUDA 12.8, 2026-10-12
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="RTX 4070 Ti (12 GB) on WSL2, CUDA 12.8, 2026-10-12">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#clef_pad_multiple-on-cuda-rtx-4070-ti-int8-torchao-offload-2026-10-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLEF_PAD_MULTIPLE on CUDA (RTX 4070 Ti, int8 torchao + offload, 2026-10-12)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#speed-flags-and-tunableop-on-rocm-rx-7900-xtx-2026-10-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Speed flags and TunableOp on ROCm (RX 7900 XTX, 2026-10-18)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#vllm-vs-clef-rx-7900-xtx-2026-10-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        vLLM vs clef (RX 7900 XTX, 2026-10-18)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#job-feeding-length-sort-tokenize-ahead-and-sharing-the-gpu-rx-7900-xtx-2026-10-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Job feeding (length sort, tokenize ahead) and sharing the GPU (RX 7900 XTX, 2026-10-18)
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1471,6 +1560,67 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#rtx-4070-ti-12-gb-on-wsl2-cuda-128-2026-10-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RTX 4070 Ti (12 GB) on WSL2, CUDA 12.8, 2026-10-12
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="RTX 4070 Ti (12 GB) on WSL2, CUDA 12.8, 2026-10-12">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#clef_pad_multiple-on-cuda-rtx-4070-ti-int8-torchao-offload-2026-10-12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLEF_PAD_MULTIPLE on CUDA (RTX 4070 Ti, int8 torchao + offload, 2026-10-12)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#speed-flags-and-tunableop-on-rocm-rx-7900-xtx-2026-10-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Speed flags and TunableOp on ROCm (RX 7900 XTX, 2026-10-18)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#vllm-vs-clef-rx-7900-xtx-2026-10-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        vLLM vs clef (RX 7900 XTX, 2026-10-18)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#job-feeding-length-sort-tokenize-ahead-and-sharing-the-gpu-rx-7900-xtx-2026-10-18" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Job feeding (length sort, tokenize ahead) and sharing the GPU (RX 7900 XTX, 2026-10-18)
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1558,6 +1708,32 @@ the server); parity = max absolute probability difference against the bf16 refer
 <td>76-110 s</td>
 <td>reference</td>
 <td>v3, 2026-10-03 (two runs)</td>
+</tr>
+<tr>
+<td>Windows 11 + WSL2</td>
+<td>NVIDIA RTX 4070 Ti (12 GB)</td>
+<td>cuda 12.8</td>
+<td>int8 (torchao) + <code>OFFLOAD=cpu</code></td>
+<td>160.1 / 164.3 ms</td>
+<td>6.2</td>
+<td>8.7</td>
+<td>8.1 GB allocated, 11.3 GB device used (1.2 GB is the desktop)</td>
+<td>12.8 s + 9.5 s warmup</td>
+<td>mean 0.0057, max 0.066, 3 of 399 flips (vs lossless offload)</td>
+<td>v3.1.0, 2026-10-12</td>
+</tr>
+<tr>
+<td>Windows 11 + WSL2</td>
+<td>NVIDIA RTX 4070 Ti (12 GB)</td>
+<td>cuda 12.8</td>
+<td>int8 (bitsandbytes, the CUDA default) + <code>OFFLOAD=cpu</code></td>
+<td>228.2 / 259.4 ms</td>
+<td>4.4</td>
+<td>9.4</td>
+<td>7.9 GB allocated, 12.0 GB device used</td>
+<td>26-38 s + 10 s warmup</td>
+<td>mean 0.0172, max 0.209, 22 of 399 flips (vs lossless offload)</td>
+<td>v3.1.0, 2026-10-12</td>
 </tr>
 <tr>
 <td>Ubuntu</td>
@@ -1691,42 +1867,54 @@ noisy tail (p95 2873 ms).</p>
 <ul>
 <li>100 requests per level; avg server batch 1.0 at c=1 and ~7.8 at c=16. Concurrency 8: 8.2 req/s.</li>
 <li>Compute-bound: GEMMs ~83% of GPU kernel time at ~95 TFLOPS. Batching adds ~30% throughput, not more.</li>
-<li>About half of a single forward is host overhead; HIP graph capture is blocked by a device sync in transformers'
-  <code>masking_utils._ignore_causal_mask_sdpa</code>.</li>
+<li>A ~330-token single forward is GPU-bound: kernel/wall 0.78 measured without the profiler (68.4 / 87.6 ms, 2026-10-18,
+  MASK_FREE + FAST_HEAD + TunableOp). The earlier "about half is host overhead" came from wall time measured inside
+  the profiler. With <code>attention_mask=None</code> the backbone captures into a HIP graph (transformers skips its mask check
+  while capturing); replay saves ~27% at 64 tokens, ~5% at 128 and nothing at 384. Replay parity is not checked yet.</li>
 <li>The joint head is ~5% of the forward. Padding to a multiple of 64 beat raw lengths and full buckets
   (<code>CLEF_PAD_MULTIPLE</code>); re-measure on other backends before assuming the same.</li>
 <li>Warm restart: load ~45-100 s, warmup ~12 s with a warm Triton cache (~110 s the very first time).</li>
 </ul>
 <h2 id="quantization-accuracy-cuda-only">Quantization accuracy (CUDA only)<a class="headerlink" href="#quantization-accuracy-cuda-only" title="Permanent link">&para;</a></h2>
+<p>Measured on the RTX 4070 Ti (12 GB) against the <strong>lossless offload run</strong> (<code>OFFLOAD=cpu CLEF_MAX_DEVICE_MEMORY_GB=10</code>),
+not against plain bf16, because bf16 does not fit in 12 GB. Offload is documented to give identical probabilities to
+bf16 (0 / 0 on ROCm); that was not re-checked on CUDA.</p>
 <table>
 <thead>
 <tr>
 <th>Mode</th>
-<th>Max abs prob diff vs bf16</th>
+<th>Max abs prob diff</th>
 <th>Mean abs diff</th>
 <th>Argmax agreement</th>
-<th>Latency vs bf16</th>
+<th>Latency vs reference</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>int8</td>
-<td>pending hardware</td>
-<td>pending</td>
-<td>pending</td>
-<td>pending</td>
+<td>int8, torchao (<code>CLEF_QUANT_BACKEND=torchao</code>)</td>
+<td>0.066</td>
+<td>0.0057</td>
+<td>396 / 399 (99.2%)</td>
+<td>p50 170 ms vs 572 ms</td>
 </tr>
 <tr>
-<td>nf4</td>
-<td>pending hardware</td>
-<td>pending</td>
-<td>pending</td>
-<td>pending</td>
+<td>int8, bitsandbytes (CUDA default)</td>
+<td>0.209</td>
+<td>0.0172</td>
+<td>377 / 399 (94.5%)</td>
+<td>p50 232 ms vs 572 ms</td>
+</tr>
+<tr>
+<td>nf4 (bitsandbytes)</td>
+<td>0.444</td>
+<td>0.0333</td>
+<td>363 / 399 (91.0%)</td>
+<td>p50 153 ms vs 572 ms</td>
 </tr>
 </tbody>
 </table>
-<p>These rows are still pending: the bitsandbytes-on-CUDA path was not measured (no NVIDIA GPU). On the AMD GPU,
-int8 / nf4 (bitsandbytes and torchao) and CPU offload were measured; see the last section.</p>
+<p>The numbers match the ROCm run of the same two backends (torchao 0.0058 / 2 flips, bitsandbytes 0.0175 / 22 flips).
+<code>nf4</code> also matches ROCm (0.0329 / 35 flips) and stays not recommended. Plain bf16 needs a 24 GB card and was not run.</p>
 <h2 id="smaller-memory-options-on-rocm-offload-int8-nf4-2026-10-03">Smaller-memory options on ROCm (offload, int8, nf4), 2026-10-03<a class="headerlink" href="#smaller-memory-options-on-rocm-offload-int8-nf4-2026-10-03" title="Permanent link">&para;</a></h2>
 <p>Setup: RX 7900 XTX 24 GB, ROCm 7.2, torch 2.11.0+rocm7.2, WSL2 (25 GB RAM), 2026-10-03, one configuration per process,
 bf16 measured first and last in the same session (152 / 154 ms p50, 4.72 / 4.67 req/s: 1% drift). Workload: 200
@@ -1880,6 +2068,310 @@ one record per forward (399 questions).</p>
   probability error 0.006 is ~3x the fp16/bf16 noise floor.</li>
 </ul>
 <p>Background: <a href="../memory/">docs/memory.md</a>. Reproduce with <code>bench/memory_bench.py</code>. CUDA and Apple Silicon rows are still pending hardware.</p>
+<h2 id="rtx-4070-ti-12-gb-on-wsl2-cuda-128-2026-10-12">RTX 4070 Ti (12 GB) on WSL2, CUDA 12.8, 2026-10-12<a class="headerlink" href="#rtx-4070-ti-12-gb-on-wsl2-cuda-128-2026-10-12" title="Permanent link">&para;</a></h2>
+<p>Setup: i5-13600K, 32 GB host (WSL2 limited to 21 GB; 15 GB is not enough for the lossless modes), RTX 4070 Ti 12 GB
+shared with the Windows desktop (1.2 GB in use before the model loads), torch 2.11.0+cu128, <code>requirements/cuda.txt</code>
+plus the two dependencies added in this change, clef 3.1.0. Same workload and method as the ROCm section above
+(<code>bench/memory_bench.py</code>, one configuration per process). The parity reference is the lossless offload run, not bf16.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Device GB, peak allocated / reserved</th>
+<th>Peak device used</th>
+<th>Host RSS after load / peak</th>
+<th>single p50 / p95</th>
+<th>req/s c=8</th>
+<th>Max / mean abs prob diff</th>
+<th>Top-1 flips</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>OFFLOAD=cpu</code> cap 10 (reference)</td>
+<td>7.7 / 10.0</td>
+<td>11.4 GB</td>
+<td>12.3 / 17.1 GB</td>
+<td>572 / 631 ms</td>
+<td>2.67</td>
+<td>reference</td>
+<td>-</td>
+</tr>
+<tr>
+<td><code>QUANT=int8 OFFLOAD=cpu</code> (torchao)</td>
+<td>8.1 / 9.8</td>
+<td>11.3 GB</td>
+<td>2.9 / 15.5 GB</td>
+<td>170 / 489 ms</td>
+<td>5.03</td>
+<td>0.066 / 0.0057</td>
+<td>3 / 399</td>
+</tr>
+<tr>
+<td><code>QUANT=int8 OFFLOAD=cpu</code> (bitsandbytes)</td>
+<td>7.9 / 10.9</td>
+<td>12.0 GB</td>
+<td>5.8 / 19.4 GB</td>
+<td>232 / 446 ms</td>
+<td>4.81</td>
+<td>0.209 / 0.0172</td>
+<td>22 / 399</td>
+</tr>
+<tr>
+<td><code>QUANT=nf4 OFFLOAD=cpu</code> (bitsandbytes)</td>
+<td>4.4 / 7.6</td>
+<td>8.9 GB</td>
+<td>5.8 / 19.3 GB</td>
+<td>153 / 445 ms</td>
+<td>5.50</td>
+<td>0.444 / 0.0333</td>
+<td>36 / 399</td>
+</tr>
+</tbody>
+</table>
+<p>HTTP, <code>clef bench --requests 100</code> (500 requests per mode, no errors):</p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>c=1 req/s, p50 / p95</th>
+<th>c=4 req/s, p50</th>
+<th>c=8 req/s, p50</th>
+<th>c=16 req/s, p50 / p95</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>int8 torchao + offload</td>
+<td>6.2, 160 / 164 ms</td>
+<td>8.7, 458 ms</td>
+<td>8.7, 814 ms</td>
+<td>8.7, 1830 / 2084 ms</td>
+</tr>
+<tr>
+<td>int8 bitsandbytes + offload</td>
+<td>4.4, 228 / 259 ms</td>
+<td>8.8, 428 ms</td>
+<td>8.4, 968 ms</td>
+<td>9.4, 1674 / 1897 ms</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>pytest -m gpu tests/integration</code>: 22 passed with torchao. With bitsandbytes, 21 passed and
+  <code>test_batch_matches_single</code> failed (<code>noul</code> 0.7469 batched against 0.7931 single, tolerance 0.02): bitsandbytes int8
+  gives different results for the same record in a batch.</li>
+<li>On CUDA, bitsandbytes is the <code>auto</code> choice for int8, and it is the worse one here: 3x the error, 7x the flipped
+  answers and 36% slower than torchao. See the note in <a href="../memory/">memory.md</a>.</li>
+<li>The lossless modes need more host RAM than a default 15 GB WSL2: <code>OFFLOAD=cpu</code> was refused at caps of 10 and 11 GB
+  ("11.0 GB of weights stay in host memory, 13.0 GB free"), and the cap 10 run peaked at 17.1 GB of RSS while loading.</li>
+<li><code>causal-conv1d</code> 1.7.0, built from source (the <code>cuda-fast</code> extra, ~23 min): <code>clef doctor</code> no longer warns about the fast
+  path. <code>memory_bench</code> int8 torchao + offload went from p50 170.3 / p95 488.7 ms and 5.03 req/s to 167.5 / 481.2 ms and
+  5.11 req/s (about 1.6%, inside the ~5% same-day drift), parity unchanged (mean 0.0054, 2 of 399 flips), and the
+  integration tests still pass (22). <code>clef bench</code>: c=1 6.2 req/s, p50 161 ms; c=16 8.9 req/s.</li>
+<li>Not run: plain bf16 (needs 24 GB) and native Ubuntu.</li>
+</ul>
+<h3 id="clef_pad_multiple-on-cuda-rtx-4070-ti-int8-torchao-offload-2026-10-12"><code>CLEF_PAD_MULTIPLE</code> on CUDA (RTX 4070 Ti, int8 torchao + offload, 2026-10-12)<a class="headerlink" href="#clef_pad_multiple-on-cuda-rtx-4070-ti-int8-torchao-offload-2026-10-12" title="Permanent link">&para;</a></h3>
+<p>The default of 64 was chosen on ROCm. <code>clef bench --requests 100 --concurrency 1,8</code>, ~330-token records, a fresh server
+per run; the default (64) was measured twice and a multiple of 8 three times.</p>
+<table>
+<thead>
+<tr>
+<th><code>CLEF_PAD_MULTIPLE</code></th>
+<th>c=1 req/s, p50</th>
+<th>c=8 req/s, p50</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>8</td>
+<td>6.0, 165.5 / 166.5 / 166.1 ms</td>
+<td>9.5, 880 / 866 / 869 ms</td>
+</tr>
+<tr>
+<td>64 (default)</td>
+<td>5.9, 169.3 / 168.9 ms</td>
+<td>8.5, 942 / 949 ms</td>
+</tr>
+<tr>
+<td>128</td>
+<td>5.9, 169.6 ms</td>
+<td>8.5, 956 ms</td>
+</tr>
+</tbody>
+</table>
+<p>A multiple of 8 was about 12% faster at concurrency 8 and 2% faster at concurrency 1, consistently across the three runs.
+Only one mode and one record length were measured; the bf16 and mixed-length workloads are untested, so the default is unchanged.</p>
+<h2 id="speed-flags-and-tunableop-on-rocm-rx-7900-xtx-2026-10-18">Speed flags and TunableOp on ROCm (RX 7900 XTX, 2026-10-18)<a class="headerlink" href="#speed-flags-and-tunableop-on-rocm-rx-7900-xtx-2026-10-18" title="Permanent link">&para;</a></h2>
+<p><code>bench/perf_check.sh</code>, one session, result cache off, fixed-length records (<code>clef bench</code>). Parity is against the
+flags-off engine (200 records, 10 with images; the flags-off engine run twice differs by 0.0, so the 2e-3 gate is
+the floor). Every top-1 change was a near coin-flip (reference top-2 margin 0.0015-0.017, the lowest 1.5% of the
+399 questions).</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Parity: max |dp| / top-1 flips</th>
+<th>c=1 p50 / p95 ms</th>
+<th>c=1 req/s</th>
+<th>c=8 req/s</th>
+<th>c=16 req/s</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>flags off (base)</td>
+<td>reference</td>
+<td>133.8 / 683.7</td>
+<td>4.5</td>
+<td>8.5</td>
+<td>9.1</td>
+</tr>
+<tr>
+<td><code>CLEF_MASK_FREE=1</code></td>
+<td>0.0235 / 1</td>
+<td>137.5 / 610.0</td>
+<td>4.5</td>
+<td>8.6</td>
+<td>9.0</td>
+</tr>
+<tr>
+<td><code>CLEF_FAST_HEAD=1</code></td>
+<td>0.0038 / 0</td>
+<td>133.3 / 588.8</td>
+<td>4.6</td>
+<td>8.6</td>
+<td>9.5</td>
+</tr>
+<tr>
+<td>both</td>
+<td>0.0235 / 1</td>
+<td>133.8 / 585.6</td>
+<td>4.6</td>
+<td>8.7</td>
+<td>9.5</td>
+</tr>
+<tr>
+<td><code>CLEF_TUNABLEOP=1</code> (tuned)</td>
+<td>0.0219 / 3</td>
+<td>104.2 / 502.5</td>
+<td>5.7</td>
+<td>10.1</td>
+<td>10.8</td>
+</tr>
+<tr>
+<td>both + TunableOp (<strong>the ROCm default</strong>)</td>
+<td>0.0273 / 0</td>
+<td>98.6 / 452.3</td>
+<td>6.0</td>
+<td>11.3</td>
+<td>11.8</td>
+</tr>
+</tbody>
+</table>
+<p>Step 0 (<code>profile_forward.py --batch 8</code>): single record kernel/wall 0.22 with profiler overhead in the wall time (0.78 without it, see above), batch 8 0.68;
+GEMM 81-84% of kernel time. Accuracy on the 47 labelled tickets: 0.872 with TunableOp off and on.</p>
+<p>Mixed-length traffic (<code>clef bench --mixed</code>), TunableOp off vs on: c=1 5.9 vs 7.6 req/s (p50/p95/max 151/241/249 vs
+111/199/204 ms), c=8 6.0 vs 7.9, c=16 6.2 vs 7.9 (+27-32%).</p>
+<p><strong>TunableOp cost and design.</strong> On gfx1100 PyTorch already uses rocBLAS; TunableOp's gain is choosing better rocBLAS
+solutions (1054 of 1181 tuned GEMMs are rocBLAS, 66 hipBLASLt; tuned GEMMs ~40% faster than rocBLAS's own pick).
+Tuning costs a fixed ~4-8 s per GEMM whatever the per-candidate budget (30 ms / 100 runs, 5 ms / 20 and 1 ms / 3
+pick equally fast kernels), so the ~535 GEMMs of the serving grid take about an hour. Tuning on the request instead
+(the old behaviour) gave single requests p50 2.7 s, p95 39 s until every shape had been seen. clef now tunes in the
+background while idle (a step only after 2 s without requests), never on a live request.</p>
+<h2 id="vllm-vs-clef-rx-7900-xtx-2026-10-18">vLLM vs clef (RX 7900 XTX, 2026-10-18)<a class="headerlink" href="#vllm-vs-clef-rx-7900-xtx-2026-10-18" title="Permanent link">&para;</a></h2>
+<p><code>bench/vllm/vllm_check.sh</code>, vLLM nightly image <code>vllm/vllm-openai-rocm:nightly-39983a5e…</code> (clef-flash natively,
+<code>max-num-seqs 8</code>), 100 requests per level, same session. In-container ROCm on WSL needed
+<code>ROCPROFILER_REGISTER_ENABLED=0</code> (the image's torch links rocprofiler-sdk, which is unsupported on WSL).</p>
+<table>
+<thead>
+<tr>
+<th>Line</th>
+<th>c=1 p50 / p95 ms, req/s</th>
+<th>c=8 req/s</th>
+<th>c=16 p50 / p95 ms, req/s</th>
+<th>c=32 req/s</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>clef, flags off</td>
+<td>137 / 145, 7.2</td>
+<td>8.8</td>
+<td>1748 / 1797, 9.0</td>
+<td>9.0</td>
+</tr>
+<tr>
+<td>clef, <code>MASK_FREE</code> + <code>FAST_HEAD</code></td>
+<td>134 / 138, 7.4</td>
+<td>8.8</td>
+<td>1663 / 1684, 9.6</td>
+<td>9.5</td>
+</tr>
+<tr>
+<td>clef, TunableOp</td>
+<td>104 / 108, 9.5</td>
+<td>10.9</td>
+<td>1434 / 1443, 11.1</td>
+<td>10.8</td>
+</tr>
+<tr>
+<td>vLLM</td>
+<td>136 / 157, 7.3</td>
+<td>12.2</td>
+<td>1304 / 1312, 12.2</td>
+<td>12.1</td>
+</tr>
+</tbody>
+</table>
+<p>Parity vLLM vs clef flags off: max |dp| 0.034, 1 flip (near tie). Decision on this card: <strong>not adopted</strong> (1.10x at
+c=16 against a 1.3x bar, 1.45x the p95 at c=1). Re-run the script on other GPUs before deciding there.</p>
+<h2 id="job-feeding-length-sort-tokenize-ahead-and-sharing-the-gpu-rx-7900-xtx-2026-10-18">Job feeding (length sort, tokenize ahead) and sharing the GPU (RX 7900 XTX, 2026-10-18)<a class="headerlink" href="#job-feeding-length-sort-tokenize-ahead-and-sharing-the-gpu-rx-7900-xtx-2026-10-18" title="Permanent link">&para;</a></h2>
+<p><code>bench/sort_check.sh</code> (2000 long-tailed items x 3 for base and sort; quick run 600 x 2 for all four):</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Items/s</th>
+<th>Gain</th>
+<th>Labels</th>
+<th>Interactive p95</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>base</td>
+<td>9.5-9.7</td>
+<td>-</td>
+<td>-</td>
+<td>734-805 ms</td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_SORT_WINDOW=512</code></td>
+<td>10.7-11.0</td>
+<td>+13-14%</td>
+<td>100%</td>
+<td>786 (quick) / 926 (full) ms</td>
+</tr>
+<tr>
+<td><code>CLEF_TOKENIZE_AHEAD=1</code></td>
+<td>9.5</td>
+<td>+0.3%</td>
+<td>100%</td>
+<td>789 ms</td>
+</tr>
+<tr>
+<td>both</td>
+<td>10.6</td>
+<td>+12%</td>
+<td>100%</td>
+<td>1005 ms</td>
+</tr>
+</tbody>
+</table>
+<p>Both stay <strong>off</strong>: the window's gain costs interactive latency. Interactive latency during a 3000-item job
+(unique requests, cache off): idle p50 140 ms; one job 622 ms (before the priority lane) vs 627 ms (with it);
+2 keys x 2 jobs 624 ms, about one batch-8 forward.</p>
 
 
 

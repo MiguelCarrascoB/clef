@@ -708,6 +708,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../memory/" class="md-nav__link">
         
   
@@ -1442,7 +1470,7 @@
 </thead>
 <tbody>
 <tr>
-<td><code>clef serve [--host --port --device --dtype --quant --offload --max-device-memory-gb --model-path --detach --timeout]</code></td>
+<td><code>clef serve [--host --port --device --dtype --quant --offload --max-device-memory-gb --model-path --log-format --drain-s --detach --timeout]</code></td>
 <td>start the server (foreground; <code>--detach</code> writes a pidfile and waits until healthy)</td>
 </tr>
 <tr>
@@ -1462,6 +1490,30 @@
 <td>HTTP load test against the running server</td>
 </tr>
 <tr>
+<td><code>clef tune</code></td>
+<td>TunableOp (ROCm, on by default): tune the GEMM shapes the server ran untuned after warmup; stop the server first (<a href="../performance/#tunableop-rocm">Performance</a>)</td>
+</tr>
+<tr>
+<td><code>clef models [--json]</code></td>
+<td>list the model catalog and installed adapters (<code>*</code> = selected)</td>
+</tr>
+<tr>
+<td><code>clef keys create\|list\|rotate\|revoke\|update\|usage</code></td>
+<td>API keys and principals: scopes, daily quota, rate limit, expiry, rotation with a grace period (<code>--grace 24h</code>), usage per day; writes to the database directly, so it works with the server stopped</td>
+</tr>
+<tr>
+<td><code>clef db current\|upgrade\|copy --from URL --to URL</code></td>
+<td>database schema version, migration, and a copy into an empty database (e.g. SQLite to Postgres); see <a href="../jobs/">Jobs</a></td>
+</tr>
+<tr>
+<td><code>clef backup [--out PATH]</code></td>
+<td>consistent copy of the SQLite database, safe while the server runs (default <code>&lt;state_dir&gt;/backups/</code>)</td>
+</tr>
+<tr>
+<td><code>clef classifiers export [--out DIR] [--name NAME]</code></td>
+<td>write the latest version of each saved classifier as <code>&lt;DIR&gt;/&lt;name&gt;.json</code></td>
+</tr>
+<tr>
 <td><code>clef open</code></td>
 <td>open the console in the browser</td>
 </tr>
@@ -1476,6 +1528,12 @@
 :   The smaller-memory settings, equal to <code>CLEF_QUANT</code>, <code>CLEF_OFFLOAD</code> (<code>none</code> or <code>cpu</code>) and
     <code>CLEF_MAX_DEVICE_MEMORY_GB</code> (<code>0</code> = no cap). For example <code>clef serve --offload cpu --max-device-memory-gb 15</code> on a
     16 GB card. See <a href="../memory/">Smaller GPUs</a>.</p>
+<p><code>--log-format</code>
+:   <code>text</code> (default) or <code>json</code>, equal to <code>CLEF_LOG_FORMAT</code>. json writes one JSON object per log line, including
+    the access log; <code>clef logs</code> prints the file as it is.</p>
+<p><code>--drain-s</code>
+:   Seconds to keep serving after the first SIGTERM / Ctrl-C while <code>/readyz</code> answers 503 <code>draining</code>, equal to
+    <code>CLEF_DRAIN_S</code> (default <code>0</code> = stop at once). A second signal stops at once. Use it behind a load balancer.</p>
 <p><code>--detach</code>
 :   Spawns the server as a detached process, writes a pidfile, logs to the state dir (rotating the previous log), then
     waits for <code>/livez</code> and for <code>/health</code> to report <code>ready</code> or <code>warming</code> (<code>--timeout</code>, default 600 s). On failure it

@@ -708,6 +708,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../memory/" class="md-nav__link">
         
   
@@ -1307,6 +1335,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#keys-in-proxy-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Keys in proxy logs
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1427,6 +1466,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#keys-in-proxy-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Keys in proxy logs
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1465,12 +1515,28 @@ most, trusted callers on a local network.</p>
 <ul>
 <li><strong>Local by default.</strong> <code>CLEF_HOST</code> defaults to <code>127.0.0.1</code>. Binding any other address without API keys logs a loud
   warning at startup.</li>
-<li><strong>API keys.</strong> <code>CLEF_API_KEY</code> or <code>CLEF_API_KEYS</code> (named keys, from a list or a file) protect every <code>/v1/*</code> route and the Hugging Face compatibility routes (<code>/hf/models/*</code>).
-  The OpenAI-compatible routes read the same keys as <code>Authorization: Bearer</code>, so the official SDKs work unchanged. Keys are compared in constant time, never logged, and only the key name is recorded in the request log and stats.
-  Keep the keys file out of version control and readable only by you (<code>chmod 600</code>). The SSE endpoint also accepts
-  <code>?key=</code>, which puts the key in the URL; do not use it across untrusted networks without TLS.</li>
-<li><strong>Rate limit.</strong> <code>CLEF_RATE_LIMIT</code> limits inference requests per minute per key (per IP when auth is off) and returns
-  429 with <code>Retry-After</code>. It is a safety net against accidents and noisy clients, not a DDoS defence.</li>
+<li><strong>API keys.</strong> Two kinds protect every <code>/v1/*</code> route and the Hugging Face compatibility routes (<code>/hf/models/*</code>).
+  <em>Env keys</em> (<code>CLEF_API_KEY</code> or <code>CLEF_API_KEYS</code>, named, from a list or a file) are full admin with no quota: treat
+  them as break-glass credentials, and note that every env-key holder sees every job and may change every saved
+  classifier, so env keys are <strong>not</strong> isolated from each other. A managed key whose name equals an env key's is refused (<code>401</code>, startup warning), so it cannot inherit that env key's ownership; the server is the authority on this, since the env seen by <code>clef keys</code> can differ. <em>Managed keys</em> (<code>clef keys create</code>, the console or
+  <code>/v1/admin/keys</code>) belong to a principal with scopes (<code>classify</code>, <code>jobs</code>, <code>classifiers</code>, <code>ops</code>, <code>admin</code>, <code>urgent</code>; a
+  missing scope is <code>403</code>), an optional daily record quota and rate limit, expiry and revocation. A managed key is
+  <code>clef_live_&lt;id&gt;_&lt;secret&gt;</code>; <strong>only its SHA-256 is stored</strong>, so it cannot be recovered, and the secret is shown once
+  (create / rotate). A rotated principal keeps up to five keys; the old ones expire after a grace period (default 24 h).
+  Daily quotas are counted in the memory of the one server process; they rely on the one-server-per-database rule (a Postgres advisory lock refuses a second server), so do not run two servers on one database. Auth is on when an env key exists or any managed key ever existed, and never turns off by itself (revoking the last
+  managed key does not open the server). <code>/v1/admin/*</code> always needs an <code>admin</code> key, even when auth is off. <code>clef keys</code>
+  works directly on the database (that is how the first admin key is made, with the server stopped, as the OS user
+  who can read the state directory), so access to the state directory is access to key management; protect it like
+  the keys file. The OpenAI-compatible routes read the same keys as <code>Authorization: Bearer</code>, so the official SDKs
+  work unchanged. Keys are compared in constant time (managed keys by their hash), and only the principal name is
+  recorded in the request log and stats. Key changes are audited (who, what, when, IP; never a secret).
+  Keep the keys file out of version control and readable only by you (<code>chmod 600</code>). The SSE endpoint <code>/v1/events</code>
+  also accepts <code>?key=</code> for plain <code>EventSource</code> clients, which puts the key in the URL; do not use it across
+  untrusted networks without TLS. The console sends the <code>X-API-Key</code> header instead.</li>
+<li><strong>Rate limit and quota.</strong> <code>CLEF_RATE_LIMIT</code> limits inference requests per minute per key (per IP when auth is off)
+  and returns 429 with <code>Retry-After</code>; a managed key can have its own limit. A managed key can also have a daily
+  quota of records per UTC day (computed records only; cache hits are free; a job is charged at submit and refunded
+  for what it did not process), refused with 429 and <code>Retry-After</code>. It is a safety net against accidents and noisy clients, not a DDoS defence.</li>
 <li><strong>Rate limit scope.</strong> Besides the classification routes, <code>POST /v1/chat/completions</code>, <code>POST /hf/models/*</code>,
   <code>POST /v1/evaluate</code> and <code>POST /v1/jobs</code> count against the limit. <code>POST /v1/evaluate/metrics</code> runs no inference and is
   not counted.</li>
@@ -1496,16 +1562,29 @@ most, trusted callers on a local network.</p>
   check the timestamp. Use <code>https</code> for anything that leaves your machine. The TLS path has not been tested against a
   real TLS server yet. <code>POST /v1/jobs/{id}/webhook/redeliver</code> resends a failed delivery only to the job's stored URL,
   needs the owner's key, is rate limited and re-runs every check above. Details: <a href="../jobs/#webhooks">docs/jobs.md</a>.</li>
-<li><strong>Jobs: ownership, retention, disk.</strong> With keys configured, a job belongs to the key name that submitted it; other
-  keys get <code>404</code> and do not see it in the list. This is a convenience between cooperating callers, not tenant
-  isolation: there is no admin view, and jobs created while auth was off stay visible to every key. Jobs are stored in
-  <code>jobs.db</code> in the state directory: the <strong>submitted payload of every job (your input texts), its result rows and
-  webhook secrets are on disk in clear text</strong> (HMAC needs the secret; <code>evaluate</code> rows also keep the input and gold
-  label). Finished jobs are deleted <code>CLEF_JOB_TTL_HOURS</code> after they finish (default 168; <code>0</code> keeps them forever) or on <code>DELETE /v1/jobs/{id}</code>.
-  Protect the state directory like the API keys file, and delete <code>jobs.db</code> to drop everything. Job results exported as
+<li><strong>Jobs: ownership, retention, disk.</strong> With keys configured, a job belongs to the principal that submitted it; other
+  non-admin keys get <code>404</code> and do not see it in the list. Admin keys (all env keys included) see every job. This is a
+  convenience between cooperating callers, not tenant isolation, and jobs or classifiers created while auth was off (no owner) become
+  admin-only once auth is on: non-admin keys get <code>404</code> for such a job, <code>403</code> when changing or deleting such a classifier, and may still run it. Jobs are stored in
+  the database (<code>clef.db</code> in the state directory, or <code>CLEF_DATABASE_URL</code>): the <strong>submitted payload of every job (your
+  input texts), its result rows and webhook secrets are stored in clear text</strong> (HMAC needs the secret; <code>evaluate</code> rows
+  also keep the input and gold label). Finished jobs are deleted <code>CLEF_JOB_TTL_HOURS</code> after they finish (default 168;
+  <code>0</code> keeps them forever) or on <code>DELETE /v1/jobs/{id}</code>. Protect the state directory like the API keys file, and delete
+  <code>clef.db</code> (with the server stopped) to drop everything.</li>
+<li><strong>Database files and URLs.</strong> A new <code>clef.db</code> is created readable by its owner only (<code>0600</code> on POSIX), and so are
+  the copies <code>clef backup</code> writes to <code>&lt;state dir&gt;/backups/</code>; a <code>clef.db</code> copied from a v3.1 <code>jobs.db</code> is <code>0600</code> too,
+  but the original kept as <code>jobs.db.migrated</code> keeps its old permissions (delete it once you are happy). With
+  Postgres, everyone who can read that database reads the same payloads and secrets: give clef its own database and role, and use TLS (<code>?sslmode=require</code>) to a remote server.
+  <code>CLEF_DATABASE_URL</code> carries the password: clef never logs it, and <code>/health</code>, <code>clef doctor</code> and the <code>clef db</code>
+  commands show it as <code>***</code>. Prefer a systemd <code>EnvironmentFile</code> or a compose <code>.env</code> with tight permissions over the
+  command line. The audit log (<code>audit_log</code>: saved-classifier changes, key changes, job cancel / delete; <code>GET /v1/admin/audit</code>) records who,
+  what and when, never a secret or request content; it has no purge. Job results exported as
   CSV neutralise cells that start with <code>=</code>, <code>+</code>, <code>-</code> or <code>@</code>, so opening them in a spreadsheet does not run formulas.</li>
 <li><strong>No secrets in logs.</strong> Request state (the text you classify) is not logged unless <code>CLEF_LOG_STATE=1</code>, but jobs do
-  store it on disk (see above). Keys are never logged. Saved classifier names are validated and never used to build paths from raw input.</li>
+  store it on disk (see above). clef's own logs never contain a key: headers are not logged, and the values of the
+  <code>key</code>, <code>api_key</code> and <code>token</code> query parameters are replaced with <code>REDACTED</code> in the uvicorn access log (also with
+  <code>CLEF_LOG_FORMAT=json</code>). A reverse proxy in front of clef keeps its own logs; see
+  <a href="#keys-in-proxy-logs">Keys in proxy logs</a>. Saved classifier names are validated and never used to build paths from raw input.</li>
 <li><strong>Console and vendored code.</strong> The console is a zero-build app served by the server with no runtime CDN calls. Its
   three vendored libraries (Preact, htm, uPlot) and their licences are listed in
   <a href="https://github.com/MiguelCarrascoB/clef/blob/main/src/clef_server/static/vendor/THIRD_PARTY_NOTICES.md"><code>THIRD_PARTY_NOTICES.md</code></a>.</li>
@@ -1514,7 +1593,34 @@ most, trusted callers on a local network.</p>
   <code>requirements/</code>.</li>
 </ul>
 <p>Out of scope / not provided: TLS (use a reverse proxy, see <a href="../remote-access/">docs/remote-access.md</a>), per-user
-authorization (all keys have the same access to the model; job ownership only scopes job visibility), multi-tenant isolation, protection against a malicious model directory.</p>
+authorization beyond the scopes above (all keys that may run the model have the same access to it; job and saved
+classifier ownership only scope visibility and changes), multi-tenant isolation, protection against a malicious model directory.</p>
+<h2 id="keys-in-proxy-logs">Keys in proxy logs<a class="headerlink" href="#keys-in-proxy-logs" title="Permanent link">&para;</a></h2>
+<p>clef masks keys in its own logs, but a reverse proxy writes its own access log. Keep the key out of it too: drop the
+<code>X-API-Key</code> and <code>Authorization</code> headers and mask (or drop) the query string.</p>
+<p><strong>Caddy</strong> logs every request header when a <code>log</code> directive is on, and redacts only <code>Authorization</code>, <code>Cookie</code> and
+<code>Proxy-Authorization</code> by default, so <code>X-Api-Key</code> would be written in clear text:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>clef.example.com<span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">    </span><span class="k">log</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">        </span>format<span class="w"> </span>filter<span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">            </span>request&gt;uri<span class="w"> </span>query<span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">                </span>replace<span class="w"> </span>key<span class="w"> </span>REDACTED
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">                </span>replace<span class="w"> </span>api_key<span class="w"> </span>REDACTED
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">                </span>replace<span class="w"> </span>token<span class="w"> </span>REDACTED
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">            </span><span class="p">}</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">            </span>request&gt;headers&gt;X-Api-Key<span class="w"> </span>delete
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">        </span><span class="p">}</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">    </span><span class="k">reverse_proxy</span><span class="w"> </span>127.0.0.1:8910
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="p">}</span>
+</code></pre></div>
+<p><strong>nginx</strong> logs no request headers by default (do not add <code>$http_x_api_key</code> or <code>$http_authorization</code> to a
+<code>log_format</code>), but the default <code>combined</code> format logs <code>$request</code>, which includes the query. Log <code>$uri</code> (the path
+without the query) instead:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">log_format</span><span class="w"> </span><span class="s">clef</span><span class="w"> </span><span class="s">'</span><span class="nv">$remote_addr</span><span class="w"> </span><span class="s">-</span><span class="w"> </span><span class="nv">$remote_user</span><span class="w"> </span><span class="s">[</span><span class="nv">$time_local]</span><span class="w"> </span><span class="s">"</span><span class="nv">$request_method</span><span class="w"> </span><span class="nv">$uri</span><span class="w"> </span><span class="nv">$server_protocol"</span><span class="w"> </span><span class="s">'</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">                </span><span class="s">'</span><span class="nv">$status</span><span class="w"> </span><span class="nv">$body_bytes_sent</span><span class="w"> </span><span class="s">"</span><span class="nv">$http_referer"</span><span class="w"> </span><span class="s">"</span><span class="nv">$http_user_agent"'</span><span class="p">;</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="k">access_log</span><span class="w"> </span><span class="s">/var/log/nginx/clef.access.log</span><span class="w"> </span><span class="s">clef</span><span class="p">;</span>
+</code></pre></div>
 
 
 

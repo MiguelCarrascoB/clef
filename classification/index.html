@@ -848,6 +848,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../memory/" class="md-nav__link">
         
   
@@ -1664,9 +1692,12 @@ probabilities.</p>
 </code></pre></div>
 <h2 id="saved-classifiers">Saved classifiers<a class="headerlink" href="#saved-classifiers" title="Permanent link">&para;</a></h2>
 <p>Store the labels and instructions once; callers send only the input. Names: lowercase letters, digits, <code>-</code> and <code>_</code>,
-at most 64 characters, starting with a letter or digit. Definitions are JSON files under the state directory
-(<code>&lt;CLEF_STATE_DIR&gt;/classifiers/</code>), at most <code>CLEF_MAX_CLASSIFIERS</code> (1000).</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># create or overwrite</span>
+at most 64 characters, starting with a letter or digit. Definitions live in the database (<code>clef.db</code> in the state
+directory, or Postgres with <code>CLEF_DATABASE_URL</code>; see <a href="../jobs/#storage">Storage</a>), at most <code>CLEF_MAX_CLASSIFIERS</code>
+(1000). Every <code>PUT</code> that changes a definition adds a version (<code>GET /v1/classifiers/{name}/versions</code>; runs accept
+<code>"version"</code>, default the latest), and the key of the first <code>PUT</code> owns the classifier. <code>clef classifiers export</code>
+writes them back out as JSON files.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># create, or add a version</span>
 <a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>curl<span class="w"> </span>-s<span class="w"> </span>-X<span class="w"> </span>PUT<span class="w"> </span>http://127.0.0.1:8910/v1/classifiers/support-triage<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span>-d<span class="w"> </span><span class="s1">'{</span>
 <a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="s1">  "kind": "classify",</span>
 <a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="s1">  "labels": {"billing": "Payments or invoices", "technical": "Bugs or outages"},</span>

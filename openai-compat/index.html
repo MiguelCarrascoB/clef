@@ -800,6 +800,56 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#files-and-batches-the-openai-batch-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files and batches (the OpenAI Batch API)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Files and batches (the OpenAI Batch API)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-input-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The input file
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#batches" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batches
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#hugging-face-zero-shot-classification" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -890,6 +940,34 @@
     
   
     Jobs & webhooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
   
 
     
@@ -1645,6 +1723,56 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#files-and-batches-the-openai-batch-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files and batches (the OpenAI Batch API)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Files and batches (the OpenAI Batch API)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-input-file" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The input file
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Files
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#batches" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batches
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#hugging-face-zero-shot-classification" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1711,7 +1839,8 @@
 <h1 id="openai-and-hugging-face-compatibility">OpenAI and Hugging Face compatibility<a class="headerlink" href="#openai-and-hugging-face-compatibility" title="Permanent link">&para;</a></h1>
 <p>clef speaks two familiar dialects so existing tools can use it without code changes:</p>
 <ul>
-<li><strong>OpenAI</strong>: <code>GET /v1/models</code>, <code>POST /v1/chat/completions</code> (structured outputs and forced function calls).</li>
+<li><strong>OpenAI</strong>: <code>GET /v1/models</code>, <code>POST /v1/chat/completions</code> (structured outputs and forced function calls),
+  and <code>/v1/files</code> + <code>/v1/batches</code> (the <a href="#files-and-batches-the-openai-batch-api">Batch API</a>).</li>
 <li><strong>Hugging Face Inference API</strong>: zero-shot classification at <code>POST /hf/models/{model_id}</code>.</li>
 </ul>
 <p>Both sit on the same engine and the same <code>infer</code> path as <code>/v1/systemone</code>: same API keys, same rate limit, same
@@ -1772,8 +1901,10 @@ explaining this instead of a made-up reply.</p>
 <a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">                                   </span><span class="nt">"probabilities"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"true"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.97</span><span class="p">,</span><span class="w"> </span><span class="nt">"false"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.03</span><span class="p">}}},</span>
 <a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">          </span><span class="nt">"timing"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"forward_ms"</span><span class="p">:</span><span class="w"> </span><span class="mf">141.2</span><span class="p">,</span><span class="w"> </span><span class="nt">"total_ms"</span><span class="p">:</span><span class="w"> </span><span class="mf">150.3</span><span class="p">},</span><span class="w"> </span><span class="nt">"request_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">}}</span>
 </code></pre></div>
-<p>LangChain and similar frameworks only need the base URL and a structured-output call (this uses the same wire
-format the OpenAI SDK sends; it was verified with the SDK, not with LangChain itself):</p>
+<p>LangChain and similar frameworks only need the base URL and a structured-output call. Verified with
+<code>langchain-openai</code> 1.7.1 and <code>langchain-core</code> 1.6.10 (2026-10-12) against a live server: <code>with_structured_output(Triage)</code>
+(the default <code>json_schema</code> method) and <code>method="function_calling"</code> both return the right object. <code>method="json_mode"</code> and
+a plain <code>invoke()</code> carry no schema, so they get the <code>400 missing_schema</code> described above:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">langchain_openai</span><span class="w"> </span><span class="kn">import</span> <span class="n">ChatOpenAI</span>
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">llm</span> <span class="o">=</span> <span class="n">ChatOpenAI</span><span class="p">(</span><span class="n">base_url</span><span class="o">=</span><span class="s2">"http://127.0.0.1:8910/v1"</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="s2">"not-needed"</span><span class="p">,</span> <span class="n">model</span><span class="o">=</span><span class="s2">"clef-flash"</span><span class="p">)</span>
@@ -1983,16 +2114,144 @@ logged at DEBUG. Clients that send a fixed model name keep working, and you can 
 (<code>code: invalid_api_key</code>), <code>404</code> unknown model, <code>413</code> too large, <code>429</code> rate limited (with <code>Retry-After</code>,
 <code>type: rate_limit_error</code>), <code>503</code> model loading or GPU out of memory. The request id is in the <code>X-Request-ID</code> header.
 The native <code>/v1/*</code> routes keep <code>{detail, request_id}</code>.</p>
+<h2 id="files-and-batches-the-openai-batch-api">Files and batches (the OpenAI Batch API)<a class="headerlink" href="#files-and-batches-the-openai-batch-api" title="Permanent link">&para;</a></h2>
+<p><code>/v1/files</code> and <code>/v1/batches</code> follow OpenAI's Batch API, so the <code>openai</code> SDK's <code>client.files</code> and <code>client.batches</code>
+work unchanged. A batch is one <a href="../jobs/">async job</a> of kind <code>batch</code> (it shows up in <code>GET /v1/jobs?kind=batch</code>), so it
+shares the job queue, the daily quota, resume after a restart and the retention timer. All routes need the <code>jobs</code>
+scope and are private to the key that created them (an admin sees every file and batch). Errors use the OpenAI
+shape, <code>{"error": {"message", "type", "param", "code"}}</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">openai</span><span class="w"> </span><span class="kn">import</span> <span class="n">OpenAI</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">client</span> <span class="o">=</span> <span class="n">OpenAI</span><span class="p">(</span><span class="n">base_url</span><span class="o">=</span><span class="s2">"http://localhost:8000/v1"</span><span class="p">,</span> <span class="n">api_key</span><span class="o">=</span><span class="s2">"..."</span><span class="p">)</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">f</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">files</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">file</span><span class="o">=</span><span class="nb">open</span><span class="p">(</span><span class="s2">"requests.jsonl"</span><span class="p">,</span> <span class="s2">"rb"</span><span class="p">),</span> <span class="n">purpose</span><span class="o">=</span><span class="s2">"batch"</span><span class="p">)</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="n">batch</span> <span class="o">=</span> <span class="n">client</span><span class="o">.</span><span class="n">batches</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="n">input_file_id</span><span class="o">=</span><span class="n">f</span><span class="o">.</span><span class="n">id</span><span class="p">,</span> <span class="n">endpoint</span><span class="o">=</span><span class="s2">"/v1/chat/completions"</span><span class="p">,</span> <span class="n">completion_window</span><span class="o">=</span><span class="s2">"24h"</span><span class="p">)</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="c1"># poll client.batches.retrieve(batch.id) until status is completed, then</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="nb">print</span><span class="p">(</span><span class="n">client</span><span class="o">.</span><span class="n">files</span><span class="o">.</span><span class="n">content</span><span class="p">(</span><span class="n">batch</span><span class="o">.</span><span class="n">output_file_id</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">)</span>
+</code></pre></div>
+<h3 id="the-input-file">The input file<a class="headerlink" href="#the-input-file" title="Permanent link">&para;</a></h3>
+<p>One JSON object per line (blank lines are ignored), at most <code>min(CLEF_MAX_BATCH_LINES, CLEF_MAX_JOB_ITEMS)</code> lines
+(50,000 by default), up to <code>CLEF_MAX_FILE_MB</code> (200):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="p">{</span><span class="nt">"custom_id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ticket-1"</span><span class="p">,</span><span class="w"> </span><span class="nt">"method"</span><span class="p">:</span><span class="w"> </span><span class="s2">"POST"</span><span class="p">,</span><span class="w"> </span><span class="nt">"url"</span><span class="p">:</span><span class="w"> </span><span class="s2">"/v1/chat/completions"</span><span class="p">,</span><span class="w"> </span><span class="nt">"body"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"messages"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">],</span><span class="w"> </span><span class="nt">"response_format"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}}}</span>
+</code></pre></div>
+<p><code>custom_id</code> is unique, <code>method</code> is <code>POST</code> and <code>url</code> equals the batch's <code>endpoint</code>. The supported endpoints are
+<code>/v1/chat/completions</code>, <code>/v1/classify</code> and <code>/v1/score</code>; each <code>body</code> is exactly what that route takes, with the same
+validation, the same limits and the same probabilities. (<code>stream: true</code> is not allowed in a batch.) The SDK does not
+check <code>endpoint</code>; clef answers <code>400</code> with <code>param: "endpoint"</code> for any other value.</p>
+<h3 id="files">Files<a class="headerlink" href="#files" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /v1/files</code></td>
+<td>multipart: <code>file</code> (<code>.jsonl</code>), <code>purpose=batch</code>, optional <code>expires_after[anchor]=created_at</code> and <code>expires_after[seconds]</code> (3600..2592000). Streamed to disk; the body limit of this route alone is <code>CLEF_MAX_FILE_MB</code></td>
+</tr>
+<tr>
+<td><code>GET /v1/files</code></td>
+<td><code>after</code>, <code>limit</code> (default 20), <code>order</code> (<code>desc</code>), <code>purpose</code>; cursor list</td>
+</tr>
+<tr>
+<td><code>GET /v1/files/{id}</code>, <code>GET /v1/files/{id}/content</code></td>
+<td>the file object; the JSONL, streamed</td>
+</tr>
+<tr>
+<td><code>DELETE /v1/files/{id}</code></td>
+<td>uploaded files only. A batch's output / error file is deleted with its job (<code>DELETE /v1/jobs/{job_id}</code>); an input file an unfinished batch still reads is <code>409</code></td>
+</tr>
+</tbody>
+</table>
+<p>Uploads expire after <code>expires_after</code> or <code>CLEF_FILE_TTL_HOURS</code> (30 days). The <strong>output and error files are not
+copies</strong>: they are streamed from the job's result rows, so they cost no disk and live as long as the job
+(<code>CLEF_JOB_TTL_HOURS</code>).</p>
+<h3 id="batches">Batches<a class="headerlink" href="#batches" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST /v1/batches</code></td>
+<td><code>input_file_id</code>, <code>endpoint</code>, <code>completion_window</code> (<code>"24h"</code>), optional <code>metadata</code> (&lt;= 16 string pairs; keys &lt;= 64, values &lt;= 512 characters) and <code>extra_body={"clef": {...}}</code></td>
+</tr>
+<tr>
+<td><code>GET /v1/batches/{id}</code>, <code>GET /v1/batches</code></td>
+<td>the batch; newest first, <code>after</code>, <code>limit</code> 1..100</td>
+</tr>
+<tr>
+<td><code>POST /v1/batches/{id}/cancel</code></td>
+<td><code>cancelling</code> while a running chunk finishes, then <code>cancelled</code>; a queued batch is <code>cancelled</code> at once. <code>409</code> when it already ended</td>
+</tr>
+</tbody>
+</table>
+<p><code>status</code> is <code>in_progress</code>, <code>cancelling</code>, <code>completed</code>, <code>failed</code>, <code>expired</code> or <code>cancelled</code>, with OpenAI's timestamps and
+<code>request_counts</code> (<code>completed</code> = succeeded, <code>failed</code> = non-2xx lines). <code>usage.input_tokens</code> is the sum over the lines.
+<code>expires_at</code> is 24 hours after the batch is eligible to run: its creation time, or the next time its window opens when
+<code>clef.schedule</code> (or <code>CLEF_JOB_WINDOW</code>) holds it back. A batch not finished by then ends <code>expired</code>.</p>
+<ul>
+<li>A file that is <strong>structurally</strong> wrong (a line that is not JSON, a duplicate or missing <code>custom_id</code>, a wrong <code>url</code>
+  or <code>method</code>, too many lines, an empty file) makes <code>POST /v1/batches</code> return a batch with status <code>failed</code> and
+  <code>errors.data = [{code, line, message, param}]</code> (at most 100). No job runs and nothing is charged.</li>
+<li>A <strong>request</strong> that cannot run (a schema with no decisions, <code>n &gt; 1</code>, an unknown <code>model</code>, a label set over the
+  limit) is a line of the error file with its OpenAI error body and status code; the batch still ends <code>completed</code>,
+  even when every line failed.</li>
+<li><code>output_file_id</code> appears once the batch ended with at least one success, <code>error_file_id</code> when a line failed or
+  never ran. Output is in input order: <code>{"id": "batch_req_...", "custom_id", "response": {"status_code",
+  "request_id", "body"}, "error": null}</code>. For a cancelled, expired or failed batch the error file also names, with
+  <code>{"response": null, "error": {"code": "batch_cancelled" | "batch_expired" | "batch_failed", "message"}}</code>, every
+  line that never ran; those custom ids are read back from the input file, which is why it cannot be deleted while
+  the batch is unfinished.</li>
+<li>A batch that stops for a systemic reason (the engine went away, the circuit breaker) is <code>failed</code> with
+  <code>errors.data = [{"code": "server_error", ...}]</code>; the rows it did produce are still served.</li>
+</ul>
+<p>The <code>clef</code> extension, <code>extra_body={"clef": {"priority": "low", "urgent": false, "schedule": {"window": "20:00-06:00",
+"tz": "Europe/Madrid"}}}</code> (<code>priority</code> <code>low|normal|high</code>), is the <a href="../jobs/#scheduling">job scheduler</a>'s: the batch is
+queued, ordered and windowed like any job. <code>urgent</code> needs the <code>urgent</code> scope (<code>403</code> otherwise). The daily quota of the key is reserved when the batch is created (<code>429</code>
+<code>insufficient_quota</code> when it does not fit; a failed or cancelled batch gets the unprocessed part back).</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CLEF_MAX_FILE_MB</code></td>
+<td><code>200</code></td>
+<td>body limit of <code>POST /v1/files</code> only (every other route keeps <code>CLEF_MAX_BODY_MB</code>)</td>
+</tr>
+<tr>
+<td><code>CLEF_MAX_BATCH_LINES</code></td>
+<td><code>50000</code></td>
+<td>requests per batch (also capped by <code>CLEF_MAX_JOB_ITEMS</code>)</td>
+</tr>
+<tr>
+<td><code>CLEF_FILE_TTL_HOURS</code></td>
+<td><code>720</code></td>
+<td>how long an uploaded file is kept unless it has <code>expires_after</code>; <code>0</code> = forever</td>
+</tr>
+</tbody>
+</table>
+<p>Not supported: other <code>purpose</code> values (<code>assistants</code>, <code>fine-tune</code>...), other endpoints, <code>completion_window</code> other than
+<code>24h</code>, <code>output_expires_after</code> (ignored), <code>/v1/batches</code> from a file that another key uploaded (<code>404</code>, admins too).</p>
 <h2 id="hugging-face-zero-shot-classification">Hugging Face zero-shot classification<a class="headerlink" href="#hugging-face-zero-shot-classification" title="Permanent link">&para;</a></h2>
 <p><code>POST /hf/models/{model_id}</code> (also <code>POST /models/{model_id}</code>) takes the Inference API body. <code>model_id</code> is ignored: any value, even an
 unknown one, is served by <code>clef-flash</code> (no error, no warning), and it may contain slashes (<code>facebook/bart-large-mnli</code>).</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8910/hf/models/clef-flash<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span>-d<span class="w"> </span><span class="s1">'{</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="s1">  "inputs": "Checkout is down, orders blocked",</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="s1">  "parameters": {"candidate_labels": ["billing", "technical", "account"], "multi_label": false}</span>
-<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="s1">}'</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8910/hf/models/clef-flash<span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span>-d<span class="w"> </span><span class="s1">'{</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="s1">  "inputs": "Checkout is down, orders blocked",</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="s1">  "parameters": {"candidate_labels": ["billing", "technical", "account"], "multi_label": false}</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="s1">}'</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="p">{</span><span class="nt">"sequence"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Checkout is down, orders blocked"</span><span class="p">,</span>
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w"> </span><span class="nt">"labels"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"technical"</span><span class="p">,</span><span class="w"> </span><span class="s2">"billing"</span><span class="p">,</span><span class="w"> </span><span class="s2">"account"</span><span class="p">],</span><span class="w"> </span><span class="nt">"scores"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mf">0.94</span><span class="p">,</span><span class="w"> </span><span class="mf">0.04</span><span class="p">,</span><span class="w"> </span><span class="mf">0.02</span><span class="p">]}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="p">{</span><span class="nt">"sequence"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Checkout is down, orders blocked"</span><span class="p">,</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w"> </span><span class="nt">"labels"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"technical"</span><span class="p">,</span><span class="w"> </span><span class="s2">"billing"</span><span class="p">,</span><span class="w"> </span><span class="s2">"account"</span><span class="p">],</span><span class="w"> </span><span class="nt">"scores"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mf">0.94</span><span class="p">,</span><span class="w"> </span><span class="mf">0.04</span><span class="p">,</span><span class="w"> </span><span class="mf">0.02</span><span class="p">]}</span>
 </code></pre></div>
 <table>
 <thead>
@@ -2027,13 +2286,13 @@ unknown one, is served by <code>clef-flash</code> (no error, no warning), and it
 <p>Labels and scores are sorted by score, best first. Errors are <code>{"error": "message"}</code> with the usual status codes.</p>
 <h3 id="using-huggingface_hub">Using <code>huggingface_hub</code><a class="headerlink" href="#using-huggingface_hub" title="Permanent link">&para;</a></h3>
 <p><code>InferenceClient</code> posts to the model URL as given, so pass the full route as the model:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">huggingface_hub</span><span class="w"> </span><span class="kn">import</span> <span class="n">InferenceClient</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
-<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">client</span> <span class="o">=</span> <span class="n">InferenceClient</span><span class="p">(</span>
-<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">"http://127.0.0.1:8910/hf/models/clef-flash"</span><span class="p">,</span> <span class="n">token</span><span class="o">=</span><span class="s2">"your CLEF_API_KEY or None"</span>
-<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="p">)</span>
-<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">client</span><span class="o">.</span><span class="n">zero_shot_classification</span><span class="p">(</span><span class="s2">"Checkout is down"</span><span class="p">,</span> <span class="p">[</span><span class="s2">"billing"</span><span class="p">,</span> <span class="s2">"technical"</span><span class="p">,</span> <span class="s2">"account"</span><span class="p">]):</span>
-<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">item</span><span class="o">.</span><span class="n">label</span><span class="p">,</span> <span class="n">item</span><span class="o">.</span><span class="n">score</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">huggingface_hub</span><span class="w"> </span><span class="kn">import</span> <span class="n">InferenceClient</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="n">client</span> <span class="o">=</span> <span class="n">InferenceClient</span><span class="p">(</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="n">model</span><span class="o">=</span><span class="s2">"http://127.0.0.1:8910/hf/models/clef-flash"</span><span class="p">,</span> <span class="n">token</span><span class="o">=</span><span class="s2">"your CLEF_API_KEY or None"</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="p">)</span>
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">client</span><span class="o">.</span><span class="n">zero_shot_classification</span><span class="p">(</span><span class="s2">"Checkout is down"</span><span class="p">,</span> <span class="p">[</span><span class="s2">"billing"</span><span class="p">,</span> <span class="s2">"technical"</span><span class="p">,</span> <span class="s2">"account"</span><span class="p">]):</span>
+<a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">item</span><span class="o">.</span><span class="n">label</span><span class="p">,</span> <span class="n">item</span><span class="o">.</span><span class="n">score</span><span class="p">)</span>
 </code></pre></div>
 <div class="admonition note">
 <p class="admonition-title">Two response shapes</p>

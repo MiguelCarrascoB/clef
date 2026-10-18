@@ -804,6 +804,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../memory/" class="md-nav__link">
         
   
@@ -1583,7 +1611,7 @@ on Mac, so the (fast enough) torch fallback is expected. <strong>Untested on har
 <p>Requires a current NVIDIA driver (<code>nvidia-smi</code> works). No CUDA toolkit is needed for the default install.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/MiguelCarrascoB/clef<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>clef
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>uv<span class="w"> </span>venv<span class="w"> </span>--python<span class="w"> </span><span class="m">3</span>.12<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements/cuda.txt
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements/cuda.txt<span class="w"> </span>--index-strategy<span class="w"> </span>unsafe-best-match
 <a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">".[server]"</span>
 <a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>clef<span class="w"> </span>doctor
 <a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>clef<span class="w"> </span>download
@@ -1618,7 +1646,9 @@ keep-alive wrapper. <strong>Untested on hardware.</strong></p>
 </code></pre></div>
 <p>The compose file mounts a volume for the weights; download them once with
 <code>docker compose --profile cuda run --rm clef-cuda clef download --yes</code> (or <code>--profile rocm ... clef-rocm</code>).
-Ports are published on <code>127.0.0.1</code>; for LAN access set <code>CLEF_BIND=0.0.0.0</code> together with <code>CLEF_API_KEYS</code>.</p>
+Ports are published on <code>127.0.0.1</code>; for LAN access set <code>CLEF_BIND=0.0.0.0</code> together with <code>CLEF_API_KEYS</code>.
+The healthcheck calls <code>/readyz</code>, so <code>docker ps</code> shows the container as <code>healthy</code> only once the model has loaded
+(<code>starting</code> for up to 10 minutes while the weights load, <code>unhealthy</code> if the load failed).</p>
 <div class="admonition warning">
 <p class="admonition-title">Warning</p>
 <p>GPU containers on Docker Desktop for Windows/macOS are not supported. Use the WSL2 or native paths.</p>

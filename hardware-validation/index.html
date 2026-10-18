@@ -708,6 +708,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../memory/" class="md-nav__link">
         
   
@@ -1622,7 +1650,8 @@ be gone once <code>flash-linear-attention</code> and <code>causal-conv1d</code> 
 <a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>clef<span class="w"> </span>stop
 <a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>python<span class="w"> </span>bench/parity.py<span class="w">               </span><span class="c1"># dtype / quantization parity vs bf16 (needs the GPU, server stopped)</span>
 </code></pre></div>
-<p>Smaller-memory modes (<a href="../memory/">memory.md</a>): run <code>bench/memory_bench.py</code> for bf16, <code>--offload cpu --max-device-gb 15</code>
+<p>On a card too small for bf16, use the lossless offload run as the parity reference (<code>--offload cpu --max-device-gb &lt;N-2&gt;
+--save-reference ...</code>); the results table must say so. Smaller-memory modes (<a href="../memory/">memory.md</a>): run <code>bench/memory_bench.py</code> for bf16, <code>--offload cpu --max-device-gb 15</code>
 (16 GB cards), <code>--quant int8 --offload cpu</code> (12 GB cards) and, on NVIDIA, <code>--quant int8 --quant-backend bnb</code> and
 <code>--quant nf4</code> (<code>pip install bitsandbytes</code>). Save the bf16 run with <code>--save-reference</code> and pass it to the others with
 <code>--reference</code> (commands in memory.md), then paste the JSON results.</p>

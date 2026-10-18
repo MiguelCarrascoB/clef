@@ -708,6 +708,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../memory/" class="md-nav__link">
         
   
@@ -992,6 +1020,39 @@
     <span class="md-ellipsis">
       
         Observability
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#router-and-review" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Router and review
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#env-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        .env files
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example
       
     </span>
   </a>
@@ -1493,6 +1554,39 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#router-and-review" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Router and review
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#env-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        .env files
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1520,7 +1614,7 @@
 
 <h1 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h1>
 <p>All settings are <code>CLEF_*</code> environment variables; the flags of <code>clef serve</code> set the same variables. Values are read
-once at startup, so restart the server after changing them. The tables below are checked against <code>config.py</code>; the
+once at startup, so restart the server after changing them. They can also live in a <a href="#env-files"><code>.env</code> file</a>. The tables below are checked against <code>config.py</code>; the
 same list with the engine and padding knobs is in <a href="../ARCHITECTURE/#configuration-configpy">Architecture</a>.</p>
 <h2 id="model-and-device">Model and device<a class="headerlink" href="#model-and-device" title="Permanent link">&para;</a></h2>
 <table>
@@ -1611,9 +1705,14 @@ same list with the engine and padding knobs is in <a href="../ARCHITECTURE/#conf
 <td>comma-separated allowed origins (<code>*</code> allowed); empty = CORS off</td>
 </tr>
 <tr>
+<td><code>CLEF_DRAIN_S</code></td>
+<td><code>0</code></td>
+<td>seconds to keep serving after the first SIGTERM / Ctrl-C while <code>/readyz</code> answers 503 <code>draining</code>, so a load balancer stops routing first; a second signal stops at once. <code>0</code> = stop at once. Behind a load balancer use e.g. <code>5</code> (below Docker's 10 s stop timeout). <code>--drain-s</code></td>
+</tr>
+<tr>
 <td><code>CLEF_STATE_DIR</code></td>
 <td>per OS</td>
-<td>logs, pidfile, saved classifiers and the jobs database (<code>jobs.db</code>)</td>
+<td>logs, pidfile and the database <code>clef.db</code> (jobs, saved classifiers, audit log; unless <code>CLEF_DATABASE_URL</code> is set)</td>
 </tr>
 </tbody>
 </table>
@@ -1648,6 +1747,31 @@ same list with the engine and padding knobs is in <a href="../ARCHITECTURE/#conf
 <td>request body limit</td>
 </tr>
 <tr>
+<td><code>CLEF_TUNABLEOP</code></td>
+<td>on (ROCm)</td>
+<td>TunableOp GEMM tuning on ROCm builds of PyTorch: tuned in the background while idle, never on a live request; <code>0</code> turns it off. <code>CLEF_TUNABLEOP_ONLINE=1</code> tunes on the request instead, <code>CLEF_TUNABLEOP_IDLE_S</code> (2) is the quiet time before a tune step; see <a href="../performance/#tunableop-rocm">Performance</a></td>
+</tr>
+<tr>
+<td><code>CLEF_MASK_FREE</code></td>
+<td>auto</td>
+<td>on with the ROCm backend, off elsewhere: text-only batches call the backbone with <code>attention_mask=None</code> and the head uses CPU lengths (no device sync). <code>0</code> / <code>1</code> forces it; measure other GPUs with <code>bench/perf_check.sh</code>; see <a href="../performance/">Performance</a></td>
+</tr>
+<tr>
+<td><code>CLEF_FAST_HEAD</code></td>
+<td>auto</td>
+<td>on with the ROCm backend, off elsewhere: the batch-vectorised, sync-free joint head (<code>fast_joint_head</code>) instead of the release's per-record loops. Same maths; <code>0</code> / <code>1</code> forces it; see <a href="../performance/">Performance</a></td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_SORT_WINDOW</code></td>
+<td><code>0</code></td>
+<td><code>N &gt; 0</code>: a job sorts N items at a time by token length (256-1024 recommended) before sending them to the engine; results are persisted per window in input order. Off by default: on the 7900 XTX it gave +13-14% job throughput but a worse interactive p95; see <a href="../performance/">Performance</a></td>
+</tr>
+<tr>
+<td><code>CLEF_TOKENIZE_AHEAD</code></td>
+<td><code>0</code></td>
+<td><code>1</code>: the next window of a job is tokenized on CPU threads while the current one is on the GPU. Same opt-in rule as the sort</td>
+</tr>
+<tr>
 <td><code>CLEF_MAX_TOKENS</code></td>
 <td><code>16384</code></td>
 <td>input tokens per record</td>
@@ -1656,6 +1780,16 @@ same list with the engine and padding knobs is in <a href="../ARCHITECTURE/#conf
 <td><code>CLEF_MAX_EVAL_ROWS</code></td>
 <td><code>500</code></td>
 <td>rows per <code>POST /v1/evaluate</code> request</td>
+</tr>
+<tr>
+<td><code>CLEF_CACHE_SIZE</code></td>
+<td><code>10000</code></td>
+<td>result-cache entries (in-memory LRU, lost on restart); <code>0</code> = off. Also bounded by <code>CLEF_CACHE_MB</code>. Interactive calls, jobs and evaluate share it; media records are never cached; send <code>Cache-Control: no-cache</code> to skip the lookup. Cache hits do not count toward quotas. Stats: <code>cache</code> block of <code>GET /v1/stats</code></td>
+</tr>
+<tr>
+<td><code>CLEF_CACHE_MB</code></td>
+<td><code>256</code></td>
+<td>result-cache byte budget (estimated as the stored JSON size, typically about 1-2 KB per entry, so 10000 entries are about 10-20 MB); LRU entries are evicted until it fits, and an entry larger than a tenth of the budget is not stored; <code>0</code> = off</td>
 </tr>
 <tr>
 <td><code>CLEF_MAX_JOB_EVAL_ROWS</code></td>
@@ -1684,6 +1818,21 @@ same list with the engine and padding knobs is in <a href="../ARCHITECTURE/#conf
 <td>items per <code>classify</code> / <code>score</code> / <code>systemone</code> job</td>
 </tr>
 <tr>
+<td><code>CLEF_MAX_FILE_MB</code></td>
+<td><code>200</code></td>
+<td>body limit of <code>POST /v1/files</code> (OpenAI batch uploads); other routes use <code>CLEF_MAX_BODY_MB</code></td>
+</tr>
+<tr>
+<td><code>CLEF_MAX_BATCH_LINES</code></td>
+<td><code>50000</code></td>
+<td>requests per OpenAI batch (also capped by <code>CLEF_MAX_JOB_ITEMS</code>)</td>
+</tr>
+<tr>
+<td><code>CLEF_FILE_TTL_HOURS</code></td>
+<td><code>720</code></td>
+<td>how long an uploaded batch file is kept (<code>0</code> = forever)</td>
+</tr>
+<tr>
 <td><code>CLEF_MAX_JOBS</code></td>
 <td><code>100</code></td>
 <td>queued + running jobs; more is <code>409</code> with <code>Retry-After</code></td>
@@ -1699,6 +1848,31 @@ same list with the engine and padding knobs is in <a href="../ARCHITECTURE/#conf
 <td>how long a job waits for an unavailable engine before failing</td>
 </tr>
 <tr>
+<td><code>CLEF_JOB_ACTIVE</code></td>
+<td><code>4</code></td>
+<td>jobs that take turns at the engine at once (<code>&gt;= 1</code>; <code>1</code> = strictly one after another). Shared fairly: when another key waits, a key holding more than its share lets its newest job wait (<a href="../jobs/#scheduling">jobs</a>)</td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_AGING_S</code></td>
+<td><code>3600</code></td>
+<td>a waiting job rises one priority class per this many seconds without a turn (never to <code>urgent</code>); <code>0</code> = no aging</td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_TZ</code></td>
+<td><code>UTC</code></td>
+<td>IANA zone of job windows that give no <code>tz</code>, and of <code>CLEF_JOB_WINDOW</code></td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_WINDOW</code></td>
+<td>empty</td>
+<td>default off-hours window <code>HH:MM-HH:MM</code> for jobs without <code>schedule</code>; empty = always open</td>
+</tr>
+<tr>
+<td><code>CLEF_INTERACTIVE_BURST</code></td>
+<td><code>8</code></td>
+<td>interactive micro-batches in a row before waiting job work gets one (the engine's priority lane; <code>&gt;= 1</code>)</td>
+</tr>
+<tr>
 <td><code>CLEF_WEBHOOK_ALLOW</code></td>
 <td>empty</td>
 <td>hosts (<code>hooks.example.com</code>, <code>*.corp.example.net</code>), IPs and CIDRs webhooks may be sent to. <strong>Empty = webhooks off</strong></td>
@@ -1710,7 +1884,7 @@ same list with the engine and padding knobs is in <a href="../ARCHITECTURE/#conf
 </tr>
 <tr>
 <td><code>CLEF_WEBHOOK_ATTEMPTS</code></td>
-<td><code>5</code></td>
+<td><code>10</code></td>
 <td>delivery attempts for final events</td>
 </tr>
 </tbody>
@@ -1745,10 +1919,111 @@ same list with the engine and padding knobs is in <a href="../ARCHITECTURE/#conf
 <td><code>2</code></td>
 <td>gauge sampling period for the console charts</td>
 </tr>
+<tr>
+<td><code>CLEF_LOG_FORMAT</code></td>
+<td><code>text</code></td>
+<td><code>text</code> or <code>json</code>. json writes the app, uvicorn and access log lines as one JSON object per line (<code>ts</code>, <code>level</code>, <code>logger</code>, <code>msg</code>, plus <code>request_id</code> inside a request and <code>exc</code> for a traceback). <code>--log-format</code></td>
+</tr>
 </tbody>
 </table>
+<h2 id="router-and-review">Router and review<a class="headerlink" href="#router-and-review" title="Permanent link">&para;</a></h2>
+<p>The router is off unless a key is set in the environment or an <a href="#env-files">env file</a> (<a href="../router/">Router and Review</a>).</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GEMINI_API_KEY</code></td>
+<td>unset</td>
+<td>the router's LLM key. Unset (and no <code>CLEF_LLM_API_KEY</code>) = off. Never logged</td>
+</tr>
+<tr>
+<td><code>CLEF_LLM_API_KEY</code></td>
+<td>unset</td>
+<td>key for another OpenAI-compatible provider; wins over <code>GEMINI_API_KEY</code></td>
+</tr>
+<tr>
+<td><code>CLEF_LLM_BASE_URL</code></td>
+<td><code>https://generativelanguage.googleapis.com/v1beta/openai/</code></td>
+<td>OpenAI-compatible endpoint (ollama, LM Studio, OpenAI)</td>
+</tr>
+<tr>
+<td><code>CLEF_LLM_MODEL</code></td>
+<td><code>gemini-3.8-flash</code></td>
+<td>model id sent to the endpoint</td>
+</tr>
+<tr>
+<td><code>CLEF_LLM_TIMEOUT_S</code></td>
+<td><code>60</code></td>
+<td>timeout of one LLM request (2 retries on 429 / 5xx)</td>
+</tr>
+<tr>
+<td><code>CLEF_ROUTER_BATCH</code></td>
+<td><code>20</code></td>
+<td>buffered items per proposal call</td>
+</tr>
+<tr>
+<td><code>CLEF_ROUTER_COLD_BATCH</code></td>
+<td><code>20</code></td>
+<td>buffered items before the cold-start call</td>
+</tr>
+<tr>
+<td><code>CLEF_ROUTER_FLUSH_S</code></td>
+<td><code>600</code></td>
+<td>call after this long even below the batch size (0 = never)</td>
+</tr>
+<tr>
+<td><code>CLEF_ROUTER_MODE</code></td>
+<td><code>review</code></td>
+<td>default mode of new routers: <code>review</code> or <code>auto</code></td>
+</tr>
+<tr>
+<td><code>CLEF_ROUTER_MAX_NEW_PER_DAY</code></td>
+<td><code>10</code></td>
+<td>auto mode: labels a router may add per UTC day</td>
+</tr>
+<tr>
+<td><code>CLEF_ROUTER_MAX_INPUT_CHARS</code></td>
+<td><code>500</code></td>
+<td>characters of each buffered input sent to the LLM</td>
+</tr>
+<tr>
+<td><code>CLEF_REVIEW_TTL_DAYS</code></td>
+<td><code>30</code></td>
+<td>review rows lose their input text this long after creation (and at once when resolved); 0 = keep</td>
+</tr>
+</tbody>
+</table>
+<h2 id="env-files">.env files<a class="headerlink" href="#env-files" title="Permanent link">&para;</a></h2>
+<p>Instead of exporting variables, put <code>KEY=VALUE</code> lines in a file. At startup, before the settings are read, clef loads
+<code>./.env</code> (the directory you run <code>clef serve</code> in) and then <code>~/.config/clef/env</code> (the file <code>deploy/clef.service</code> also
+reads):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># .env  (keep it out of git; clef's own .gitignore lists it)</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nv">GEMINI_API_KEY</span><span class="o">=</span>your-key
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="nv">CLEF_API_KEYS</span><span class="o">=</span>~/.config/clef/keys
+</code></pre></div>
+<ul>
+<li>A variable that is already set (in the shell, by a flag, by systemd) always wins over both files; <code>./.env</code> wins
+  over <code>~/.config/clef/env</code>. A variable set to an empty value counts as unset, so the file value is used.</li>
+<li>Only <code>CLEF_*</code> names and <code>GEMINI_API_KEY</code> are read from these files. Anything else (<code>PATH</code>, <code>HF_HOME</code>,
+  <code>LD_PRELOAD</code>...) is ignored, with one warning that names the ignored variables (never their values); set those
+  in the real environment.</li>
+<li>Blank lines and <code>#</code> comments are ignored. <code>export KEY=value</code> works. Values may be <code>'single'</code> (literal) or
+  <code>"double"</code> quoted (<code>\n</code>, <code>\"</code>, <code>\\</code> escapes); an unquoted value ends at <code>#</code>.</li>
+<li><code>CLEF_ENV_FILE=/path/to/file</code> loads only that file. <code>CLEF_ENV_FILE=</code> (empty) loads none. It is read from the real
+  environment only, once per process: a <code>CLEF_ENV_FILE</code> line inside an env file is ignored.</li>
+<li>clef never logs values. <code>clef serve</code> logs one line at startup naming the env files it loaded (<code>env files loaded:
+  ~/work/.env</code>, or <code>env files: none loaded</code>), so a <code>./.env</code> picked up from an unexpected directory is visible;
+  <code>clef doctor</code> lists them too.</li>
+</ul>
+<h2 id="example">Example<a class="headerlink" href="#example" title="Permanent link">&para;</a></h2>
 <p>Example for LAN access:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nv">CLEF_HOST</span><span class="o">=</span><span class="m">0</span>.0.0.0<span class="w"> </span><span class="nv">CLEF_API_KEYS</span><span class="o">=</span>~/.config/clef/keys<span class="w"> </span><span class="nv">CLEF_RATE_LIMIT</span><span class="o">=</span><span class="m">120</span><span class="w"> </span>clef<span class="w"> </span>serve
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nv">CLEF_HOST</span><span class="o">=</span><span class="m">0</span>.0.0.0<span class="w"> </span><span class="nv">CLEF_API_KEYS</span><span class="o">=</span>~/.config/clef/keys<span class="w"> </span><span class="nv">CLEF_RATE_LIMIT</span><span class="o">=</span><span class="m">120</span><span class="w"> </span>clef<span class="w"> </span>serve
 </code></pre></div>
 <p>See <a href="../remote-access/">remote access</a> before exposing the server beyond the machine.</p>
 

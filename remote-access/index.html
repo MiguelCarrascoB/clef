@@ -713,6 +713,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../memory/" class="md-nav__link">
         
   
@@ -799,6 +827,17 @@
       Table of contents
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#two-kinds-of-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two kinds of keys
+      
+    </span>
+  </a>
+  
+</li>
       
         <li class="md-nav__item">
   <a href="#lan-setup" class="md-nav__link">
@@ -1461,6 +1500,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#two-kinds-of-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two kinds of keys
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#lan-setup" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1565,25 +1615,59 @@
 <h1 id="remote-access">Remote access<a class="headerlink" href="#remote-access" title="Permanent link">&para;</a></h1>
 <p>By default clef binds <code>127.0.0.1</code>: only the machine it runs on can call it. This page covers calling it from other
 machines on your local network, and what to add if you expose it further.</p>
+<h2 id="two-kinds-of-keys">Two kinds of keys<a class="headerlink" href="#two-kinds-of-keys" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Env keys</strong> (<code>CLEF_API_KEY</code>, <code>CLEF_API_KEYS</code>): full admin, no quota, the global rate limit. They are the
+  break-glass key and the bootstrap: the first admin key is made with one of them, or with <code>clef keys create</code>.
+  They are read at startup. A managed key may not share a name with an env key: the server refuses such a key
+  (<code>401</code>) and logs a warning at startup; run <code>clef keys revoke NAME</code> or rename the env key. (The server is the
+  authority, since the env of <code>clef keys</code> can differ from the server's.)</li>
+<li><strong>Managed keys</strong> (<code>clef keys ...</code> or the console <strong>Keys</strong> tab): a <em>principal</em> (a name) with scopes, an optional daily
+  quota and rate limit, and one to five keys (<code>clef_live_&lt;id&gt;_&lt;secret&gt;</code>). Only the SHA-256 of a key is stored; the
+  secret is shown once, when it is created or rotated. Changes made in the console or through <code>/v1/admin/keys</code> apply at
+  once; changes made with <code>clef keys</code> while the server runs apply within about 10 seconds.</li>
+</ul>
+<p>Auth is on when an env key exists or any managed key was ever created, and it never turns off by itself: revoking the
+last managed key leaves the server locked until you make a new one (<code>clef keys create</code> works with the server stopped,
+straight on the database).</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>clef<span class="w"> </span>keys<span class="w"> </span>create<span class="w"> </span>ci-bot<span class="w"> </span>--scope<span class="w"> </span>classify,jobs<span class="w"> </span>--quota<span class="w"> </span><span class="m">50000</span><span class="w"> </span>--expires<span class="w"> </span>90d<span class="w">   </span><span class="c1"># prints the key once</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>clef<span class="w"> </span>keys<span class="w"> </span>create<span class="w"> </span>ops<span class="w"> </span>--scope<span class="w"> </span>admin<span class="w">                                         </span><span class="c1"># an admin key for the console</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>clef<span class="w"> </span>keys<span class="w"> </span>list
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>clef<span class="w"> </span>keys<span class="w"> </span>rotate<span class="w"> </span>ci-bot<span class="w"> </span>--grace<span class="w"> </span>24h<span class="w">     </span><span class="c1"># new key now; the old ones keep working for 24 h</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>clef<span class="w"> </span>keys<span class="w"> </span>revoke<span class="w"> </span>ci-bot<span class="w"> </span>--key-id<span class="w"> </span>ab3...<span class="w">  </span><span class="c1"># one key; without --key-id the principal is disabled for good</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>clef<span class="w"> </span>keys<span class="w"> </span>update<span class="w"> </span>ci-bot<span class="w"> </span>--quota<span class="w"> </span>none<span class="w"> </span>--scope<span class="w"> </span>classify,jobs,ops
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>clef<span class="w"> </span>keys<span class="w"> </span>usage<span class="w"> </span>ci-bot<span class="w"> </span>--days<span class="w"> </span><span class="m">30</span>
+</code></pre></div>
+<p>Scopes: <code>classify</code> (the model routes, <code>GET /v1/classifiers</code>, <code>/v1/models</code>, <code>/v1/evaluate</code>), <code>jobs</code> (<code>/v1/jobs*</code>),
+<code>classifiers</code> (create / change / delete saved classifiers), <code>ops</code> (stats, log, events), <code>urgent</code> (urgent jobs) and
+<code>admin</code> (everything, plus <code>/v1/admin/*</code> and the Keys tab). A key without the route's scope gets <code>403</code>. <code>GET /v1/whoami</code>
+shows the caller's name, scopes and quota use.</p>
+<p><strong>Daily quota.</strong> Counts records (a batch of 50 is 50) per UTC day. Computed records are charged; results served from
+the result cache are free. A job is charged in full when it is submitted, and the part it did not process comes back
+if it is cancelled or fails. Over the quota: <code>429</code> with <code>Retry-After</code> (seconds to the next UTC midnight); the OpenAI
+routes report <code>insufficient_quota</code>. Responses carry <code>X-Quota-Limit</code> and <code>X-Quota-Remaining</code>.</p>
+<p><strong>Audit log.</strong> Key changes, job cancel / delete and saved-classifier changes are recorded with who, what, when and
+IP (<code>GET /v1/admin/audit</code>, also in the console). Secrets are never recorded.</p>
 <h2 id="lan-setup">LAN setup<a class="headerlink" href="#lan-setup" title="Permanent link">&para;</a></h2>
 <ol>
 <li>Create a keys file (one <code>name:key</code> per line, <code>#</code> comments allowed). Generate strong keys:</li>
 </ol>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.config/clef
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="o">{</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"# name:key"</span>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"ci-bot:</span><span class="k">$(</span>python<span class="w"> </span>-c<span class="w"> </span><span class="s1">'import secrets; print(secrets.token_urlsafe(32))'</span><span class="k">)</span><span class="s2">"</span>
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"laptop:</span><span class="k">$(</span>python<span class="w"> </span>-c<span class="w"> </span><span class="s1">'import secrets; print(secrets.token_urlsafe(32))'</span><span class="k">)</span><span class="s2">"</span>
-<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="o">}</span><span class="w"> </span>&gt;<span class="w"> </span>~/.config/clef/keys
-<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span>~/.config/clef/keys
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>mkdir<span class="w"> </span>-p<span class="w"> </span>~/.config/clef
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="o">{</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"# name:key"</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"ci-bot:</span><span class="k">$(</span>python<span class="w"> </span>-c<span class="w"> </span><span class="s1">'import secrets; print(secrets.token_urlsafe(32))'</span><span class="k">)</span><span class="s2">"</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">  </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"laptop:</span><span class="k">$(</span>python<span class="w"> </span>-c<span class="w"> </span><span class="s1">'import secrets; print(secrets.token_urlsafe(32))'</span><span class="k">)</span><span class="s2">"</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="o">}</span><span class="w"> </span>&gt;<span class="w"> </span>~/.config/clef/keys
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span>~/.config/clef/keys
 </code></pre></div>
 <ol>
 <li>Start the server bound to all interfaces:</li>
 </ol>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nv">CLEF_HOST</span><span class="o">=</span><span class="m">0</span>.0.0.0<span class="w"> </span><span class="nv">CLEF_API_KEYS</span><span class="o">=</span><span class="nv">$HOME</span>/.config/clef/keys<span class="w"> </span><span class="nv">CLEF_RATE_LIMIT</span><span class="o">=</span><span class="m">120</span><span class="w"> </span>clef<span class="w"> </span>serve<span class="w"> </span>--detach
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nv">CLEF_HOST</span><span class="o">=</span><span class="m">0</span>.0.0.0<span class="w"> </span><span class="nv">CLEF_API_KEYS</span><span class="o">=</span><span class="nv">$HOME</span>/.config/clef/keys<span class="w"> </span><span class="nv">CLEF_RATE_LIMIT</span><span class="o">=</span><span class="m">120</span><span class="w"> </span>clef<span class="w"> </span>serve<span class="w"> </span>--detach
 </code></pre></div>
 <p><code>CLEF_API_KEYS</code> also accepts the list inline: <code>ci-bot:KEY1,laptop:KEY2</code>. <code>CLEF_API_KEY=KEY</code> is a single key named
-   <code>default</code>. Binding a non-loopback host with no key logs a loud warning at startup; do not ignore it.</p>
+   <code>default</code>. These are env keys (full admin: with several of them, each can see and delete every job, edit every classifier and mint keys, and the server warns at startup); for scoped keys with quotas use <code>clef keys create</code> instead of, or next
+   to, them. Binding a non-loopback host with no key (env or managed) logs a loud warning at startup; do not ignore it.</p>
 <ol>
 <li>
 <p>Allow the port through the firewall for your LAN only (below).</p>
@@ -1592,36 +1676,43 @@ machines on your local network, and what to add if you expose it further.</p>
 <p>Call it from another machine:</p>
 </li>
 </ol>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>curl<span class="w"> </span>http://192.168.1.50:8910/v1/classify<span class="w"> </span>-H<span class="w"> </span><span class="s2">"X-API-Key: </span><span class="nv">$CLEF_KEY</span><span class="s2">"</span><span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"input": "Checkout is down", "labels": ["billing", "technical"]}'</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>curl<span class="w"> </span>http://192.168.1.50:8910/v1/classify<span class="w"> </span>-H<span class="w"> </span><span class="s2">"X-API-Key: </span><span class="nv">$CLEF_KEY</span><span class="s2">"</span><span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"input": "Checkout is down", "labels": ["billing", "technical"]}'</span>
 </code></pre></div>
 <p><code>Authorization: Bearer &lt;key&gt;</code> works too. The Python and JS clients take the key as <code>api_key=</code> / <code>apiKey</code>.</p>
-<p>All <code>/v1/*</code> routes, and the Hugging Face routes (<code>/hf/models/*</code>), then require a key (401 otherwise); the OpenAI SDKs
-send it as <code>Authorization: Bearer</code> from their <code>api_key</code> setting. Open routes: <code>/</code>, static files, <code>/health</code>, <code>/livez</code>, <code>/docs</code>,
+<p>All <code>/v1/*</code> routes, and the Hugging Face routes (<code>/hf/models/*</code>), then require a key (401 otherwise, 403 for a key
+without the route's scope); <code>/v1/admin/*</code> always requires an admin key, even when auth is off; the OpenAI SDKs
+send it as <code>Authorization: Bearer</code> from their <code>api_key</code> setting. Open routes: <code>/</code>, static files, <code>/health</code>, <code>/livez</code>, <code>/readyz</code>, <code>/docs</code>,
 <code>/openapi.json</code>. The console is served without a key, but its API calls need one: enter it in the console settings. The
-live event stream accepts <code>?key=</code> because browsers cannot set headers on <code>EventSource</code>; this puts the key in the URL,
-so on untrusted networks use TLS.</p>
+console sends the key in the <code>X-API-Key</code> header, also for the live event stream. <code>/v1/events</code> still accepts <code>?key=</code>
+for plain <code>EventSource</code> clients (they cannot set headers); this puts the key in the URL, so on untrusted networks
+use TLS.</p>
 <h2 id="keys-and-logging">Keys and logging<a class="headerlink" href="#keys-and-logging" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Each key has a name. The name (never the key) is stored on every request in <code>/v1/log</code> and counted in <code>/v1/stats</code>
   (<code>by_key</code>), so you can see who is calling.</li>
-<li>Keys are compared in constant time. They are never logged.</li>
-<li>Rotate by editing the keys file and restarting <code>clef serve</code> (keys are read at startup).</li>
+<li>Keys are compared in constant time. clef never logs them: <code>?key=</code> values are written as <code>REDACTED</code> in the access
+  log. If you turn on the access log of a reverse proxy, mask the key there too; see
+  <a href="../security/#keys-in-proxy-logs">Keys in proxy logs</a> for Caddy and nginx.</li>
+<li>Rotate a managed key with <code>clef keys rotate NAME</code> (or the console): the old key keeps working for the grace
+  period (default 24 h), so callers can switch without a gap. Env keys are rotated by editing the keys file and
+  restarting <code>clef serve</code> (they are read at startup).</li>
 </ul>
 <h2 id="rate-limit">Rate limit<a class="headerlink" href="#rate-limit" title="Permanent link">&para;</a></h2>
 <p><code>CLEF_RATE_LIMIT=N</code> allows N inference requests per minute per key (per client IP when auth is off), sliding 60 s
-window. Counted routes: <code>/v1/systemone</code>, <code>/v1/batch</code>, <code>/v1/classify</code>, <code>/v1/classify/batch</code>, <code>/v1/score</code>,
+window. A managed key can have its own limit (<code>--rate-limit</code>), which applies even when <code>CLEF_RATE_LIMIT</code> is 0. Counted routes: <code>/v1/systemone</code>, <code>/v1/batch</code>, <code>/v1/classify</code>, <code>/v1/classify/batch</code>, <code>/v1/score</code>,
 <code>POST /v1/classifiers/{name}[/batch]</code>, <code>/v1/chat/completions</code>, <code>/hf/models/*</code>, <code>/v1/evaluate</code> and <code>POST /v1/jobs</code>. Over the limit: <code>429</code> with <code>Retry-After: &lt;seconds&gt;</code>. <code>0</code> (default) disables it.
 A batch call counts as one request, so also keep <code>CLEF_MAX_BATCH</code> reasonable.</p>
 <h2 id="jobs-webhooks-and-keys">Jobs, webhooks and keys<a class="headerlink" href="#jobs-webhooks-and-keys" title="Permanent link">&para;</a></h2>
-<p>Async jobs belong to the key that submitted them: other keys get <code>404</code> for them and do not see them in the job list.
+<p>Async jobs belong to the principal that submitted them: other non-admin keys get <code>404</code> for them and do not see them
+in the job list. Admin keys, including every env key, see all jobs. Jobs and classifiers created while auth was off have no owner and are admin-only to read results of, change or delete once auth is on (non-admin keys may still run such a classifier).
 Webhooks are off until you set <code>CLEF_WEBHOOK_ALLOW</code>; list only the receivers you trust (a private address needs its
 IP or CIDR listed explicitly) and see <a href="../jobs/#webhooks-are-off-by-default-ssrf">Jobs &amp; webhooks</a> and the
-<a href="../security/">security policy</a> before enabling them on an exposed server. <code>jobs.db</code> in the state directory holds
-your submitted inputs and the webhook secrets in clear text, so protect that directory like the keys file.</p>
+<a href="../security/">security policy</a> before enabling them on an exposed server. <code>clef.db</code> in the state directory (or your Postgres
+database, with <code>CLEF_DATABASE_URL</code>) holds your submitted inputs and the webhook secrets in clear text, so protect that directory like the keys file.</p>
 <h2 id="cors-browser-callers">CORS (browser callers)<a class="headerlink" href="#cors-browser-callers" title="Permanent link">&para;</a></h2>
 <p>Off by default. To let a web page on another origin call the API:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nv">CLEF_CORS_ORIGINS</span><span class="o">=</span>https://app.example.com,http://localhost:5173<span class="w"> </span>clef<span class="w"> </span>serve
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nv">CLEF_CORS_ORIGINS</span><span class="o">=</span>https://app.example.com,http://localhost:5173<span class="w"> </span>clef<span class="w"> </span>serve
 </code></pre></div>
 <p><code>*</code> is accepted, but do not combine it with an exposed server. Allowed methods GET/POST/PUT/DELETE/OPTIONS, headers
 <code>*</code>, credentials off. Never put an API key in public front-end code: anyone who loads the page can read it. Call clef
@@ -1629,41 +1720,48 @@ from your own backend instead.</p>
 <h2 id="firewall">Firewall<a class="headerlink" href="#firewall" title="Permanent link">&para;</a></h2>
 <p>Open TCP 8910 (or your <code>CLEF_PORT</code>) to your LAN subnet only, not to the world. Replace <code>192.168.1.0/24</code>.</p>
 <p><strong>Ubuntu (ufw)</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>sudo<span class="w"> </span>ufw<span class="w"> </span>allow<span class="w"> </span>from<span class="w"> </span><span class="m">192</span>.168.1.0/24<span class="w"> </span>to<span class="w"> </span>any<span class="w"> </span>port<span class="w"> </span><span class="m">8910</span><span class="w"> </span>proto<span class="w"> </span>tcp
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>sudo<span class="w"> </span>ufw<span class="w"> </span>allow<span class="w"> </span>from<span class="w"> </span><span class="m">192</span>.168.1.0/24<span class="w"> </span>to<span class="w"> </span>any<span class="w"> </span>port<span class="w"> </span><span class="m">8910</span><span class="w"> </span>proto<span class="w"> </span>tcp
 </code></pre></div>
 <p><strong>macOS</strong>: System Settings &gt; Network &gt; Firewall; allow incoming connections for the Python/<code>clef</code> process when prompted.
 For a subnet rule use <code>pf</code>.</p>
 <p><strong>Windows (PowerShell, as administrator)</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nb">New-NetFirewallRule</span> <span class="n">-DisplayName</span> <span class="s2">"clef"</span> <span class="n">-Direction</span> <span class="n">Inbound</span> <span class="n">-Protocol</span> <span class="n">TCP</span> <span class="n">-LocalPort</span> <span class="n">8910</span> <span class="n">-RemoteAddress</span> <span class="n">192</span><span class="p">.</span><span class="n">168</span><span class="p">.</span><span class="n">1</span><span class="p">.</span><span class="n">0</span><span class="p">/</span><span class="n">24</span> <span class="n">-Action</span> <span class="n">Allow</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nb">New-NetFirewallRule</span> <span class="n">-DisplayName</span> <span class="s2">"clef"</span> <span class="n">-Direction</span> <span class="n">Inbound</span> <span class="n">-Protocol</span> <span class="n">TCP</span> <span class="n">-LocalPort</span> <span class="n">8910</span> <span class="n">-RemoteAddress</span> <span class="n">192</span><span class="p">.</span><span class="n">168</span><span class="p">.</span><span class="n">1</span><span class="p">.</span><span class="n">0</span><span class="p">/</span><span class="n">24</span> <span class="n">-Action</span> <span class="n">Allow</span>
 </code></pre></div>
 <p><strong>Windows + WSL2</strong>: the server listens inside WSL, so Windows must forward the port. With the default NAT networking
 use a port proxy (the WSL address changes on restart), or set <code>networkingMode=mirrored</code> in <code>%USERPROFILE%\.wslconfig</code>
 (Windows 11 22H2+) and then only the firewall rule is needed:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nv">$wsl</span> <span class="p">=</span> <span class="p">(</span><span class="n">wsl</span> <span class="n">-d</span> <span class="n">Ubuntu</span> <span class="n">hostname</span> <span class="n">-I</span><span class="p">).</span><span class="n">Trim</span><span class="p">().</span><span class="n">Split</span><span class="p">(</span><span class="s1">' '</span><span class="p">)[</span><span class="n">0</span><span class="p">]</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">netsh</span> <span class="n">interface</span> <span class="n">portproxy</span> <span class="n">add</span> <span class="n">v4tov4</span> <span class="n">listenaddress</span><span class="p">=</span><span class="n">0</span><span class="p">.</span><span class="n">0</span><span class="p">.</span><span class="n">0</span><span class="p">.</span><span class="n">0</span> <span class="n">listenport</span><span class="p">=</span><span class="n">8910</span> <span class="n">connectaddress</span><span class="p">=</span><span class="nv">$wsl</span> <span class="n">connectport</span><span class="p">=</span><span class="n">8910</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="nv">$wsl</span> <span class="p">=</span> <span class="p">(</span><span class="n">wsl</span> <span class="n">-d</span> <span class="n">Ubuntu</span> <span class="n">hostname</span> <span class="n">-I</span><span class="p">).</span><span class="n">Trim</span><span class="p">().</span><span class="n">Split</span><span class="p">(</span><span class="s1">' '</span><span class="p">)[</span><span class="n">0</span><span class="p">]</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">netsh</span> <span class="n">interface</span> <span class="n">portproxy</span> <span class="n">add</span> <span class="n">v4tov4</span> <span class="n">listenaddress</span><span class="p">=</span><span class="n">0</span><span class="p">.</span><span class="n">0</span><span class="p">.</span><span class="n">0</span><span class="p">.</span><span class="n">0</span> <span class="n">listenport</span><span class="p">=</span><span class="n">8910</span> <span class="n">connectaddress</span><span class="p">=</span><span class="nv">$wsl</span> <span class="n">connectport</span><span class="p">=</span><span class="n">8910</span>
 </code></pre></div>
 <p><strong>Docker</strong>: <code>-p 8910:8910</code> already publishes on all interfaces; bind to a LAN address with
 <code>-p 192.168.1.50:8910:8910</code> if you want to limit it, and still use keys.</p>
 <h2 id="beyond-the-lan-tls-reverse-proxy-caddy">Beyond the LAN: TLS reverse proxy (Caddy)<a class="headerlink" href="#beyond-the-lan-tls-reverse-proxy-caddy" title="Permanent link">&para;</a></h2>
 <p>Do not expose the plain HTTP port to the internet. Put a reverse proxy with TLS in front, keep clef bound to
 <code>127.0.0.1</code>, and keep API keys on. <code>Caddyfile</code> (certificates are obtained automatically for a public hostname):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>clef.example.com<span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">    </span><span class="k">encode</span><span class="w"> </span>zstd<span class="w"> </span>gzip
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">    </span><span class="c1"># large image/video payloads: match CLEF_MAX_BODY_MB (default 64)</span>
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">    </span><span class="k">request_body</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">        </span>max_size<span class="w"> </span><span class="m">64MB</span>
-<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="w">    </span><span class="p">}</span>
-<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>
-<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">    </span><span class="k">reverse_proxy</span><span class="w"> </span>127.0.0.1:8910<span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">        </span><span class="c1"># server-sent events (/v1/events) must not be buffered</span>
-<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="w">        </span>flush_interval<span class="w"> </span>-1
-<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="w">    </span><span class="p">}</span>
-<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>clef.example.com<span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">    </span><span class="k">encode</span><span class="w"> </span>zstd<span class="w"> </span>gzip
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">    </span><span class="c1"># large image/video payloads: match CLEF_MAX_BODY_MB (default 64)</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w">    </span><span class="k">request_body</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="w">        </span>max_size<span class="w"> </span><span class="m">64MB</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="w">    </span><span class="c1"># no `log` directive: if you add one, mask X-Api-Key and ?key= (security.md#keys-in-proxy-logs)</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="w">    </span><span class="k">reverse_proxy</span><span class="w"> </span>127.0.0.1:8910<span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a><span class="w">        </span><span class="c1"># server-sent events (/v1/events) must not be buffered</span>
+<a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a><span class="w">        </span>flush_interval<span class="w"> </span>-1
+<a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a><span class="p">}</span>
 </code></pre></div>
 <p>Run <code>caddy run --config Caddyfile</code>. For a LAN-only hostname without a public domain, use <code>tls internal</code> inside the
 site block (clients must trust Caddy's local CA). Behind a proxy every request comes from <code>127.0.0.1</code>, so the rate
 limit is per key, not per client IP: keep API keys on.</p>
+<p><strong>Load balancers.</strong> Point the health check at <code>/readyz</code> (open, no key). To take a server out of rotation before
+it stops, set <code>CLEF_DRAIN_S</code> (e.g. <code>5</code>): after SIGTERM / Ctrl-C clef keeps serving that long while <code>/readyz</code>
+answers 503 <code>draining</code>, then shuts down; a second signal stops it at once. Pick the probe interval x failure
+threshold below <code>CLEF_DRAIN_S</code>, and keep <code>CLEF_DRAIN_S</code> below your supervisor's stop timeout (10 s for
+<code>docker stop</code>). With the default <code>0</code> the listening socket closes at once and the load balancer only sees refused
+connections.</p>
 <p>Additional hardening if you do expose it: set a low <code>CLEF_RATE_LIMIT</code>, keep <code>CLEF_ALLOW_URL_FETCH=0</code> (default), keep
 <code>CLEF_LOG_STATE=0</code> (default; request contents are not stored), and restrict by IP in the proxy where possible.</p>
 

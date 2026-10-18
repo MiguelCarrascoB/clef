@@ -333,6 +333,18 @@
 </a>
 </li>
 <li class="md-nav__item">
+<a class="md-nav__link" href="../router/">
+<span class="md-ellipsis">
+    
+  
+    Router &amp; Review
+  
+
+    
+  </span>
+</a>
+</li>
+<li class="md-nav__item">
 <a class="md-nav__link" href="../memory/">
 <span class="md-ellipsis">
     
@@ -619,6 +631,9 @@ UI at <code>/docs</code>. Use the schema to generate a client in any language.</
 <p>"Try it out" is disabled here because no server sits behind this site. Start one with <code>clef serve</code> and open
 <a href="http://127.0.0.1:8910/docs">http://127.0.0.1:8910/docs</a> to call the API for real, or see the <a href="../classification/">classification guide</a> and
 <a href="../first-request/">first request</a> for curl examples.</p>
+<p>Open routes (no API key): <code>/health</code> (model and GPU status), <code>/livez</code> (process up), <code>/readyz</code> (200 only when the
+model is ready and the server is not shutting down; for load balancers and container health), <code>/schema-example</code>,
+<code>/docs</code>, <code>/openapi.json</code>.</p>
 <p><iframe class="swagger-ui-iframe" frameborder="0" id="666b4d65" onload="this.style.display = 'block'; this.style.overflow = 'hidden'; this.style.width = '100%';" src="swagger-666b4d65.html" style="display:none;" width="100%"></iframe></p>
 </article>
 </div>

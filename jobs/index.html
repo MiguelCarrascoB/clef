@@ -16,7 +16,7 @@
         <link rel="prev" href="../evaluation/">
       
       
-        <link rel="next" href="../memory/">
+        <link rel="next" href="../router/">
       
       
         
@@ -873,10 +873,32 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#scheduling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#limits-ownership-retention" class="md-nav__link">
     <span class="md-ellipsis">
       
         Limits, ownership, retention
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage
       
     </span>
   </a>
@@ -898,6 +920,34 @@
   
 </nav>
       
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
     </li>
   
 
@@ -1662,10 +1712,32 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#scheduling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#limits-ownership-retention" class="md-nav__link">
     <span class="md-ellipsis">
       
         Limits, ownership, retention
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage
       
     </span>
   </a>
@@ -1715,21 +1787,26 @@ with the connection closed: submit it, get an id back immediately, then poll (or
 page or stream the results when it is done.</p>
 <pre class="mermaid"><code>stateDiagram-v2
     [*] --&gt; queued: POST /v1/jobs (202)
-    queued --&gt; running: runner picks it up (FIFO)
+    queued --&gt; running: the scheduler admits it (class, fair share, window)
     running --&gt; succeeded: all items processed
     running --&gt; failed: systemic error, every item failed, or the circuit breaker tripped
     running --&gt; cancelled: POST .../cancel (between chunks)
     queued --&gt; cancelled: POST .../cancel
     running --&gt; interrupted: server stopped / crashed
     interrupted --&gt; running: server restarted, resumes after the last stored row
-    interrupted --&gt; failed: interrupted more than CLEF_JOB_MAX_RESUMES times
+    interrupted --&gt; failed: crashed more than CLEF_JOB_MAX_RESUMES times
+    interrupted --&gt; cancelled: a cancel requested before the stop / crash
     succeeded --&gt; [*]: DELETE or retention TTL
     failed --&gt; [*]
     cancelled --&gt; [*]</code></pre>
-<p>Interactive requests (<code>/v1/classify</code>, <code>/v1/systemone</code>, ...) stay responsive while a job runs: the runner
-processes one job at a time and keeps <strong>one chunk</strong> (<code>CLEF_MAX_MICROBATCH</code> records, 8 by default) in flight
-at the engine. A request arriving mid-job waits for the chunk being computed (at most one micro-batch) and is
-then served ahead of the job's next chunk. Cancellation also takes effect between chunks.</p>
+<p>Interactive requests (<code>/v1/classify</code>, <code>/v1/systemone</code>, ...) stay responsive while jobs run: up to
+<code>CLEF_JOB_ACTIVE</code> jobs advance in turns, but only <strong>one chunk</strong> (<code>CLEF_MAX_MICROBATCH</code> records, 8 by default)
+across all of them is in flight at the engine, and the engine queue has a <strong>priority lane</strong>: job chunks go in the background lane, requests in
+the interactive one, and the next micro-batch is interactive when any request is waiting (up to
+<code>CLEF_INTERACTIVE_BURST</code> interactive micro-batches in a row, then one background group). A request
+arriving mid-job therefore waits only for the job micro-batch already being computed (it is never preempted):
+one forward when the chunk shares a length bucket, more when it spans several buckets or carries media (one
+forward per media record). Cancellation also takes effect between chunks.</p>
 <h2 id="endpoints">Endpoints<a class="headerlink" href="#endpoints" title="Permanent link">&para;</a></h2>
 <p>All under <code>/v1</code>, same API key rules as the rest. Errors are <code>{detail, request_id}</code>.</p>
 <table>
@@ -1782,7 +1859,9 @@ then served ahead of the job's next chunk. Cancellation also takes effect betwee
 <a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="nt">"metadata"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"batch"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-10-03"</span><span class="p">}</span>
 <a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="p">}</span>
 </code></pre></div>
-<p><code>webhook</code> and <code>metadata</code> are optional (<code>metadata</code> is any JSON up to 16 KB, echoed back on every read).</p>
+<p><code>webhook</code> and <code>metadata</code> are optional (<code>metadata</code> is any JSON up to 16 KB, echoed back on every read).
+Scheduling fields, all optional, are described in <a href="#scheduling">Scheduling</a>: <code>priority</code>, <code>urgent</code>, <code>schedule</code>,
+<code>expire_after_s</code>.</p>
 <p><strong>Idempotency.</strong> Send an <code>Idempotency-Key</code> header (1-128 printable ASCII characters) and a resubmission with the
 same key by the same API key returns the job created the first time (<code>202</code>, plus <code>Idempotent-Replay: true</code>)
 instead of queueing a duplicate. Use it when the response to a submit may have been lost. The key is remembered
@@ -1821,6 +1900,11 @@ and nothing is queued.</p>
 <td>the same body as <code>POST /v1/evaluate</code> (up to <code>CLEF_MAX_JOB_EVAL_ROWS</code> rows), see <a href="../evaluation/#as-a-job">evaluation</a></td>
 <td><code>{index, input, gold, predicted, confidence, correct, scores}</code>; the job <code>result</code> is the metrics object</td>
 </tr>
+<tr>
+<td><code>batch</code></td>
+<td>internal: created by <code>POST /v1/batches</code> (<a href="../openai-compat/#files-and-batches-the-openai-batch-api">OpenAI Batch API</a>); <code>input_file_id</code>, <code>endpoint</code>. A run where every line failed still ends <code>succeeded</code></td>
+<td><code>{index, custom_id, status_code, request_id, body \| error, input_tokens}</code></td>
+</tr>
 </tbody>
 </table>
 <p>Other kinds can be registered by feature modules (<code>evaluate</code> is one); <code>POST</code> with an unknown
@@ -1852,10 +1936,12 @@ the model is still loading a job waits and retries; it does not fail. Every fail
 <a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">  </span><span class="nt">"result"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
 <a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="w">  </span><span class="nt">"warnings"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"3 of 12000 item(s) failed; their result rows carry an 'error' field"</span><span class="p">],</span>
 <a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="w">  </span><span class="nt">"metadata"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"batch"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-10-03"</span><span class="p">},</span>
-<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="w">  </span><span class="nt">"webhook"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"url"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://hooks.example.com/clef"</span><span class="p">,</span><span class="w"> </span><span class="nt">"events"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"job.succeeded"</span><span class="p">],</span><span class="w"> </span><span class="nt">"has_secret"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
-<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="w">              </span><span class="nt">"failed_deliveries"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
-<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="w">              </span><span class="nt">"deliveries"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"job.succeeded"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">,</span><span class="w"> </span><span class="nt">"status"</span><span class="p">:</span><span class="w"> </span><span class="s2">"pending"</span><span class="p">,</span><span class="w"> </span><span class="nt">"attempts"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">}}}</span>
-<a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="p">}</span>
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="w">  </span><span class="nt">"priority"</span><span class="p">:</span><span class="w"> </span><span class="s2">"normal"</span><span class="p">,</span><span class="w"> </span><span class="nt">"urgent"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"schedule"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"waiting_reason"</span><span class="p">:</span><span class="w"> </span><span class="s2">"turn"</span><span class="p">,</span><span class="w"> </span><span class="nt">"waiting_behind"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"next_window_at"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="w">  </span><span class="nt">"expired"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"model"</span><span class="p">:</span><span class="w"> </span><span class="s2">"clef-flash@abc1234"</span><span class="p">,</span><span class="w"> </span><span class="nt">"tokens"</span><span class="p">:</span><span class="w"> </span><span class="mi">381204</span><span class="p">,</span>
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="w">  </span><span class="nt">"webhook"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"url"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://hooks.example.com/clef"</span><span class="p">,</span><span class="w"> </span><span class="nt">"events"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"job.succeeded"</span><span class="p">],</span><span class="w"> </span><span class="nt">"has_secret"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="w">              </span><span class="nt">"failed_deliveries"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a><span class="w">              </span><span class="nt">"deliveries"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"job.succeeded"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">,</span><span class="w"> </span><span class="nt">"status"</span><span class="p">:</span><span class="w"> </span><span class="s2">"pending"</span><span class="p">,</span><span class="w"> </span><span class="nt">"attempts"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">}}}</span>
+<a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a><span class="p">}</span>
 </code></pre></div>
 <p><code>result</code> is set when the job succeeds (classify: <code>{items, ok, errors, by_label}</code>, with <code>by_labels</code> for
 multi-label; score: <code>by_level</code>). <code>status: "succeeded"</code> means the job ran to the end, <strong>not</strong> that every item
@@ -1954,7 +2040,9 @@ jitter), up to <code>CLEF_WEBHOOK_ATTEMPTS</code> attempts in total (default 10,
 or deploys is covered); other 4xx and every 3xx are final (redirects are never followed). Each attempt has a
 <code>CLEF_WEBHOOK_TIMEOUT_S</code> (default 10) total timeout. The delivery id (<code>X-Clef-Delivery</code>) is minted when the final
 event is recorded, together with the job's state change, so it stays the same across retries and server
-restarts. A pending delivery survives a restart and is retried on the next start. Status is in
+restarts. A pending delivery survives a restart and is retried on the next start. Known behaviour: its attempt
+count and backoff start over then (a fresh <code>CLEF_WEBHOOK_ATTEMPTS</code> budget, first retry after
+<code>CLEF_WEBHOOK_BACKOFF_S</code>), so a server restarting in a loop can attempt one delivery more often than the budget. Status is in
 <code>GET /v1/jobs/{id}</code> under <code>webhook.deliveries</code>; <code>webhook.failed_deliveries</code> counts the ones that gave up, and each
 shows up in <code>warnings</code>. A finished job with a pending final event is never purged, and a failed delivery is not
 retried automatically: after fixing the receiver, <code>POST /v1/jobs/{id}/webhook/redeliver</code> (optional <code>?event=</code>)
@@ -1997,9 +2085,50 @@ until the operator sets <code>CLEF_WEBHOOK_ALLOW</code></strong> to a comma-sepa
   when listed.</li>
 <li>Only <code>http</code> / <code>https</code>, no credentials in the URL, no redirects, no proxy settings from the environment, and an
   API key is never sent. Use <code>https</code> for anything that leaves your machine.</li>
-<li>Secrets are stored in the job database (<code>jobs.db</code> in the state directory) in clear text, because HMAC needs
-  them; protect that directory like the API keys file. The secret is write-only through the API.</li>
+<li>Secrets are stored in the database (<code>clef.db</code> in the state directory, or your <code>CLEF_DATABASE_URL</code>) in clear
+  text, because HMAC needs them; protect it like the API keys file. The secret is write-only through the API.</li>
 </ul>
+<h2 id="scheduling">Scheduling<a class="headerlink" href="#scheduling" title="Permanent link">&para;</a></h2>
+<p>Several jobs can be <code>running</code> at once (up to <code>CLEF_JOB_ACTIVE</code>, default 4); they take turns at the engine, one
+chunk at a time, so a long job from one key no longer blocks everyone else's. Every job in turns shows
+<code>running</code> in <code>GET /v1/jobs</code>; <code>waiting_reason</code> says why one is not advancing right now: <code>turn</code> (waiting for its
+chunk), <code>behind</code> (an older job of the same key goes first; <code>waiting_behind</code> is its id), <code>active_limit</code> (no free slot, or it gave its slot to another key's job: see Fair slots), <code>off_hours</code>
+(outside its window; <code>next_window_at</code> says when it opens).</p>
+<p><strong>Priority.</strong> <code>"priority": "low" | "normal" (default) | "high"</code>. Classes are strict: while a <code>high</code> job has work,
+<code>normal</code> and <code>low</code> wait. A job that has not had a turn for <code>CLEF_JOB_AGING_S</code> (default 3600 s) moves up one class
+(never to <code>urgent</code>), so nothing starves. <code>GET /v1/jobs?priority=high</code> filters.</p>
+<p><strong>Fair share.</strong> Inside a class, turns are shared per key name (the job owner), weighted by records: two keys with
+one huge job each advance at the same speed, and a key with ten jobs does not get ten times the turns. Inside one
+key the oldest job goes first and the key's newer jobs wait (<code>waiting_reason: "behind"</code>) until it finishes: the
+first results arrive sooner than if the jobs shared the turns, and the last ones no later. Send <code>"priority":
+"high"</code> to let a newer job go first. A key
+that comes back after being idle, or whose jobs were paused (off-hours, or waiting for a slot), starts level with
+the others; it does not collect the turns it missed.</p>
+<p><strong>Fair slots.</strong> When every slot is taken and another key's job waits for one, a key holding more than its share
+(<code>CLEF_JOB_ACTIVE</code> divided by the keys that want a slot, rounded up) gives up its newest job after that job's current
+chunk. The job stays <code>running</code> with <code>waiting_reason: "active_limit"</code>, keeps its progress and continues when a slot is
+free again. A key alone in the queue still uses every slot; a <code>high</code> job never yields to a <code>normal</code> one, and urgent
+jobs are not counted.</p>
+<p><strong>Off-hours window.</strong> <code>"schedule": {"window": "20:00-06:00", "tz": "Europe/Madrid"}</code> restricts a job to a window
+(<code>start &gt; end</code> crosses midnight, <code>start == end</code> is 24 h; <code>tz</code> defaults to <code>CLEF_JOB_TZ</code>). Without <code>schedule</code>, a
+job uses <code>CLEF_JOB_WINDOW</code> when it is set. Outside the window a queued job stays <code>queued</code>; a job that is running
+when the window closes finishes its current chunk, then stays <code>running</code> (<code>waiting_reason: "off_hours"</code>) without
+taking turns or holding a slot, and continues when the window opens again. On a daylight-saving change, an edge
+inside the skipped hour starts at the next valid minute and an edge in the repeated hour uses the first
+occurrence; a window that lies entirely inside the skipped hour (say <code>02:15-02:45</code>) does not open that day. A bad window or time zone is <code>400</code>.</p>
+<p><strong>Urgent.</strong> <code>"urgent": true</code> needs the <code>urgent</code> scope (<code>403</code> otherwise). The job takes the top class, ignores its
+window and does not wait for a free slot.</p>
+<p><strong>Expiry.</strong> <code>"expire_after_s": 7200</code> cancels the job (<code>status: "cancelled"</code>, <code>error: "expired"</code>, <code>expired: true</code>)
+that long after it first could run: from submit, or, for a windowed job submitted outside its window, from the
+moment the window first opens. It stops between chunks; the rows already computed are kept.</p>
+<p><strong>Daily quota.</strong> For a key with a daily quota, the whole job (its record count) is reserved at submit, against
+the UTC day of the submit, even if it runs on later days: <code>429 daily quota exceeded</code> when it does not fit,
+nothing is queued. When a job ends <code>cancelled</code> or <code>failed</code> (expiry included), the records it did not process are
+handed back to that day. Records answered from the result cache are not charged. A replay of an
+<code>Idempotency-Key</code> is free.</p>
+<p>Everything above is kept in the database, so queued jobs, priorities, windows and reservations survive a
+restart; the fair-share counters restart from zero. A job that was paused off-hours when the server stopped
+resumes as <code>interrupted</code> and waits for its window like a queued one.</p>
 <h2 id="limits-ownership-retention">Limits, ownership, retention<a class="headerlink" href="#limits-ownership-retention" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2056,9 +2185,29 @@ until the operator sets <code>CLEF_WEBHOOK_ALLOW</code></strong> to a comma-sepa
 <td>Longest delay between two attempts.</td>
 </tr>
 <tr>
+<td><code>CLEF_JOB_ACTIVE</code></td>
+<td>4</td>
+<td>Jobs that take turns at once (<code>&gt;= 1</code>). <code>1</code> runs them strictly one after another.</td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_AGING_S</code></td>
+<td>3600</td>
+<td>A waiting job rises one priority class per this many seconds without a turn; <code>0</code> = no aging.</td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_TZ</code></td>
+<td><code>UTC</code></td>
+<td>Time zone of job windows that give no <code>tz</code>, and of <code>CLEF_JOB_WINDOW</code>.</td>
+</tr>
+<tr>
+<td><code>CLEF_JOB_WINDOW</code></td>
+<td>empty</td>
+<td>Default window <code>HH:MM-HH:MM</code> for jobs without <code>schedule</code>; empty = always open.</td>
+</tr>
+<tr>
 <td><code>CLEF_JOB_MAX_RESUMES</code></td>
 <td>3</td>
-<td>A job interrupted more often than this fails (<code>interrupted N times, giving up</code>); <code>0</code> = no limit.</td>
+<td>A job that crashed the server (found <code>running</code> at startup) more often than this fails (<code>interrupted N times, giving up</code>); clean restarts do not count; <code>0</code> = no limit.</td>
 </tr>
 </tbody>
 </table>
@@ -2066,25 +2215,110 @@ until the operator sets <code>CLEF_WEBHOOK_ALLOW</code></strong> to a comma-sepa
 texts fit, 50 000 long ones may not. Media in <code>systemone</code> jobs counts too. Per-record limits (labels, images,
 tokens) are the same as for the synchronous endpoints.</p>
 <p><strong>Ownership.</strong> With auth off, every caller sees every job. With <code>CLEF_API_KEY</code> / <code>CLEF_API_KEYS</code> on, a job is
-owned by the key name that submitted it (<code>default</code> for <code>CLEF_API_KEY</code>); other keys get <code>404</code> for it (not <code>403</code>)
-and do not see it in <code>GET /v1/jobs</code>. There is no admin view: stop the server and read <code>jobs.db</code> if you need
-one. Jobs submitted while auth was off stay visible to all keys after you turn it on. Webhook URLs and
-metadata are visible to the owner.</p>
-<p><strong>Persistence and restart.</strong> Jobs, their submitted payloads (your inputs) and result rows live in SQLite
-(<code>&lt;state dir&gt;/jobs.db</code>, in clear text) and survive restarts.
-Rows are written after every chunk. If the server stops while a job runs it is marked <code>interrupted</code> and, on the
-next start, <strong>resumed</strong> from the last stored row (<code>resumes</code> counts how often), ahead of queued jobs. A job that
-keeps killing the process would otherwise be resumed forever, so after <code>CLEF_JOB_MAX_RESUMES</code> interruptions
-(default 3) it is failed with <code>interrupted N times, giving up</code> and a WARNING is logged. The built-in kinds (including
+owned by the key name that submitted it (<code>default</code> for <code>CLEF_API_KEY</code>); another key without the <code>admin</code> scope
+gets <code>404</code> for it (not <code>403</code>) and does not see it in <code>GET /v1/jobs</code>, while a key without the <code>jobs</code> scope gets
+<code>403</code> on every <code>/v1/jobs</code> route. Keys with the <code>admin</code> scope (and the env keys, which have every scope) see
+all jobs, including those submitted while auth was off (no owner), which nobody else sees once auth is on.
+Webhook URLs and metadata are visible to the owner and to admins.</p>
+<p><strong>Persistence and restart.</strong> Jobs, their submitted payloads (your inputs) and result rows live in the database
+(SQLite <code>&lt;state dir&gt;/clef.db</code> by default, or Postgres; in clear text, see <a href="#storage">Storage</a>) and survive restarts.
+Rows are written after every chunk, in one transaction that appends after the last stored row, so a chunk that
+was in flight when the server stopped is either stored whole or computed again: never a gap, never a duplicate. If
+the server stops while a job runs it is marked <code>interrupted</code> and, on the next start, <strong>resumed</strong> from the last
+stored row, ahead of queued jobs. <code>resumes</code> counts <strong>crashes</strong> only: a clean stop (<code>clef stop</code>, Ctrl-C, SIGTERM,
+anything that runs the shutdown) parks the job without counting it, while a job found still <code>running</code> at
+startup (the process died) counts one. A job that keeps killing the process would otherwise be resumed forever,
+so after <code>CLEF_JOB_MAX_RESUMES</code> crashes (default 3) it is failed with <code>interrupted N times, giving up</code> and a
+WARNING is logged. A job whose cancel was requested (<code>cancel_requested: true</code>) before a stop or crash is not
+resumed: it ends <code>cancelled</code> (with its <code>job.cancelled</code> webhook), at shutdown or at the next start. The final
+status and the pending webhook record are written in one transaction, so a crash cannot leave a finished job
+without its event. The built-in kinds (including
 <code>evaluate</code>) resume exactly; a custom kind that does not declare itself resumable restarts from item 0. Resuming re-reads
 the stored payload, which already holds the saved classifier as it was at submit. Finished jobs are purged on
-their own timer (every ten minutes), also while a job is running. Delete the file to drop all jobs (an older
-<code>jobs.db</code> is upgraded in place).</p>
-<p><strong>Throughput.</strong> Jobs run one at a time, FIFO, at the engine's batch speed, shared with interactive traffic.
-Priority between jobs, and a priority lane inside the engine, do not exist. Measured on the RX 7900 XTX (bf16,
-short tickets): a 500-item <code>classify</code> job ran at ~15 items/s (32 s); meanwhile interactive <code>/v1/classify</code> calls
-took p50 422 / p95 458 ms instead of 109 / 118 ms idle. They are never starved, but expect them to be ~4x slower
-while a large job runs.</p>
+their own timer (every ten minutes), also while a job is running.</p>
+<p>A job remembers the model it was submitted for (<code>"id@revision"</code>, from the server that took it). If the server now
+serves another model or revision, the job fails with <code>job was submitted for &lt;model&gt;, this server serves &lt;ref&gt;</code> instead
+of mixing two models in one result set; jobs from before v3.2 have no recorded model and run as before. A <code>model</code> in
+the payload that this server does not serve is <code>404</code> at submit. With a saved classifier, the payload may also give
+<code>"version": N</code> (default: the latest); the stored snapshot records the version it copied as <code>classifier_version</code>.</p>
+<h2 id="storage">Storage<a class="headerlink" href="#storage" title="Permanent link">&para;</a></h2>
+<p>One database holds jobs, result rows, saved classifiers (with their versions) and the audit log; the v3.2 key,
+review, router and batch tables live there too. One clef server per database: Postgres is for operations
+(backups, one place for everything), not for several servers sharing a queue.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CLEF_DATABASE_URL</code></td>
+<td>unset</td>
+<td>Unset: SQLite <code>&lt;state dir&gt;/clef.db</code>. <code>postgresql://user:pass@host:5432/clef</code> (or <code>postgres://</code>) uses Postgres and needs <code>pip install 'clef-local[postgres]'</code> (psycopg 3).</td>
+</tr>
+<tr>
+<td><code>CLEF_DATABASE_POOL_SIZE</code></td>
+<td>5</td>
+<td>Postgres connections (plus as many again under load); ignored on SQLite.</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>Upgrades are automatic.</strong> Every start runs the schema migrations (Alembic, <code>upgrade heads</code>) before serving.
+  <code>clef db current</code> shows the schema version, <code>clef db upgrade</code> runs the migrations with the server stopped, and
+  <code>clef doctor</code> and <code>GET /health</code> (<code>"db": {"dialect", "schema_version", "url"}</code>) report it. The password in the
+  URL is always shown as <code>***</code>.</li>
+<li><strong>From v3.1.</strong> On the first start with the default URL, <code>&lt;state dir&gt;/jobs.db</code> is copied to <code>clef.db</code> (once;
+  logged) with SQLite's online backup API, and the original is renamed <code>jobs.db.migrated</code> (delete it once you are
+  happy). The copy needs the file to itself: if a v3.1 server still has it open, startup (and <code>clef db upgrade</code>)
+  stops with <code>jobs.db is in use by another process; stop the old server first</code> and changes nothing. If both
+  <code>clef.db</code> and <code>jobs.db</code> exist, <code>clef.db</code> is used and a WARNING is logged. The saved classifiers in
+  <code>&lt;state dir&gt;/classifiers/*.json</code> are imported once as version 1 of each (no owner); the folder is then renamed
+  <code>classifiers.imported/</code> (unreadable files are logged and skipped, and move there with the rest: fix one and
+  <code>PUT</code> it to import it). <code>clef classifiers export [--out
+  DIR] [--name N]</code> writes the latest version of each back to <code>&lt;DIR&gt;/&lt;name&gt;.json</code> (the v3.1 file format plus
+  <code>version</code>).</li>
+<li><strong>SQLite to Postgres.</strong> Stop the server, then <code>clef db copy --from sqlite:///&lt;state dir&gt;/clef.db --to
+  postgresql://user:pass@host/clef [--yes]</code>: every table, 1000 rows at a time, in one transaction on the target,
+  which is migrated first and must be empty. Then start the server with <code>CLEF_DATABASE_URL</code> set to the target.
+  The source is not changed; it must be at the current schema (start the server on it once, or <code>clef db upgrade</code>).</li>
+<li><strong>Backups.</strong> <code>clef backup [--out PATH]</code> copies the SQLite database with SQLite's online backup API, safe while the
+  server runs, to <code>&lt;state dir&gt;/backups/clef-&lt;UTC time&gt;.db</code> (readable by you only). For Postgres it prints a
+  <code>pg_dump</code> command instead (exit 2).</li>
+<li><strong>One server per database.</strong> On Postgres a server holds an advisory lock for its lifetime; a second server on the
+  same database stops at startup with <code>another clef server holds this database (one server per database)</code>. The
+  server checks every 10 s that it still holds the lock; if it lost it (its database connection was cut or
+  killed), it logs a CRITICAL line and exits with status 3 at once, so run it under a supervisor that restarts it
+  (systemd <code>Restart=on-failure</code>, Docker <code>restart: unless-stopped</code>). The CLI commands do not take the lock. On SQLite nothing enforces it: do not point two servers at one state dir
+  (each would recover the other's running job at startup).</li>
+<li><strong>Errors.</strong> A database that cannot be reached answers <code>503 database unavailable</code>. Drop everything by deleting
+  <code>clef.db</code> (SQLite) or the database (Postgres) with the server stopped.</li>
+</ul>
+<p><strong>Throughput.</strong> Up to <code>CLEF_JOB_ACTIVE</code> jobs take turns, one chunk at a time, at the engine's batch speed, shared with
+interactive traffic; priority, fair share and windows between jobs are in <a href="#scheduling">Scheduling</a>. Inside the engine, job work (<code>ctx.decide</code>, including the <code>evaluate</code> kind) is
+in the background lane and requests (<code>ctx.infer</code>) in the interactive lane:</p>
+<ul>
+<li>A micro-batch holds one class. Interactive goes first whenever any is queued, even if it arrived during a
+  batch window opened by job work.</li>
+<li>Classes are not mixed to fill a micro-batch. The model is compute-bound, so a request riding in a batch of 8
+  job records would wait for all 8; running it alone costs the job one extra host overhead instead.</li>
+<li>Jobs are not starved by steady traffic: after <code>CLEF_INTERACTIVE_BURST</code> (default 8) interactive micro-batches in
+  a row while job work waited, one job micro-batch runs. Lower it to favour jobs, raise it to favour requests.</li>
+<li>Two opt-in flags raise a job's own throughput without changing any of this (one GPU worker, one job chunk in
+  flight, interactive first): <code>CLEF_JOB_SORT_WINDOW=N</code> takes N items at a time and sends them to the engine sorted by
+  token length (less padding), and <code>CLEF_TOKENIZE_AHEAD=1</code> encodes the next window on CPU threads while the current
+  one is on the GPU. Results stay in input order, rows are persisted a whole window at a time and a resume
+  recomputes at most one window. They apply to the <code>classify</code>, <code>score</code>, <code>systemone</code>, <code>evaluate</code> and <code>batch</code> kinds,
+  are off by default, and wait for a GPU measurement (<a href="../performance/">Performance</a>).</li>
+<li><code>GET /v1/stats</code> reports <code>queue_depth_by_class</code> (<code>interactive</code>, <code>background</code>) next to the total <code>queue_depth</code>.</li>
+</ul>
+<p>Measured on the RX 7900 XTX (bf16, short tickets) before the lane existed: a 500-item <code>classify</code> job ran at
+~15 items/s (32 s); meanwhile interactive <code>/v1/classify</code> calls took p50 422 / p95 458 ms instead of 109 / 118 ms
+idle. With the lane the wait is bounded by the job micro-batch already being computed; the new numbers are pending
+a GPU run.</p>
 <h2 id="writing-a-job-kind">Writing a job kind<a class="headerlink" href="#writing-a-job-kind" title="Permanent link">&para;</a></h2>
 <p>A feature module registers <code>{"validate": fn, "run": async_fn}</code> in <code>ctx.extra["job_kinds"]</code> (use <code>setdefault</code>). An
 optional <code>"snapshot": fn(payload, parsed) -&gt; payload</code> rewrites what is stored at submit (the built-in kinds use it
@@ -2100,8 +2334,12 @@ to copy a saved classifier into the payload):</p>
 <a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>    <span class="k">return</span> <span class="p">{</span><span class="s2">"summary"</span><span class="p">:</span> <span class="s2">"stored as job.result"</span><span class="p">}</span>
 </code></pre></div>
 <p>Rows containing an <code>"error"</code> key count as failed, and the circuit breaker above applies to every kind (it raises
-<code>JobAborted</code> from <code>add_items</code>). Call the model with <code>ctx.decide(requests, batch=True)</code>, keep one
-call in flight, and check <code>job.cancelled</code> between calls. Add <code>"resumable": True</code> only if <code>run</code> honours
+<code>JobAborted</code> from <code>add_items</code>). Call the model with <code>job.decide(requests)</code> (it waits for the job's turn in the scheduler; <code>ctx.decide</code> directly
+bypasses the turns), keep one call in flight, and check <code>job.cancelled</code> between calls (it also turns true when the job
+expires). Other optional kind keys: <code>"records": fn(parsed) -&gt; int</code> (records reserved from the daily quota at submit;
+default the length of <code>inputs</code> / <code>requests</code>) and <code>"completed_if_all_failed": True</code> (a run where every item failed still
+ends <code>succeeded</code>; otherwise it ends <code>failed</code>). <code>job.add_items(rows, tokens=N)</code> adds <code>N</code> to the job's <code>tokens</code>; without
+<code>tokens</code> it sums the rows' <code>input_tokens</code>. Add <code>"resumable": True</code> only if <code>run</code> honours
 <code>job.resume_from</code> (the number of rows already stored) and does not re-emit them.</p>
 
 
@@ -2157,13 +2395,13 @@ call in flight, and check <code>job.cancelled</code> between calls. Add <code>"r
         
         
           
-          <a href="../memory/" class="md-footer__link md-footer__link--next" aria-label="Next: Smaller GPUs">
+          <a href="../router/" class="md-footer__link md-footer__link--next" aria-label="Next: Router &amp; Review">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Smaller GPUs
+                Router & Review
               </div>
             </div>
             <div class="md-footer__button md-icon">

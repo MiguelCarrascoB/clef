@@ -708,6 +708,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../router/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Router & Review
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../memory/" class="md-nav__link">
         
   
@@ -1580,7 +1608,12 @@
   lock file) and <code>causal-conv1d</code>; <code>clef doctor</code> shows which one is missing.</li>
 <li><strong><code>causal-conv1d</code> fails to build</strong>: it compiles CUDA code and needs <code>nvcc</code> matching the torch CUDA version, a C++
   compiler and <code>ninja</code>. Prefer a prebuilt wheel matching your torch/CUDA/Python, or install the CUDA toolkit of the same
-  major.minor as <code>torch.version.cuda</code>. If it cannot be built, run without it; correctness is unchanged.</li>
+  major.minor as <code>torch.version.cuda</code>. If it cannot be built, run without it; correctness is unchanged.
+  Built from source on WSL2 + Ubuntu 24.04 with <code>cuda-toolkit-12-8</code> (do not install the <code>cuda</code> or <code>cuda-drivers</code>
+  metapackages inside WSL), <code>uv pip install ninja setuptools wheel</code>, then <code>CUDA_HOME=/usr/local/cuda-12.8
+  TORCH_CUDA_ARCH_LIST=8.9 MAX_JOBS=6 uv pip install causal-conv1d --no-build-isolation</code> (set the arch list to your
+  card; it took about 23 minutes). On an RTX 4070 Ti it did not change speed measurably (p50 170.3 to 167.5 ms), so
+  skipping it costs little there.</li>
 <li><strong><code>CLEF_QUANT</code> errors</strong>: on CUDA <code>int8</code> and <code>nf4</code> use <code>bitsandbytes</code> (<code>pip install bitsandbytes</code>, part of the <code>cuda</code>
   extra); if it cannot find the CUDA libraries, check <code>python -m bitsandbytes</code>. <code>CLEF_QUANT_BACKEND=torchao</code> needs
   <code>pip install "clef-local[quant]"</code>. <code>nf4</code> exists only in bitsandbytes. Quantized probabilities differ slightly from
@@ -1670,11 +1703,14 @@
   / CIDR for a private address) must be listed. Link-local, multicast and reserved addresses are always refused.</li>
 <li><strong>A webhook never arrives</strong>: check <code>webhook.deliveries</code> in <code>GET /v1/jobs/{id}</code> (<code>last_status</code>, <code>last_error</code>). The
   allow-list is re-checked, and the host re-resolved, on every attempt. Retries stop after <code>CLEF_WEBHOOK_ATTEMPTS</code>.</li>
-<li><strong><code>404</code> for a job you submitted</strong>: another API key. Jobs are visible only to the key that created them.</li>
+<li><strong><code>404</code> for a job you submitted</strong>: another API key. Jobs are visible only to the key that created them (and to
+  keys with the <code>admin</code> scope); a key without the <code>jobs</code> scope gets <code>403</code>.</li>
 <li><strong><code>409</code> on <code>POST /v1/jobs</code></strong>: <code>CLEF_MAX_JOBS</code> queued or running jobs; retry after <code>Retry-After</code>. On cancel / delete
   it means the job is already finished / still active.</li>
-<li><strong>A job stays <code>queued</code></strong>: jobs run one at a time, in order; check <code>GET /v1/jobs?status=running</code>. While the model is
-  loading a job waits instead of failing.</li>
+<li><strong>A job stays <code>queued</code></strong>: look at <code>waiting_reason</code> in <code>GET /v1/jobs/{id}</code>: <code>off_hours</code> (its window opens at
+  <code>next_window_at</code>; <code>urgent</code> skips it), <code>active_limit</code> (<code>CLEF_JOB_ACTIVE</code> jobs are already running) or empty (it is
+  about to be admitted). A job that stays <code>running</code> without progress and says <code>off_hours</code> or <code>turn</code> is waiting for
+  its window or for other jobs' chunks. While the model is loading a job waits instead of failing.</li>
 <li><strong><code>400 missing_schema</code> from <code>/v1/chat/completions</code></strong>: clef decides, it does not generate text. Send a
   <code>response_format</code> JSON schema (or one forced tool); see <a href="../openai-compat/">compatibility</a>.</li>
 <li><strong><code>huggingface_hub</code> cannot find the model</strong>: pass the full route, <code>model="http://127.0.0.1:8910/hf/models/clef-flash"</code>,
@@ -1700,7 +1736,8 @@
 <li><strong>Not enough disk space</strong>: the weights are ~19 GB; <code>clef doctor</code> and <code>clef download</code> check this up front.</li>
 <li><strong>Where are the logs / state?</strong> <code>clef logs -f</code>. The state directory is <code>~/.local/state/clef</code> on Linux,
   <code>~/Library/Application Support/clef</code> on macOS, <code>%LOCALAPPDATA%\clef</code> on Windows (<code>CLEF_STATE_DIR</code> overrides;
-  <code>CLEF_LOG_DIR</code> is a legacy alias). It holds <code>server.log</code>, <code>server.pid</code>, <code>classifiers/</code> and <code>jobs.db</code>.</li>
+  <code>CLEF_LOG_DIR</code> is a legacy alias). It holds <code>server.log</code>, <code>server.pid</code> and <code>clef.db</code> (jobs and saved classifiers;
+  after an upgrade from v3.1 also <code>jobs.db.migrated</code> and <code>classifiers.imported/</code>, which you can delete).</li>
 <li><strong>Upgrading from v2</strong>: see the migration notes in the <a href="../changelog/">CHANGELOG</a>.</li>
 </ul>
 
