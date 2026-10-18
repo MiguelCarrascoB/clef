@@ -12,7 +12,8 @@
   `CLEF_LLM_API_KEY`) is set; `CLEF_LLM_BASE_URL` / `CLEF_LLM_MODEL` point it at ollama, LM Studio or OpenAI. New
   `CLEF_ROUTER_*`, `CLEF_LLM_*` and `CLEF_REVIEW_TTL_DAYS` settings, `docs/router.md`, a console **Review** screen,
   router and review helpers in the Python and JS clients, and an LLM line in `clef doctor`.
-- Saved classifiers accept `review_threshold` (single-label): interactive runs below it are queued for review. Review
+- Saved classifiers accept `review_threshold` (single-label): interactive runs below it, by the classifier's owner
+  or an admin, are queued for review (another key's runs are never captured, so its text does not reach the owner). Review
   input text is dropped when resolved and after `CLEF_REVIEW_TTL_DAYS` (30).
 - **Job scheduler (E1)**: up to `CLEF_JOB_ACTIVE` (default 4) jobs run in turns, one chunk in flight across all of
   them, so interactive requests keep their priority. `POST /v1/jobs` takes `priority` (`low|normal|high`; strict

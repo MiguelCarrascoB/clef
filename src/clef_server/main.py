@@ -875,11 +875,20 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             raise ApiError(404, f"classifier {name!r} not found")
         return {"deleted": name}
 
-    async def capture_review(name: str, doc: dict[str, Any], inputs: list[Any], results: list[Any]) -> None:
-        """E2: single-label results below review_threshold become Review items (router.py)."""
+    async def capture_review(
+        request: Request, name: str, doc: dict[str, Any], inputs: list[Any], results: list[Any]
+    ) -> None:
+        """E2: single-label results below review_threshold become Review items (router.py).
+
+        Only for the classifier's owner or an admin (auth off counts as admin): the items land in the owner's
+        queue, so capturing another key's run would hand that key's input text to the owner. Such a run is not
+        captured at all (not under the caller either: the caller cannot act on another owner's classifier)."""
         capture = ctx.extra.get("review_capture")  # set by the router feature; ctx exists by request time
-        if capture is not None and doc.get("review_threshold") is not None:
-            await capture(name, doc, inputs, results)
+        if capture is None or doc.get("review_threshold") is None:
+            return
+        if getattr(request.state, "key_name", None) != doc.get("owner") and not is_admin(request):
+            return
+        await capture(name, doc, inputs, results)
 
     def run_threshold(doc: dict[str, Any], given: float | None) -> float | None:
         if not doc.get("multi_label"):
@@ -918,7 +927,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             **common,
         )
         if not body.images and not body.videos:  # E2: results below review_threshold go to the Review queue
-            await capture_review(name, doc, [body.input], [out])
+            await capture_review(request, name, doc, [body.input], [out])
         return out
 
     @v1.post(
@@ -944,7 +953,7 @@ def create_app(cfg: Config | None = None, engine: Any | None = None) -> FastAPI:
             model=body.model,
             classifier=name,
         )
-        await capture_review(name, doc, body.inputs, out["results"])
+        await capture_review(request, name, doc, body.inputs, out["results"])
         return out
 
     # ---- observability

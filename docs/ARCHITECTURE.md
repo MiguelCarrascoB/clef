@@ -1576,7 +1576,10 @@ or edit, at once). One seed is enough to start the normal loop (`[seed, other]`)
 Low-confidence items from saved classifiers: `ClassifierDef` gains `review_threshold: float | None` (0..1, default
 None = off). On interactive single-label runs (`POST /v1/classifiers/{name}[/batch]`, not jobs), a result with
 `confidence < review_threshold` creates a `review` row `kind=item, reason=low_confidence, router=NULL` with the
-input. Media inputs are never captured.
+input, in the classifier owner's queue. Only runs by the owner or an admin (auth off counts as admin) are captured:
+another key's run of the classifier is not captured at all, because storing it under the owner would hand that
+key's input text to the owner, and the caller cannot act on another owner's classifier review. A classifier with no
+owner (made while auth was off) is then captured only for admins. Media inputs are never captured.
 
 Routes (scopes from Keys; owner-scoped like jobs, admins see all; OpenAPI models for every body):
 

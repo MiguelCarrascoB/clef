@@ -86,7 +86,9 @@ again as a new classifier version.
 
 One table holds router proposals and low-confidence items. Items come from routers, and from any saved classifier with
 a `review_threshold` (single-label, 0..1): interactive runs (`POST /v1/classifiers/{name}[/batch]`, not jobs) whose
-confidence is below it are queued. Media inputs are never captured.
+confidence is below it are queued, in the classifier owner's queue. Only runs by the owner or an admin are captured
+(with auth off, every run): when another key runs your classifier, its inputs are never stored for review, so its
+text does not reach you. Media inputs are never captured.
 
 Labelling an item re-classifies its text under the active labels **before** the text is purged and records whether clef
 agrees (`prediction.recheck`); the label also counts against later proposals that would absorb the same text. Input text

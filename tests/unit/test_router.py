@@ -798,6 +798,38 @@ def test_review_threshold_queues_low_confidence_classifier_results(env):
     assert row["state"] == "resolved" and row["input"] is None and "recheck" in row["prediction"]
 
 
+def test_review_capture_only_stores_inputs_of_the_classifier_owner_or_an_admin():
+    """Review E/F #3: bob running alice's classifier must not put his text in her review queue (nor his)."""
+    client, _, app, _ = make(llm=False, api_key="admin-secret-xyz-1234567890")
+    with client:
+        alice = hdr(add_key(app, "alice", "classify,classifiers"))
+        bob = hdr(add_key(app, "bob", "classify,classifiers"))
+        admin = {"X-API-Key": "admin-secret-xyz-1234567890"}
+        r = client.put(
+            "/v1/classifiers/mood",
+            headers=alice,
+            json={
+                "kind": "classify",
+                "labels": {"billing": "money", "technical": "bugs"},
+                "review_threshold": 0.99,
+            },
+        )
+        assert r.status_code == 200
+        assert (
+            client.post("/v1/classifiers/mood", headers=bob, json={"input": "bob private vague"}).status_code
+            == 200
+        )
+        batch = client.post("/v1/classifiers/mood/batch", headers=bob, json={"inputs": ["bob vague two"]})
+        assert batch.status_code == 200
+        everything = client.get("/v1/review", headers=admin).json()["items"]
+        assert all("bob" not in (i["input"] or "") for i in everything)  # stored nowhere
+        assert client.get("/v1/review", headers=bob).json()["items"] == []
+        client.post("/v1/classifiers/mood", headers=alice, json={"input": "alice vague"})
+        client.post("/v1/classifiers/mood", headers=admin, json={"input": "admin vague"})
+        mine = [i["input"] for i in client.get("/v1/review", headers=alice).json()["items"]]
+        assert sorted(mine) == ["admin vague", "alice vague"]
+
+
 def test_review_threshold_is_off_by_default_and_checked(env):
     client, _, _, _ = env
     client.put("/v1/classifiers/plain", json={"labels": ["a", "b"]})
