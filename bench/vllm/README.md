@@ -12,8 +12,11 @@ bash bench/vllm/vllm_check.sh                # full: 200 records, c=1,8,16,32, 1
 ```
 
 Everything lands in `bench/out/vllm/`; the last thing printed is `summary.md`, which ends in the decision table. The script
-refuses to start (exit 2) if a clef server or a container is up, a port is taken, or the device already uses more than
-`IDLE_MAX_GB` (4) of VRAM. It always removes the container on exit. Exit 0 means the verdict is ADOPT.
+refuses to start (exit 2) if a clef server or a container is up, a port is taken, the device already uses more than
+`IDLE_MAX_GB` (4) of VRAM, or the VRAM cannot be read at all (`FORCE=1` overrides). A refused run touches nothing.
+Once preflight passed, the run cleans up on any exit, but only what it started: the container id it wrote and the clef
+servers of its own state dirs (`bench/out/vllm/run-<timestamp>-<pid>/`), never another run's. Exit 0 means the
+verdict is ADOPT.
 
 Before running, check no one else uses the card: `run-on gpu --ls` and `/opt/rocm-wsl/bin/amd-smi`.
 
@@ -32,7 +35,7 @@ Before running, check no one else uses the card: `run-on gpu --ls` and `/opt/roc
    `src/clef_server/models/clef_release.py`), then `vllm_client.py dump` (the same records through `/v1/systemone`),
    `bench/parity.py --compare` against step 3, then `load.py` on the same levels. Request bodies are `clef bench`'s, so
    both servers get identical requests.
-6. **Teardown** (`docker rm -f`; the image stays, `docker rmi` it to get ~25 GB back) and `vllm_table.py` -> `summary.md`.
+6. **Teardown** (`docker rm -f <this run's container id>`; the image stays, `docker rmi` it to get ~25 GB back) and `vllm_table.py` -> `summary.md`.
 
 Load: concurrency 1 / 8 / 16 / 32 (override `LEVELS=`), p50 / p95 / p99, req/s, and device VRAM peak (`torch.cuda.mem_get_info`,
 device-wide, minus the idle value from before the server started). `MIXED=1` uses mixed-length states.
